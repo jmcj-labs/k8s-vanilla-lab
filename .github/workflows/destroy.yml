@@ -1,0 +1,87 @@
+name: Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "destroy" to confirm'
+        required: true
+  schedule:
+    - cron: "0 22 * * *" # 22:00 UTC nightly
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tofu/envs/lab
+
+    steps:
+      - name: Validate confirmation (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
+            echo "Confirmation failed. Type 'destroy' to proceed."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.8.0
+          tofu_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Generate backend.hcl
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          cat > backend.hcl << BACKENDCFG
+          bucket         = "${TF_BACKEND_BUCKET}"
+          key            = "k8s-vanilla-lab/terraform.tfstate"
+          region         = "${AWS_REGION}"
+          encrypt        = true
+          dynamodb_table = "k8s-vanilla-lab-tflock"
+          BACKENDCFG
+
+      - name: OpenTofu Init
+        run: tofu init -backend-config=backend.hcl
+
+      - name: OpenTofu Destroy
+        id: destroy
+        env:
+          TF_VAR_my_ip: ${{ vars.TF_VAR_MY_IP }}
+          TF_VAR_ssh_key_name: ${{ vars.TF_VAR_SSH_KEY_NAME }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_aws_profile: ""
+        run: tofu destroy -auto-approve -no-color
+
+      - name: Notify Slack
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          ACTOR: ${{ github.actor }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL}" ]; then exit 0; fi
+          COLOR=$([[ "${STATUS}" == "success" ]] && echo "good" || echo "danger")
+          TEXT="k8s-vanilla-lab destroy *${STATUS}* (trigger: ${TRIGGER}, actor: ${ACTOR}) | <${RUN_URL}|View run>"
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{\"attachments\":[{\"color\":\"${COLOR}\",\"text\":\"${TEXT}\"}]}"
