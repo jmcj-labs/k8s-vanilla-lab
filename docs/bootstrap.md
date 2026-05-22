@@ -200,13 +200,22 @@ A role ARN is not a credential — it is a resource identifier. Storing it as a 
 
 ### 6.2 Set remaining Variables
 
-The destroy and validate workflows also need:
+All three workflows (validate, apply, destroy) read the following **Variables** from
+**Settings → Secrets and variables → Actions → Variables**:
 
-| Variable | Example value | Notes |
-|----------|---------------|-------|
-| `AWS_REGION` | `eu-west-1` | Must match the region used for bootstrap |
-| `TF_VAR_MY_IP` | `203.0.113.42/32` | Your current public IP; used for SSH and K8s API security group rules |
-| `TF_VAR_SSH_KEY_NAME` | `k8s-vanilla-lab` | Name of the EC2 key pair in your account |
+| Variable | Example value | Required by | Notes |
+|----------|---------------|-------------|-------|
+| `AWS_REGION` | `eu-west-1` | all | Must match the region used for bootstrap |
+| `TF_BACKEND_BUCKET` | `k8s-vanilla-lab-tfstate-487985088962` | all | S3 bucket name from bootstrap output |
+| `TF_VAR_MY_IP` | `203.0.113.42/32` | validate, apply, destroy | Your public IP for SSH and K8s API security group rules |
+| `TF_VAR_SSH_KEY_NAME` | `k8s-vanilla-lab` | validate, apply, destroy | Name of the EC2 key pair in your account |
+| `CLUSTER_NAME` | `k8s-vanilla-lab` | apply (smoke-test) | Cluster name; defaults to `k8s-vanilla-lab` if unset |
+
+**Secrets** (Settings → Secrets and variables → Actions → **Secrets**):
+
+| Secret | Notes |
+|--------|-------|
+| `SLACK_WEBHOOK_URL` | Optional. Incoming webhook URL for apply/destroy notifications. Skip if not using Slack. |
 
 ---
 
