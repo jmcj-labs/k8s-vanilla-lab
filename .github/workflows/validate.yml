@@ -1,0 +1,72 @@
+name: Validate
+
+on:
+  pull_request:
+    paths:
+      - "tofu/**"
+      - "bootstrap/**"
+      - "Makefile"
+      - ".github/workflows/validate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tofu/**"
+      - "bootstrap/**"
+      - "Makefile"
+      - ".github/workflows/validate.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    name: Format · Validate · Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tofu/envs/lab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.8.0
+          tofu_wrapper: false
+
+      - name: Validate (fmt + syntax, no AWS needed)
+        working-directory: .
+        run: make validate
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Generate backend.hcl
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          cat > backend.hcl << BACKENDCFG
+          bucket         = "${TF_BACKEND_BUCKET}"
+          key            = "k8s-vanilla-lab/terraform.tfstate"
+          region         = "${AWS_REGION}"
+          encrypt        = true
+          dynamodb_table = "k8s-vanilla-lab-tflock"
+          BACKENDCFG
+
+      - name: OpenTofu Init
+        run: tofu init -backend-config=backend.hcl
+
+      - name: OpenTofu Plan
+        env:
+          TF_VAR_my_ip: ${{ vars.TF_VAR_MY_IP }}
+          TF_VAR_ssh_key_name: ${{ vars.TF_VAR_SSH_KEY_NAME }}
+          TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+          TF_VAR_aws_profile: ""
+        run: tofu plan -no-color
