@@ -1,0 +1,197 @@
+#!/bin/bash
+# Control Plane bootstrap for Kubernetes (K8s 1.35.5)
+# Purpose: Initialize control plane with kubeadm, configure API server, store join data in SSM
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, kubernetes_version, control_plane_public_ip, ssm_parameter_path
+
+set -euo pipefail
+exec >> /var/log/k8s-cp-bootstrap.log 2>&1
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log "=== Starting Control Plane bootstrap ==="
+
+# Step 1: Wait for common.yaml bootstrap to complete
+log "Step 1/6: Waiting for common bootstrap to complete"
+TIMEOUT=600  # 10 minutes
+ELAPSED=0
+INTERVAL=10
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if grep -q "Step 8/8: Enabling kubelet service" /var/log/k8s-bootstrap.log 2>/dev/null && \
+     grep -q "Common bootstrap completed successfully" /var/log/k8s-bootstrap.log 2>/dev/null; then
+    log "✓ Common bootstrap completed"
+    break
+  fi
+  
+  if [ $${ELAPSED} -eq 0 ]; then
+    log "Waiting for common bootstrap... (timeout: $${TIMEOUT}s)"
+  fi
+  
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+  
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
+    log "Last 20 lines of bootstrap log:"
+    tail -20 /var/log/k8s-bootstrap.log || true
+    exit 1
+  fi
+done
+
+# Step 2: Create kubeadm config file
+log "Step 2/6: Creating kubeadm configuration"
+
+# CRITICAL: Use private IP for controlPlaneEndpoint so workers can join via internal network
+# Public IP is only added to certSANs for external kubectl access
+PRIVATE_IP=$$(hostname -i | awk '{print $$1}')
+log "Private IP: $${PRIVATE_IP}"
+log "Public IP: ${control_plane_public_ip}"
+
+cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v${kubernetes_version}.0
+clusterName: ${cluster_name}
+controlPlaneEndpoint: "$${PRIVATE_IP}:6443"
+apiServer:
+  certSANs:
+    - ${control_plane_public_ip}
+    - $${PRIVATE_IP}
+    - $(hostname -f)
+networking:
+  podSubnet: ${pod_cidr}
+  serviceSubnet: ${service_cidr}
+KUBEADM_EOF
+
+log "✓ kubeadm config created at /tmp/kubeadm-config.yaml"
+cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
+
+# Step 3: Initialize control plane with kubeadm
+log "Step 3/7: Running kubeadm init (this takes 2-5 minutes)"
+
+kubeadm init \
+  --config /tmp/kubeadm-config.yaml \
+  --upload-certs \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+if [ $? -ne 0 ]; then
+  log "✗ ERROR: kubeadm init failed"
+  exit 1
+fi
+
+log "✓ kubeadm init completed successfully"
+
+# Step 4: Configure kubectl for root user
+log "Step 4/7: Configuring kubectl for root user"
+mkdir -p /root/.kube
+cp -f /etc/kubernetes/admin.conf /root/.kube/config
+chown root:root /root/.kube/config
+chmod 600 /root/.kube/config
+log "✓ kubectl configured for root user"
+
+# Step 5: Install Flannel CNI
+log "Step 5/7: Installing Flannel CNI"
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+log "✓ Flannel CNI installed"
+
+# Step 6: Verify API server is responding
+log "Step 6/7: Verifying API server"
+TIMEOUT=120
+ELAPSED=0
+INTERVAL=5
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if kubectl get nodes &>/dev/null; then
+    log "✓ API server is responding"
+    kubectl get nodes >> /var/log/k8s-cp-bootstrap.log
+    break
+  fi
+  
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+  
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: API server not responding after $${TIMEOUT}s"
+    log "Kubelet status:"
+    systemctl status kubelet >> /var/log/k8s-cp-bootstrap.log || true
+    exit 1
+  fi
+done
+
+# Step 7: Generate and store join data in SSM Parameter Store
+log "Step 7/7: Generating join data and storing in SSM"
+
+# Generate bootstrap token with 24h TTL
+JOIN_TOKEN=$$(kubeadm token create --ttl 24h)
+log "✓ Bootstrap token generated (TTL: 24h)"
+
+# Extract CA certificate hash
+CA_CERT_HASH=$$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
+               openssl rsa -pubin -outform der 2>/dev/null | \
+               openssl dgst -sha256 -hex | \
+               sed 's/^.* //')
+log "✓ CA certificate hash extracted"
+
+# Get private IP for API endpoint (workers use private IP)
+PRIVATE_IP=$$(hostname -i | awk '{print $$1}')
+API_ENDPOINT="$${PRIVATE_IP}:6443"
+
+# Construct full join command
+JOIN_COMMAND="kubeadm join $${API_ENDPOINT} --token $${JOIN_TOKEN} --discovery-token-ca-cert-hash sha256:$${CA_CERT_HASH}"
+
+log "Storing parameters in SSM (region: ${aws_region}):"
+log "  - ${ssm_parameter_path}/join-command"
+log "  - ${ssm_parameter_path}/ca-cert-hash"
+log "  - ${ssm_parameter_path}/api-endpoint"
+
+# Store join command (SecureString)
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/join-command" \
+  --value "$${JOIN_COMMAND}" \
+  --type SecureString \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+# Store CA cert hash (SecureString)
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/ca-cert-hash" \
+  --value "$${CA_CERT_HASH}" \
+  --type SecureString \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+# Store API endpoint (SecureString)
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/api-endpoint" \
+  --value "$${API_ENDPOINT}" \
+  --type SecureString \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+if [ $? -eq 0 ]; then
+  log "✓ Join data stored in SSM successfully"
+else
+  log "✗ ERROR: Failed to store join data in SSM"
+  exit 1
+fi
+
+# Final status
+log "=== Control Plane bootstrap completed successfully ==="
+log "Cluster info:"
+kubectl cluster-info >> /var/log/k8s-cp-bootstrap.log
+log "Node status:"
+kubectl get nodes -o wide >> /var/log/k8s-cp-bootstrap.log
+log ""
+log "CNI: Flannel installed, pod networking is ready"
+log "Workers can now join using parameters from SSM: ${ssm_parameter_path}/*"

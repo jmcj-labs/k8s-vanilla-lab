@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars and fill in your values
+
+cluster_name = "k8s-vanilla-lab"
+aws_region   = "eu-west-1"
+environment  = "lab"
+
+# REQUIRED: Your public IP for SSH/API access
+my_ip = "1.2.3.4/32"
+
+# REQUIRED: Existing AWS SSH key pair name
+ssh_key_name = "your-key-name"
+
+# Optional: Override defaults
+# worker_count                  = 2
+# worker_capacity_type          = "spot"
+# control_plane_instance_type   = "t3.medium"
+# worker_instance_type          = "t3.medium"
+# vpc_cidr                      = "10.0.0.0/16"
+# public_subnet_cidr            = "10.0.1.0/24"
+# project                       = "k8s-vanilla-lab"
+# owner                         = "platform-engineering"

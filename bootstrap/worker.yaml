@@ -1,0 +1,160 @@
+#!/bin/bash
+# Worker bootstrap for Kubernetes (K8s 1.35.5)
+# Purpose: Join Kubernetes cluster as worker node via SSM Parameter Store
+# Variables: cluster_name, aws_region, kubernetes_version, ssm_join_token_path, ssm_ca_cert_hash_path
+
+set -euo pipefail
+exec > >(tee -a /var/log/k8s-worker-bootstrap.log)
+exec 2>&1
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log "=== Starting Worker bootstrap ==="
+
+# Step 1: Wait for common.yaml bootstrap to complete
+log "Step 1/5: Waiting for common bootstrap to complete"
+TIMEOUT=600  # 10 minutes
+ELAPSED=0
+INTERVAL=10
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if grep -q "Step 8/8: Enabling kubelet service" /var/log/k8s-bootstrap.log 2>/dev/null && \
+     grep -q "Common bootstrap completed successfully" /var/log/k8s-bootstrap.log 2>/dev/null; then
+    log "✓ Common bootstrap completed"
+    break
+  fi
+  
+  if [ $${ELAPSED} -eq 0 ]; then
+    log "Waiting for common bootstrap... (timeout: $${TIMEOUT}s)"
+  fi
+  
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+  
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
+    log "Last 20 lines of bootstrap log:"
+    tail -20 /var/log/k8s-bootstrap.log || true
+    exit 1
+  fi
+done
+
+# Step 2: Wait for control plane to store join parameters in SSM
+log "Step 2/5: Waiting for control plane join parameters in SSM"
+log "Polling SSM parameter: ${ssm_join_token_path}"
+
+TIMEOUT=900  # 15 minutes (CP init takes ~5min after common.yaml)
+ELAPSED=0
+INTERVAL=30  # Check every 30 seconds
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if [ $${ELAPSED} -eq 0 ]; then
+    log "Waiting for control plane to complete initialization..."
+    log "This can take up to 15 minutes (typical: 5-8 minutes)"
+  fi
+  
+  # Try to fetch join-command parameter from SSM
+  if aws ssm get-parameter \
+       --name "${ssm_join_token_path}" \
+       --region ${aws_region} \
+       --output text \
+       &>/dev/null; then
+    log "✓ Control plane join parameters available in SSM"
+    break
+  fi
+  
+  # Log progress every 2 minutes
+  if [ $$(($${ELAPSED} % 120)) -eq 0 ] && [ $${ELAPSED} -gt 0 ]; then
+    log "Still waiting for control plane... ($${ELAPSED}s elapsed)"
+  fi
+  
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+  
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: Control plane did not store join parameters within $${TIMEOUT}s"
+    log "Possible causes:"
+    log "  - Control plane bootstrap failed (check /var/log/k8s-cp-bootstrap.log on CP node)"
+    log "  - SSM IAM permissions missing on control plane"
+    log "  - Network connectivity issues"
+    log ""
+    log "To debug, SSH to control plane and check:"
+    log "  tail -100 /var/log/k8s-cp-bootstrap.log"
+    log "  kubectl get nodes"
+    log "  aws ssm get-parameter --name ${ssm_join_token_path} --region ${aws_region}"
+    exit 1
+  fi
+done
+
+# Step 3: Fetch join command from SSM
+log "Step 3/5: Fetching join command from SSM"
+
+JOIN_COMMAND=$$(aws ssm get-parameter \
+  --name "${ssm_join_token_path}" \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text \
+  --region ${aws_region})
+
+if [ -z "$${JOIN_COMMAND}" ]; then
+  log "✗ ERROR: Failed to retrieve join command from SSM"
+  exit 1
+fi
+
+log "✓ Join command retrieved from SSM"
+log "Join command: $${JOIN_COMMAND}"
+
+# Step 4: Join the cluster
+log "Step 4/5: Joining Kubernetes cluster"
+
+# Execute join with explicit CRI socket
+$${JOIN_COMMAND} --cri-socket unix:///run/containerd/containerd.sock \
+  2>&1 | tee -a /var/log/k8s-worker-bootstrap.log
+
+if [ $? -ne 0 ]; then
+  log "✗ ERROR: kubeadm join failed"
+  log "Check control plane connectivity and token validity (24h TTL)"
+  exit 1
+fi
+
+log "✓ kubeadm join completed successfully"
+
+# Step 5: Verify kubelet is running
+log "Step 5/5: Verifying kubelet service"
+
+TIMEOUT=60
+ELAPSED=0
+INTERVAL=5
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if systemctl is-active --quiet kubelet; then
+    log "✓ kubelet is active and running"
+    systemctl status kubelet --no-pager >> /var/log/k8s-worker-bootstrap.log
+    break
+  fi
+  
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+  
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: kubelet not running after $${TIMEOUT}s"
+    log "Kubelet status:"
+    systemctl status kubelet --no-pager >> /var/log/k8s-worker-bootstrap.log || true
+    log "Kubelet logs:"
+    journalctl -u kubelet -n 50 --no-pager >> /var/log/k8s-worker-bootstrap.log || true
+    exit 1
+  fi
+done
+
+# Final status
+WORKER_HOSTNAME=$$(hostname)
+log "=== Worker bootstrap completed successfully ==="
+log "Worker node: $${WORKER_HOSTNAME}"
+log "Cluster: ${cluster_name}"
+log "Region: ${aws_region}"
+log ""
+log "To verify from control plane:"
+log "  kubectl get nodes"
+log "  kubectl get nodes $${WORKER_HOSTNAME} -o wide"

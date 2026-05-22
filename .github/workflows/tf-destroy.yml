@@ -1,0 +1,123 @@
+name: OpenTofu Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type "destroy" to confirm cluster destruction'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: Destroy Infrastructure
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tofu/envs/lab
+
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirmation }}" != "destroy" ]; then
+            echo "❌ Confirmation failed. You must type 'destroy' to proceed."
+            exit 1
+          fi
+          echo "✓ Confirmation validated"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Setup OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.8.0
+          tofu_wrapper: false
+
+      - name: OpenTofu Init
+        run: tofu init
+
+      - name: OpenTofu Destroy
+        id: destroy
+        run: |
+          tofu destroy -auto-approve \
+            -var="my_ip=0.0.0.0/0" \
+            -var="ssh_key_name=ci-dummy-key"
+
+      - name: Post Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          ACTOR="${{ github.actor }}"
+          CLUSTER_NAME="k8s-vanilla-lab"
+          STATUS="${{ steps.destroy.outcome }}"
+          
+          if [ "$STATUS" == "success" ]; then
+            EMOJI="✅"
+            MESSAGE="Cluster destroyed successfully"
+          else
+            EMOJI="❌"
+            MESSAGE="Cluster destruction failed"
+          fi
+          
+          PAYLOAD=$(cat <<JSON
+          {
+            "text": "${EMOJI} *${MESSAGE}*",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "${EMOJI} Kubernetes Cluster Destroyed"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Cluster:*\n${CLUSTER_NAME}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\n${STATUS}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Triggered by:*\n${ACTOR}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Timestamp:*\n${TIMESTAMP}"
+                  }
+                ]
+              },
+              {
+                "type": "context",
+                "elements": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "GitHub Actions: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          )
+          
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL"
