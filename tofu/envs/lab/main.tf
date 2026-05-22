@@ -80,7 +80,7 @@ locals {
   # Kubernetes network configuration
   pod_cidr         = "10.244.0.0/16"
   service_cidr     = "10.96.0.0/12"
-  kubernetes_version = "1.35"
+  kubernetes_version = "1.35.5"
   
   # SSM parameter paths
   ssm_parameter_base = "/k8s/${var.cluster_name}"

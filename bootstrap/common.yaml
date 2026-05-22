@@ -47,7 +47,7 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 apt-get update
-apt-get install -y containerd.io
+apt-get install -y containerd.io=2.2.4-1~ubuntu.24.04~noble
 
 # Step 2a: Configure containerd with SystemdCgroup
 log "Step 2a/8: Configuring containerd with systemd cgroup driver (config v3)"
@@ -107,7 +107,7 @@ log "✓ Kubernetes repository added"
 
 # Step 7: Install kubeadm, kubelet, kubectl (version 1.35.*)
 log "Step 7/8: Installing kubelet, kubeadm, kubectl (v1.35)"
-apt-get install -y kubelet kubeadm kubectl
+apt-get install -y kubelet=1.35.5-1.1 kubeadm=1.35.5-1.1 kubectl=1.35.5-1.1
 apt-mark hold kubelet kubeadm kubectl
 log "✓ Kubernetes packages installed and held"
 

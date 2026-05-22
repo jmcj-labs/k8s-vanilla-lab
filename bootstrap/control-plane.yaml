@@ -98,7 +98,7 @@ log "✓ kubectl configured for root user"
 
 # Step 5: Install Flannel CNI
 log "Step 5/7: Installing Flannel CNI"
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml \
+kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 log "✓ Flannel CNI installed"
 
