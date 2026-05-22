@@ -36,7 +36,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: eu-west-1
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Setup OpenTofu
         uses: opentofu/setup-opentofu@v1
@@ -45,14 +45,14 @@ jobs:
           tofu_wrapper: false
 
       - name: OpenTofu Init
-        run: tofu init
+        run: tofu init -backend-config=backend.hcl
 
       - name: OpenTofu Destroy
         id: destroy
-        run: |
-          tofu destroy -auto-approve \
-            -var="my_ip=0.0.0.0/0" \
-            -var="ssh_key_name=ci-dummy-key"
+        env:
+          TF_VAR_my_ip: ${{ vars.TF_VAR_MY_IP }}
+          TF_VAR_ssh_key_name: ${{ vars.TF_VAR_SSH_KEY_NAME }}
+        run: tofu destroy -auto-approve
 
       - name: Post Slack notification
         if: always()
