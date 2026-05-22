@@ -299,7 +299,7 @@ aws s3 mb s3://k8s-lab-tfstate-YOUR-INITIALS
 
 # Create DynamoDB table for state locking (prevents concurrent modifications)
 aws dynamodb create-table \
-  --table-name k8s-lab-state-lock \
+  --table-name k8s-vanilla-lab-tflock \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
   --key-schema AttributeName=LockID,KeyType=HASH \
   --billing-mode PAY_PER_REQUEST
@@ -445,17 +445,10 @@ worker_count = 2                    # Number of worker nodes
 worker_capacity_type = "spot"       # "spot" for 70% savings, "on-demand" for reliability
 ```
 
-**Update backend configuration** (edit `backend.tf`):
-```hcl
-terraform {
-  backend "s3" {
-    bucket         = "k8s-lab-tfstate-YOUR-INITIALS"  # S3 bucket you created
-    key            = "k8s-vanilla-lab/terraform.tfstate"
-    region         = "eu-west-1"
-    dynamodb_table = "k8s-lab-state-lock"  # DynamoDB table you created
-    encrypt        = true
-  }
-}
+**Configure the backend** (copy and edit the example):
+```bash
+cp tofu/envs/lab/backend.hcl.example tofu/envs/lab/backend.hcl
+# Edit backend.hcl: replace <YOUR_ACCOUNT_ID> with your AWS account ID
 ```
 
 **What each variable means**:
@@ -771,7 +764,7 @@ aws ec2 describe-instances \
 ```bash
 # Get Lock ID from error message, then:
 aws dynamodb delete-item \
-  --table-name k8s-lab-state-lock \
+  --table-name k8s-vanilla-lab-tflock \
   --key '{"LockID":{"S":"YOUR-BUCKET/k8s-vanilla-lab/terraform.tfstate"}}'
 ```
 
@@ -882,7 +875,7 @@ rm ~/.kube/config
 # Keep S3 backend and DynamoDB table (reuse for next deployment)
 # Only delete if you're done with this project:
 aws s3 rb s3://k8s-lab-tfstate-YOUR-INITIALS --force
-aws dynamodb delete-table --table-name k8s-lab-state-lock
+aws dynamodb delete-table --table-name k8s-vanilla-lab-tflock
 ```
 
 ---
