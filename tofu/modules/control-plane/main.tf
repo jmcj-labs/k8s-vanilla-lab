@@ -251,3 +251,34 @@ resource "aws_eip_association" "control_plane" {
   instance_id   = aws_instance.control_plane.id
   allocation_id = aws_eip.control_plane.id
 }
+
+# Cleanup SSM parameters written by bootstrap (kubeconfig, join data).
+# Runs before the IAM role is destroyed so the delete calls succeed.
+resource "terraform_data" "cleanup_cp_ssm" {
+  depends_on = [aws_iam_role_policy.control_plane_ssm]
+
+  input = {
+    cluster_name = var.cluster_name
+    region       = data.aws_region.current.name
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      echo "Deleting SSM parameters for cluster ${self.input.cluster_name}..."
+      PARAMS=$(aws ssm get-parameters-by-path \
+        --path "/k8s/${self.input.cluster_name}" \
+        --query 'Parameters[*].Name' \
+        --output text \
+        --region ${self.input.region} 2>/dev/null || echo "")
+      for PARAM in $PARAMS; do
+        [ -z "$PARAM" ] && continue
+        echo "Deleting SSM parameter $PARAM"
+        aws ssm delete-parameter \
+          --name "$PARAM" \
+          --region ${self.input.region} || true
+      done
+      echo "SSM cleanup complete."
+    EOT
+  }
+}

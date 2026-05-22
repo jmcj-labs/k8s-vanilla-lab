@@ -186,6 +186,20 @@ else
   exit 1
 fi
 
+# Step 7.5: Publish kubeconfig to SSM for CI smoke test
+log "Step 7.5/7: Publishing kubeconfig to SSM for CI smoke test"
+KUBECONFIG_PATCHED=$$(sed \
+  "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
+  /etc/kubernetes/admin.conf)
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/kubeconfig" \
+  --value "$${KUBECONFIG_PATCHED}" \
+  --type SecureString \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+log "✓ Kubeconfig stored at ${ssm_parameter_path}/kubeconfig"
+
 # Final status
 log "=== Control Plane bootstrap completed successfully ==="
 log "Cluster info:"
