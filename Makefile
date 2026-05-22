@@ -26,9 +26,11 @@ init: ## Initialise OpenTofu with backend config (requires tofu/envs/lab/backend
 	cd $(TOFU_DIR) && tofu init -backend-config=backend.hcl
 
 validate: ## Check formatting and validate configuration (no backend required)
+	@VALIDATE_TMP=$$(mktemp -d); \
+	trap 'rm -rf "$$VALIDATE_TMP"' EXIT; \
 	tofu fmt -check -recursive tofu/ && \
-	  cd $(TOFU_DIR) && tofu init -backend=false -reconfigure -input=false && \
-	  tofu validate
+	  cd $(TOFU_DIR) && TF_DATA_DIR="$$VALIDATE_TMP" tofu init -backend=false -input=false && \
+	  TF_DATA_DIR="$$VALIDATE_TMP" tofu validate
 
 fmt: ## Format all .tf files recursively
 	tofu fmt -recursive tofu/

@@ -4,6 +4,10 @@ cluster_name = "k8s-vanilla-lab"
 aws_region   = "eu-west-1"
 environment  = "lab"
 
+# AWS authentication — set your SSO profile name for local use.
+# Leave empty (or omit) in CI; OIDC credentials are set via environment variables.
+aws_profile = "k8s-vanilla-lab"
+
 # REQUIRED: Your public IP for SSH/API access
 my_ip = "1.2.3.4/32"
 

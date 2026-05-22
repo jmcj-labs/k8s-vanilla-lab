@@ -4,6 +4,29 @@ One-time setup of the AWS resources that the CI/CD workflows and OpenTofu state 
 
 ---
 
+## Authentication pattern: local vs CI
+
+The provider is configured with `profile = var.aws_profile`. When the variable is empty (the default), the provider falls through to the standard AWS credential chain — environment variables set by `aws-actions/configure-aws-credentials` in CI. When it has a value, the provider uses that named profile.
+
+| Context | How credentials are resolved |
+|---------|------------------------------|
+| Local | `aws_profile = "k8s-vanilla-lab"` in `terraform.tfvars`, or `AWS_PROFILE` via `.envrc` + direnv |
+| CI (GitHub Actions) | `aws-actions/configure-aws-credentials` sets `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` via OIDC; `aws_profile` is left at its default `""` |
+
+For local setup, copy the provided examples:
+
+```bash
+# Option A: direnv (recommended — auto-activates when you cd into the repo)
+cp .envrc.example .envrc
+direnv allow
+
+# Option B: terraform.tfvars
+cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
+# edit: set aws_profile, my_ip, ssh_key_name
+```
+
+---
+
 ## 1. Overview
 
 `make bootstrap-aws` runs `scripts/bootstrap-aws.sh`, which creates or verifies:

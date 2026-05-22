@@ -1,0 +1,4 @@
+# Copy to .envrc and run: direnv allow
+# Requires direnv (https://direnv.net/)
+export AWS_PROFILE=k8s-vanilla-lab
+export AWS_REGION=eu-west-1

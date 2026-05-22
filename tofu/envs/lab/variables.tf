@@ -81,3 +81,9 @@ variable "owner" {
   type        = string
   default     = "platform-engineering"
 }
+
+variable "aws_profile" {
+  description = "AWS CLI profile for local authentication. Leave empty in CI (OIDC sets credentials via environment variables)."
+  type        = string
+  default     = ""
+}

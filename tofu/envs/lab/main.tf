@@ -78,13 +78,13 @@ locals {
   common_tags = {}
 
   # Kubernetes network configuration
-  pod_cidr         = "10.244.0.0/16"
-  service_cidr     = "10.96.0.0/12"
+  pod_cidr           = "10.244.0.0/16"
+  service_cidr       = "10.96.0.0/12"
   kubernetes_version = "1.35.5"
-  
+
   # SSM parameter paths
-  ssm_parameter_base = "/k8s/${var.cluster_name}"
-  ssm_join_token_path = "/k8s/${var.cluster_name}/join-token"
+  ssm_parameter_base    = "/k8s/${var.cluster_name}"
+  ssm_join_token_path   = "/k8s/${var.cluster_name}/join-token"
   ssm_ca_cert_hash_path = "/k8s/${var.cluster_name}/ca-cert-hash"
 
 }
@@ -102,7 +102,7 @@ data "cloudinit_config" "control_plane" {
 
   part {
     content_type = "text/x-shellscript"
-    content      = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
+    content = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
       cluster_name            = var.cluster_name
       aws_region              = var.aws_region
       pod_cidr                = local.pod_cidr
@@ -111,7 +111,7 @@ data "cloudinit_config" "control_plane" {
       control_plane_public_ip = module.control_plane.public_ip
       ssm_parameter_path      = local.ssm_parameter_base
     })
-    filename     = "02-control-plane.sh"
+    filename = "02-control-plane.sh"
   }
 }
 
@@ -128,14 +128,14 @@ data "cloudinit_config" "worker" {
 
   part {
     content_type = "text/x-shellscript"
-    content      = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
+    content = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
       cluster_name          = var.cluster_name
       aws_region            = var.aws_region
       kubernetes_version    = local.kubernetes_version
       ssm_join_token_path   = "${local.ssm_parameter_base}/join-command"
       ssm_ca_cert_hash_path = "${local.ssm_parameter_base}/ca-cert-hash"
     })
-    filename     = "02-worker.sh"
+    filename = "02-worker.sh"
   }
 }
 
@@ -143,17 +143,17 @@ data "cloudinit_config" "worker" {
 module "control_plane" {
   source = "../../modules/control-plane"
 
-  name                      = var.cluster_name
-  vpc_id                    = aws_vpc.main.id
-  subnet_id                 = aws_subnet.public.id
-  instance_type             = var.control_plane_instance_type
-  ami_id                    = data.aws_ami.ubuntu.id
-  key_name                  = var.ssh_key_name
-  my_ip                     = var.my_ip
-  api_server_allowed_cidrs  = [] # Defaults to my_ip
-  user_data                 = data.cloudinit_config.control_plane.rendered
-  cluster_name              = var.cluster_name
-  tags                      = local.common_tags
+  name                     = var.cluster_name
+  vpc_id                   = aws_vpc.main.id
+  subnet_id                = aws_subnet.public.id
+  instance_type            = var.control_plane_instance_type
+  ami_id                   = data.aws_ami.ubuntu.id
+  key_name                 = var.ssh_key_name
+  my_ip                    = var.my_ip
+  api_server_allowed_cidrs = [] # Defaults to my_ip
+  user_data                = data.cloudinit_config.control_plane.rendered
+  cluster_name             = var.cluster_name
+  tags                     = local.common_tags
 
   # IGW must exist before instances (internet access needed during bootstrap).
   # On destroy this reverses: module destroyed before IGW, releasing EIP
@@ -165,19 +165,19 @@ module "control_plane" {
 module "worker" {
   source = "../../modules/worker"
 
-  name                             = var.cluster_name
-  vpc_id                           = aws_vpc.main.id
-  subnet_id                        = aws_subnet.public.id
-  instance_type                    = var.worker_instance_type
-  ami_id                           = data.aws_ami.ubuntu.id
-  key_name                         = var.ssh_key_name
-  my_ip                            = var.my_ip
-  control_plane_security_group_id  = module.control_plane.security_group_id
-  user_data                        = data.cloudinit_config.worker.rendered
-  cluster_name                     = var.cluster_name
-  worker_count                     = var.worker_count
-  capacity_type                    = var.worker_capacity_type
-  tags                             = local.common_tags
+  name                            = var.cluster_name
+  vpc_id                          = aws_vpc.main.id
+  subnet_id                       = aws_subnet.public.id
+  instance_type                   = var.worker_instance_type
+  ami_id                          = data.aws_ami.ubuntu.id
+  key_name                        = var.ssh_key_name
+  my_ip                           = var.my_ip
+  control_plane_security_group_id = module.control_plane.security_group_id
+  user_data                       = data.cloudinit_config.worker.rendered
+  cluster_name                    = var.cluster_name
+  worker_count                    = var.worker_count
+  capacity_type                   = var.worker_capacity_type
+  tags                            = local.common_tags
 
   depends_on = [module.control_plane, aws_internet_gateway.main]
 }
