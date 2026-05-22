@@ -6,6 +6,8 @@ on:
       - "tofu/**"
       - "bootstrap/**"
       - "Makefile"
+      - ".pre-commit-config.yaml"
+      - ".tflint.hcl"
       - ".github/workflows/validate.yml"
   push:
     branches: [main]
@@ -13,6 +15,8 @@ on:
       - "tofu/**"
       - "bootstrap/**"
       - "Makefile"
+      - ".pre-commit-config.yaml"
+      - ".tflint.hcl"
       - ".github/workflows/validate.yml"
 
 permissions:
@@ -36,6 +40,15 @@ jobs:
         with:
           tofu_version: 1.8.0
           tofu_wrapper: false
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.6
+        with:
+          version: v0.70.0
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+        working-directory: .
 
       - name: Validate (fmt + syntax, no AWS needed)
         working-directory: .
