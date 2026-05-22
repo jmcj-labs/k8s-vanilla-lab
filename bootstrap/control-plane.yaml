@@ -24,14 +24,14 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     log "✓ Common bootstrap completed"
     break
   fi
-  
+
   if [ $${ELAPSED} -eq 0 ]; then
     log "Waiting for common bootstrap... (timeout: $${TIMEOUT}s)"
   fi
-  
+
   sleep $${INTERVAL}
   ELAPSED=$((ELAPSED + INTERVAL))
-  
+
   if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
     log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
     log "Last 20 lines of bootstrap log:"
@@ -114,10 +114,10 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     kubectl get nodes >> /var/log/k8s-cp-bootstrap.log
     break
   fi
-  
+
   sleep $${INTERVAL}
   ELAPSED=$((ELAPSED + INTERVAL))
-  
+
   if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
     log "✗ ERROR: API server not responding after $${TIMEOUT}s"
     log "Kubelet status:"

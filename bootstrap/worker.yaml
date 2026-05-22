@@ -25,14 +25,14 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     log "✓ Common bootstrap completed"
     break
   fi
-  
+
   if [ $${ELAPSED} -eq 0 ]; then
     log "Waiting for common bootstrap... (timeout: $${TIMEOUT}s)"
   fi
-  
+
   sleep $${INTERVAL}
   ELAPSED=$((ELAPSED + INTERVAL))
-  
+
   if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
     log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
     log "Last 20 lines of bootstrap log:"
@@ -54,7 +54,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     log "Waiting for control plane to complete initialization..."
     log "This can take up to 15 minutes (typical: 5-8 minutes)"
   fi
-  
+
   # Try to fetch join-command parameter from SSM
   if aws ssm get-parameter \
        --name "${ssm_join_token_path}" \
@@ -64,15 +64,15 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     log "✓ Control plane join parameters available in SSM"
     break
   fi
-  
+
   # Log progress every 2 minutes
   if [ $$(($${ELAPSED} % 120)) -eq 0 ] && [ $${ELAPSED} -gt 0 ]; then
     log "Still waiting for control plane... ($${ELAPSED}s elapsed)"
   fi
-  
+
   sleep $${INTERVAL}
   ELAPSED=$((ELAPSED + INTERVAL))
-  
+
   if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
     log "✗ ERROR: Control plane did not store join parameters within $${TIMEOUT}s"
     log "Possible causes:"
@@ -134,10 +134,10 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
     systemctl status kubelet --no-pager >> /var/log/k8s-worker-bootstrap.log
     break
   fi
-  
+
   sleep $${INTERVAL}
   ELAPSED=$((ELAPSED + INTERVAL))
-  
+
   if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
     log "✗ ERROR: kubelet not running after $${TIMEOUT}s"
     log "Kubelet status:"
