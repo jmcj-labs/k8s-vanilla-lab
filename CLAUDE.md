@@ -6,7 +6,8 @@ This file provides complete context for Claude Code (or other AI assistants) to 
 
 ## Project Purpose
 
-**k8s-vanilla-lab** is a production-quality **golden path** for deploying vanilla Kubernetes clusters on AWS using **kubeadm**.
+**k8s-vanilla-lab** is a **golden path for a vanilla Kubernetes learning lab on AWS** — experimental,
+learning in public, not for production.
 
 **Goals**:
 1. **Learning**: Hands-on Kubernetes bootstrapping with kubeadm, containerd, and cloud-init
@@ -26,9 +27,9 @@ This file provides complete context for Claude Code (or other AI assistants) to 
 | Component | Technology | Version |
 |-----------|------------|---------|
 | IaC | OpenTofu (NOT Terraform) | 1.8.0 |
-| Kubernetes | kubeadm | 1.35.x |
-| Container Runtime | containerd (Docker repo) | Latest |
-| CNI | Flannel (VXLAN) | Latest |
+| Kubernetes | kubeadm | 1.35.5 |
+| Container Runtime | containerd (Docker repo) | 2.2.4 |
+| CNI | Flannel (VXLAN) | v0.28.4 |
 | Cloud | AWS EC2 | - |
 | Bootstrap | cloud-init | - |
 | CI/CD | GitHub Actions (OIDC) | - |
@@ -42,27 +43,51 @@ This file provides complete context for Claude Code (or other AI assistants) to 
 
 ```
 k8s-vanilla-lab/
+├── Makefile                         # Primary local interface — see §6 below
+├── scripts/
+│   └── bootstrap-aws.sh            # One-time AWS setup (S3, DynamoDB, OIDC, IAM)
 ├── tofu/
 │   ├── modules/
-│   │   ├── control-plane/    # Control plane EC2, EIP, IAM, security groups
-│   │   └── worker/            # Worker EC2 (spot), IAM, security groups
+│   │   ├── control-plane/          # Control plane EC2, EIP, IAM, security groups
+│   │   └── worker/                 # Worker EC2 (spot), IAM, security groups
 │   └── envs/
-│       └── lab/               # Main environment: VPC, subnets, IGW, module calls
+│       └── lab/                    # Main environment: VPC, subnets, IGW, module calls
+│           ├── backend.hcl.example # Template for gitignored backend.hcl
+│           └── terraform.tfvars.example
 ├── bootstrap/
-│   ├── common.yaml            # Base: containerd, kubeadm, kubelet (no variables)
-│   ├── control-plane.yaml     # kubeadm init, SSM store join data
-│   └── worker.yaml            # SSM fetch, kubeadm join
+│   ├── common.yaml                 # Base: containerd, kubeadm, kubelet (no variables)
+│   ├── control-plane.yaml          # kubeadm init, SSM store join data + kubeconfig
+│   └── worker.yaml                 # SSM fetch, kubeadm join
 ├── addons/
-│   ├── metrics-server/        # Metrics server manifests
-│   └── opencost/              # OpenCost for cost attribution
+│   ├── metrics-server/             # Metrics server manifests
+│   └── opencost/                   # OpenCost for cost attribution
 ├── .github/workflows/
-│   ├── tf-validate.yml        # PR checks: tofu validate + plan
-│   └── tf-destroy.yml         # Manual destroy with Slack notification
-├── docs/decisions/
-│   ├── ADR-001-opentofu-vs-terraform.md
-│   └── ADR-002-spot-workers-ondemand-cp.md
-├── CLAUDE.md                  # This file (AI context)
-└── README.md                  # User-facing documentation
+│   ├── validate.yml                # PR + push to main: pre-commit + make validate + plan
+│   ├── apply.yml                   # Manual: make apply + 10min wait + make smoke-test
+│   └── destroy.yml                 # Nightly cron (0 22 * * *) + manual dispatch
+├── docs/
+│   ├── architecture/
+│   │   ├── diagram.py              # Architecture diagram source (diagrams==0.25.1)
+│   │   ├── architecture.svg        # Generated output (primary — renders in GitHub)
+│   │   └── architecture.png        # Generated output (fallback)
+│   ├── decisions/
+│   │   ├── ADR-001-opentofu-vs-terraform.md
+│   │   ├── ADR-002-spot-workers-ondemand-cp.md
+│   │   ├── ADR-003-cilium-ebpf.md
+│   │   └── ADR-004-kubeconfig-ssm.md
+│   ├── bootstrap.md                # AWS one-time setup guide
+│   ├── development.md              # Pre-commit, tflint, trivy — local dev setup
+│   ├── troubleshooting.md          # Diagnostic procedures for common issues
+│   └── walkthrough.md              # First deployment step-by-step
+├── .pre-commit-config.yaml         # Hook definitions (trailing-ws, tofu-fmt, tflint, trivy, gitleaks)
+├── .tflint.hcl                     # tflint config (terraform + aws rulesets)
+├── .trivyignore                    # Documented IaC finding exceptions
+├── CHANGELOG.md
+├── CLAUDE.md                       # This file (AI context)
+├── CODEOWNERS
+├── CONTRIBUTING.md
+├── README.md                       # User-facing documentation
+└── SECURITY.md
 ```
 
 ---
@@ -107,11 +132,20 @@ k8s-vanilla-lab/
 
 ### 3. Validation After Changes
 
-**After ANY `.tf` file modification**:
+**After ANY `.tf` file modification**, use `make validate`:
+
 ```bash
-cd tofu/envs/lab
-tofu init -backend=false
-tofu validate
+make validate
+```
+
+**Do not** run `tofu init` and `tofu validate` directly from the shell. `tofu init` against the S3 backend writes provider and module locks to `.terraform/`; if the backend is inaccessible or the lock is stale, subsequent `tofu validate` may fail or use wrong provider versions. `make validate` avoids this by using `TF_DATA_DIR=$(mktemp -d)` — a fresh temporary directory — so each validation run is hermetic and does not contaminate or depend on any previous init state.
+
+Internally it runs:
+```bash
+tofu fmt -check -recursive tofu/
+VALIDATE_TMP=$(mktemp -d)
+cd tofu/envs/lab && TF_DATA_DIR="$VALIDATE_TMP" tofu init -backend=false -input=false
+TF_DATA_DIR="$VALIDATE_TMP" tofu validate
 ```
 
 If validation fails, fix immediately before proceeding.
@@ -136,6 +170,49 @@ If validation fails, fix immediately before proceeding.
 - IAM policies: minimal scope (`/k8s/${cluster_name}/*` for SSM)
 - IMDSv2: enforced on all EC2 instances
 - EBS encryption: enabled by default
+
+### 6. Makefile Is the Local Interface
+
+The `Makefile` is the single source of truth for operational commands. **Any process change that applies to CI must also be reflected in the equivalent Makefile target** — and vice versa.
+
+| Target | What it does |
+|--------|-------------|
+| `make init` | `tofu init -backend-config=backend.hcl` |
+| `make validate` | fmt-check + hermetic tofu validate (no S3 backend required) |
+| `make fmt` | `tofu fmt -recursive tofu/` |
+| `make plan` | `tofu plan` |
+| `make apply` | `tofu apply -auto-approve` |
+| `make destroy` | `tofu destroy -auto-approve` |
+| `make kubeconfig` | Fetch kubeconfig from SSM → `~/.kube/k8s-vanilla-lab.conf` |
+| `make smoke-test` | Fetch kubeconfig (temp file), run `kubectl get nodes`, exit non-zero if any NotReady |
+| `make ssh-cp` | SSH into control plane |
+| `make ssh-worker` | SSH into first worker node |
+| `make clean` | Remove `.terraform/` cache and `*.tfstate.backup` |
+| `make bootstrap-aws` | One-time: create/verify S3, DynamoDB, OIDC, IAM role |
+
+### 7. OIDC Auth — Never Long-Lived Credentials in CI
+
+The OpenTofu provider is configured with `profile = var.aws_profile`.
+
+| Context | Credential resolution |
+|---------|----------------------|
+| Local | `aws_profile = "k8s-vanilla-lab"` in `terraform.tfvars`, or `AWS_PROFILE` via `.envrc` + direnv |
+| CI | `TF_VAR_aws_profile = ""` (empty default) → provider falls through to `AWS_ACCESS_KEY_ID` / `AWS_SESSION_TOKEN` injected by `aws-actions/configure-aws-credentials` via OIDC |
+
+**NEVER** add long-lived `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as GitHub Secrets. The OIDC role ARN (`AWS_ROLE_ARN`) is a GitHub **Variable** (not a Secret) — it is a resource identifier, not a credential.
+
+### 8. Pre-Commit Hooks Must Pass
+
+All hooks in `.pre-commit-config.yaml` must pass before any commit is considered done. Key hooks and their language requirements:
+
+| Hook | Language | Install requirement |
+|------|----------|-------------------|
+| `tofu-fmt` | `system` | `tofu` installed locally |
+| `terraform_tflint` | `golang` | auto-installs via antonbabenko/pre-commit-terraform |
+| `trivy-config` | `system` | `trivy` installed locally |
+| `gitleaks` | `golang` | auto-installs |
+
+`language: system` hooks (`tofu-fmt`, `trivy-config`) require the tools to be installed locally before running. See `docs/development.md` for install instructions. Run `pre-commit run --all-files` before opening a PR.
 
 ---
 
@@ -166,6 +243,7 @@ If validation fails, fix immediately before proceeding.
 - Security group (SSH, kubelet API, NodePorts, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
+- `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/Flannel at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
 
 **Key Feature**: `capacity_type` variable:
 - `"spot"` (default): 70% cost savings, can be reclaimed
@@ -209,7 +287,7 @@ locals {
 3. Create instance with templated user_data
 4. Associate EIP to instance after creation
 
-**Code**: `tofu/modules/control-plane/main.tf` lines 148-217
+**Code**: `tofu/modules/control-plane/main.tf`
 
 ### 2. SSM Parameter Store for Join Data
 
@@ -250,58 +328,45 @@ locals {
 ### Apply Infrastructure
 
 ```bash
-cd tofu/envs/lab
+# Copy and configure
+cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
+# Edit: my_ip, ssh_key_name, aws_region
+cp tofu/envs/lab/backend.hcl.example tofu/envs/lab/backend.hcl
+# Edit: bucket, region, dynamodb_table
 
-# Create terraform.tfvars
-cp terraform.tfvars.example terraform.tfvars
-# Edit: my_ip, ssh_key_name
+# Initialize (first time or after provider changes)
+make init
 
-# Initialize (first time only)
-tofu init
+# Review plan (optional)
+make plan
 
-# Plan and review
-tofu plan
-
-# Apply
-tofu apply
+# Deploy
+make apply
 
 # Wait 8-12 minutes for bootstrap to complete
 ```
 
 ### Get Kubeconfig
 
+Kubeconfig is stored in SSM by the control plane bootstrap script (ADR-004). Do not use the old SSH + `sudo cat /etc/kubernetes/admin.conf` method.
+
 ```bash
-# From tofu output
-CONTROL_PLANE_IP=$(tofu output -raw control_plane_public_ip)
+make kubeconfig
+# Saves to ~/.kube/k8s-vanilla-lab.conf
 
-# Extract kubeconfig
-ssh -i ~/.ssh/k8s-vanilla-lab.pem ubuntu@${CONTROL_PLANE_IP} \
-  'sudo cat /etc/kubernetes/admin.conf' > ~/.kube/k8s-vanilla-lab.conf
-
-# Fix server URL to use public IP (kubeadm writes private IP by default)
-sed -i.bak "s|server: https://.*:6443|server: https://${CONTROL_PLANE_IP}:6443|" ~/.kube/k8s-vanilla-lab.conf
-
-# Point kubectl to this config
 export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
-
-# Verify - nodes should be Ready (Flannel installed automatically)
 kubectl get nodes
 ```
 
-**Tip**: Use the `k8s-config` shell alias (defined in `~/.zshrc`) which does all of the above in one command.
-
 ### Destroy Infrastructure
 
-**Option 1: GitHub Actions (Recommended)**
-1. Go to Actions tab → "OpenTofu Destroy"
-2. Click "Run workflow"
-3. Type "destroy" in confirmation field
-4. Slack notification sent on completion
-
-**Option 2: Manual**
 ```bash
-cd tofu/envs/lab
-tofu destroy
+# Option 1: local
+make destroy
+
+# Option 2: GitHub Actions
+# Actions → "OpenTofu Destroy" → Run workflow → type "destroy"
+# Also runs on nightly cron (0 22 * * *)
 ```
 
 ---
@@ -367,9 +432,9 @@ kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/
 
 ### Backend Configuration
 
-**For CI/CD**: Use `-backend=false` in GitHub Actions
+**Partial backend config**: `tofu/envs/lab/backend.tf` declares `terraform { backend "s3" {} }` with no coordinates. The actual bucket, region, and DynamoDB table are in the gitignored `backend.hcl`. In CI, `backend.hcl` is generated from GitHub Variables. Locally, copy from `backend.hcl.example`.
 
-**For real usage**: Update `tofu/envs/lab/backend.tf` with your S3 bucket and DynamoDB table
+**NEVER** hardcode backend coordinates directly into `backend.tf`.
 
 ---
 
