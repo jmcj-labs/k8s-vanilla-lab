@@ -53,11 +53,10 @@ jobs:
 
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
-        working-directory: .
 
       - name: Validate (fmt + syntax, no AWS needed)
-        working-directory: .
         run: make validate
+        working-directory: .
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
