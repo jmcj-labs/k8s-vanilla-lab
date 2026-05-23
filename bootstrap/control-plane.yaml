@@ -50,14 +50,14 @@ log "Private IP: $${PRIVATE_IP}"
 log "Public IP: ${control_plane_public_ip}"
 
 cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
-apiVersion: kubeadm.k8s.io/v1beta3
+apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 nodeRegistration:
   criSocket: unix:///run/containerd/containerd.sock
 ---
-apiVersion: kubeadm.k8s.io/v1beta3
+apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: v${kubernetes_version}.0
+kubernetesVersion: v${kubernetes_version}
 clusterName: ${cluster_name}
 controlPlaneEndpoint: "$${PRIVATE_IP}:6443"
 apiServer:
@@ -195,6 +195,7 @@ aws ssm put-parameter \
   --name "${ssm_parameter_path}/kubeconfig" \
   --value "$${KUBECONFIG_PATCHED}" \
   --type SecureString \
+  --tier Advanced \
   --overwrite \
   --region ${aws_region} \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
