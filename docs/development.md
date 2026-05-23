@@ -110,3 +110,42 @@ git add architecture.svg architecture.png
 ```
 
 See [docs/architecture/README.md](architecture/README.md) for full prerequisites and regeneration details.
+
+---
+
+## 9. Dependency updates (Dependabot)
+
+GitHub-native automation that opens PRs to bump dependency versions weekly.
+Configured in `.github/dependabot.yml`. Monitors two ecosystems:
+
+- **github-actions** — pins like `actions/checkout@v4` in workflow files get bumped
+  when a new major version is released.
+- **terraform** — the AWS provider `version` constraint in `tofu/envs/lab/` gets
+  bumped when HashiCorp publishes a new release.
+
+Each PR is labeled `dependencies` and arrives with the upstream changelog inline,
+so review is straightforward: check the changelog for breaking changes, run CI,
+merge if green.
+
+### PR handling by type
+
+| Type | Example | Risk | Action |
+|------|---------|------|--------|
+| GitHub Actions bump | `actions/checkout` 4→6 | Low | Merge when CI green |
+| Provider minor bump | `hashicorp/aws` 5.x→5.y | Low | Merge when CI green |
+| Provider major bump | `hashicorp/aws` 5.x→6.x | **High** | Review CHANGELOG for breaking changes before merging |
+
+### Stale CI on Dependabot PRs
+
+If a Dependabot PR was opened before a fix landed on `main`, its CI check may show
+"Waiting for status to be reported" and never trigger. Fix: comment on the PR:
+
+```
+@dependabot rebase
+```
+
+This rebases the branch onto the updated `main` and triggers a fresh CI run.
+
+This complements the explicit version pinning of Kubernetes, containerd, and
+Flannel in `bootstrap/common.yaml` and `bootstrap/control-plane.yaml` — pinning
+controls *when* you update, Dependabot surfaces *what* is available to update.

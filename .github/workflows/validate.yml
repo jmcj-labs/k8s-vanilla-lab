@@ -5,6 +5,7 @@ on:
     paths:
       - "tofu/**"
       - "bootstrap/**"
+      - "docs/**"
       - "Makefile"
       - ".pre-commit-config.yaml"
       - ".tflint.hcl"
@@ -14,6 +15,7 @@ on:
     paths:
       - "tofu/**"
       - "bootstrap/**"
+      - "docs/**"
       - "Makefile"
       - ".pre-commit-config.yaml"
       - ".tflint.hcl"
