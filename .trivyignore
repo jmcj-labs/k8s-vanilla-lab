@@ -1,0 +1,17 @@
+# AVD-AWS-0164 — map_public_ip_on_launch on public subnet
+# Lab tradeoff: no NAT gateway to keep monthly cost ~$36 (see ADR-002).
+# Nodes need outbound internet access for apt, kubeadm image pulls, and
+# AWS API calls. Without a NAT gateway the only viable path is a public
+# subnet with auto-assigned public IPs. Production setup would use private
+# subnets + NAT gateway, or VPC endpoints for AWS service traffic.
+AVD-AWS-0164
+
+# AVD-AWS-0104 — egress 0.0.0.0/0 on cluster security groups
+# Lab tradeoff: kubeadm nodes require unrestricted outbound access for
+# container image pulls (registry.k8s.io, quay.io, docker.io), AWS API
+# calls (EC2, SSM, STS), and dynamic addon manifests fetched at bootstrap.
+# Restricting egress on a generic kubeadm cluster requires enumerating
+# every registry and AWS endpoint upfront, which is brittle and out of
+# scope for a lab. Production setup would use VPC endpoints (ECR, S3,
+# EC2, STS, SSM) and allow-listed egress CIDRs for image registries.
+AVD-AWS-0104
