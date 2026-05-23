@@ -145,7 +145,7 @@ OIDC_ARN=$(aws iam list-open-id-connect-providers \
   --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn" \
   --output text 2>/dev/null || echo "")
 
-if [ -n "${OIDC_ARN}" ]; then
+if [ -n "${OIDC_ARN}" ] && [ "${OIDC_ARN}" != "None" ]; then
   ok "Already exists (${OIDC_ARN})"
 else
   log "Creating OIDC provider..."
