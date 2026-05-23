@@ -142,20 +142,32 @@ echo ""
 log "Step 3/4: OIDC provider (token.actions.githubusercontent.com)"
 
 OIDC_ARN=$(aws iam list-open-id-connect-providers \
-  --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn" \
+  --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn | [0]" \
   --output text 2>/dev/null || echo "")
 
 if [ -n "${OIDC_ARN}" ] && [ "${OIDC_ARN}" != "None" ]; then
   ok "Already exists (${OIDC_ARN})"
 else
   log "Creating OIDC provider..."
-  OIDC_ARN=$(aws iam create-open-id-connect-provider \
+  CREATE_OUT=$(aws iam create-open-id-connect-provider \
     --url "${OIDC_URL}" \
     --thumbprint-list "${GITHUB_OIDC_THUMBPRINT}" \
     --client-id-list sts.amazonaws.com \
     --query OpenIDConnectProviderArn \
-    --output text)
-  ok "Created (${OIDC_ARN})"
+    --output text 2>&1) && {
+    OIDC_ARN="${CREATE_OUT}"
+    ok "Created (${OIDC_ARN})"
+  } || {
+    if echo "${CREATE_OUT}" | grep -q "EntityAlreadyExists"; then
+      OIDC_ARN=$(aws iam list-open-id-connect-providers \
+        --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn | [0]" \
+        --output text)
+      ok "Already exists (${OIDC_ARN})"
+    else
+      echo "${CREATE_OUT}" >&2
+      exit 1
+    fi
+  }
 fi
 echo ""
 
@@ -223,6 +235,8 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "ec2:ReleaseAddress",
         "ec2:RevokeSecurityGroupEgress",
         "ec2:RevokeSecurityGroupIngress",
+        "ec2:CancelSpotInstanceRequests",
+        "ec2:RequestSpotInstances",
         "ec2:RunInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances"
