@@ -147,21 +147,21 @@ Name: `k8s-vanilla-lab-github-actions`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 [10:32:01]   Step 0/4: Checking prerequisites
-[10:32:01]   Account : 487985088962
+[10:32:01]   Account : 123456789012
 [10:32:01]   Region  : eu-west-1
-[10:32:01]   Bucket  : k8s-vanilla-lab-tfstate-487985088962
+[10:32:01]   Bucket  : k8s-vanilla-lab-tfstate-123456789012
 [10:32:01]   Table   : k8s-vanilla-lab-tflock
 [10:32:01]   Role    : k8s-vanilla-lab-github-actions
 [10:32:01] ✓ Prerequisites satisfied
 
-[10:32:01]   Step 1/4: S3 state bucket (k8s-vanilla-lab-tfstate-487985088962)
+[10:32:01]   Step 1/4: S3 state bucket (k8s-vanilla-lab-tfstate-123456789012)
 [10:32:02] ✓ Already exists (versioning=Enabled)
 
 [10:32:02]   Step 2/4: DynamoDB lock table (k8s-vanilla-lab-tflock)
 [10:32:02] ✓ Already exists and ACTIVE
 
 [10:32:02]   Step 3/4: OIDC provider (token.actions.githubusercontent.com)
-[10:32:03] ✓ Already exists (arn:aws:iam::487985088962:oidc-provider/token.actions.githubusercontent.com)
+[10:32:03] ✓ Already exists (arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com)
 
 [10:32:03]   Step 4/4: IAM role (k8s-vanilla-lab-github-actions)
 [10:32:03]   Role exists — refreshing trust and permissions policies
@@ -170,12 +170,12 @@ Name: `k8s-vanilla-lab-github-actions`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✓ Bootstrap complete
 
-  Role ARN: arn:aws:iam::487985088962:role/k8s-vanilla-lab-github-actions
+  Role ARN: arn:aws:iam::123456789012:role/k8s-vanilla-lab-github-actions
 
 Set this as a GitHub Actions Variable at:
   https://github.com/jmcj-labs/k8s-vanilla-lab/settings/variables/actions
   Name:  AWS_ROLE_ARN
-  Value: arn:aws:iam::487985088962:role/k8s-vanilla-lab-github-actions
+  Value: arn:aws:iam::123456789012:role/k8s-vanilla-lab-github-actions
 
 Also ensure these Variables are configured:
   AWS_REGION          = eu-west-1
@@ -206,7 +206,7 @@ All three workflows (validate, apply, destroy) read the following **Variables** 
 | Variable | Example value | Required by | Notes |
 |----------|---------------|-------------|-------|
 | `AWS_REGION` | `eu-west-1` | all | Must match the region used for bootstrap |
-| `TF_BACKEND_BUCKET` | `k8s-vanilla-lab-tfstate-487985088962` | all | S3 bucket name from bootstrap output |
+| `TF_BACKEND_BUCKET` | `k8s-vanilla-lab-tfstate-123456789012` | all | S3 bucket name from bootstrap output |
 | `TF_VAR_MY_IP` | `203.0.113.42/32` | validate, apply, destroy | Your public IP for SSH and K8s API security group rules |
 | `TF_VAR_SSH_KEY_NAME` | `k8s-vanilla-lab` | validate, apply, destroy | Name of the EC2 key pair in your account |
 | `CLUSTER_NAME` | `k8s-vanilla-lab` | apply (smoke-test) | Cluster name; defaults to `k8s-vanilla-lab` if unset |
