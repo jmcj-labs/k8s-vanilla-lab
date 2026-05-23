@@ -66,7 +66,7 @@ smoke-test: ## Verify all nodes are Ready (kubeconfig fetched from SSM, not pers
 	  --with-decryption \
 	  --query Parameter.Value \
 	  --output text \
-	  --region $(AWS_REGION) > "$$KUBECONFIG_FILE" 2>&1; then \
+	  --region $(AWS_REGION) > "$$KUBECONFIG_FILE"; then \
 	  echo "✗ Failed to fetch kubeconfig from SSM (check AWS credentials and profile)"; \
 	  exit 1; \
 	fi; \

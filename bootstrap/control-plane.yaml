@@ -45,7 +45,7 @@ log "Step 2/6: Creating kubeadm configuration"
 
 # CRITICAL: Use private IP for controlPlaneEndpoint so workers can join via internal network
 # Public IP is only added to certSANs for external kubectl access
-PRIVATE_IP=$$(hostname -i | awk '{print $$1}')
+PRIVATE_IP=$(hostname -i | awk '{print $1}')
 log "Private IP: $${PRIVATE_IP}"
 log "Public IP: ${control_plane_public_ip}"
 
@@ -130,18 +130,18 @@ done
 log "Step 7/7: Generating join data and storing in SSM"
 
 # Generate bootstrap token with 24h TTL
-JOIN_TOKEN=$$(kubeadm token create --ttl 24h)
+JOIN_TOKEN=$(kubeadm token create --ttl 24h)
 log "✓ Bootstrap token generated (TTL: 24h)"
 
 # Extract CA certificate hash
-CA_CERT_HASH=$$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
+CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
                openssl rsa -pubin -outform der 2>/dev/null | \
                openssl dgst -sha256 -hex | \
                sed 's/^.* //')
 log "✓ CA certificate hash extracted"
 
 # Get private IP for API endpoint (workers use private IP)
-PRIVATE_IP=$$(hostname -i | awk '{print $$1}')
+PRIVATE_IP=$(hostname -i | awk '{print $1}')
 API_ENDPOINT="$${PRIVATE_IP}:6443"
 
 # Construct full join command
@@ -188,7 +188,7 @@ fi
 
 # Step 7.5: Publish kubeconfig to SSM for CI smoke test
 log "Step 7.5/7: Publishing kubeconfig to SSM for CI smoke test"
-KUBECONFIG_PATCHED=$$(sed \
+KUBECONFIG_PATCHED=$(sed \
   "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
   /etc/kubernetes/admin.conf)
 aws ssm put-parameter \
