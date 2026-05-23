@@ -46,6 +46,11 @@ jobs:
         with:
           version: v0.70.0
 
+      - name: Install tflint
+        uses: terraform-linters/setup-tflint@v6.2.2
+        with:
+          tflint_version: v0.62.1
+
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
         working-directory: .
