@@ -223,6 +223,8 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "ec2:ReleaseAddress",
         "ec2:RevokeSecurityGroupEgress",
         "ec2:RevokeSecurityGroupIngress",
+        "ec2:CancelSpotInstanceRequests",
+        "ec2:RequestSpotInstances",
         "ec2:RunInstances",
         "ec2:StopInstances",
         "ec2:TerminateInstances"
