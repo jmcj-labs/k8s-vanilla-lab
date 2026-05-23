@@ -94,6 +94,7 @@ mkdir -p /root/.kube
 cp -f /etc/kubernetes/admin.conf /root/.kube/config
 chown root:root /root/.kube/config
 chmod 600 /root/.kube/config
+export KUBECONFIG=/etc/kubernetes/admin.conf
 log "✓ kubectl configured for root user"
 
 # Step 5: Install Flannel CNI

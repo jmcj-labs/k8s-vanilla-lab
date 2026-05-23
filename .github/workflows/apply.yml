@@ -65,8 +65,8 @@ jobs:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
-          echo "Waiting 15 minutes for cluster bootstrap..."
-          sleep 900
+          echo "Waiting 20 minutes for cluster bootstrap..."
+          sleep 1200
           make smoke-test CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 
