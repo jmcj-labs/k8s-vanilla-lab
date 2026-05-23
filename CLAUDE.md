@@ -6,7 +6,7 @@ This file provides complete context for Claude Code (or other AI assistants) to 
 
 ## Project Purpose
 
-**k8s-vanilla-lab** is a production-quality **golden path** for deploying vanilla Kubernetes clusters on AWS using **kubeadm**. 
+**k8s-vanilla-lab** is a production-quality **golden path** for deploying vanilla Kubernetes clusters on AWS using **kubeadm**.
 
 **Goals**:
 1. **Learning**: Hands-on Kubernetes bootstrapping with kubeadm, containerd, and cloud-init
@@ -186,7 +186,7 @@ If validation fails, fix immediately before proceeding.
 ```hcl
 locals {
   common_user_data = file("${path.module}/../../../bootstrap/common.yaml")
-  
+
   control_plane_user_data = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
     cluster_name            = var.cluster_name
     control_plane_public_ip = module.control_plane.public_ip
