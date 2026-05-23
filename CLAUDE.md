@@ -289,29 +289,42 @@ locals {
 
 **Code**: `tofu/modules/control-plane/main.tf`
 
-### 2. SSM Parameter Store for Join Data
+### 2. SSM Parameter Store for Join Data and Kubeconfig
 
-**Why**: Workers need join token and CA cert hash from control plane.
+**Why**: Workers need join token and CA cert hash from control plane. CI needs kubeconfig for a
+smoke test without opening port 22 to the runner.
 
-**Flow**:
-1. Control plane runs `kubeadm init`
-2. Generates token: `kubeadm token create --ttl 24h`
-3. Stores in SSM: `/k8s/${cluster_name}/join-command`, `ca-cert-hash`, `api-endpoint`
-4. Workers poll SSM until parameters exist (15min timeout)
-5. Workers fetch and execute join command
+**Parameters stored** (all `SecureString`, encrypted via KMS default key):
 
-**Security**: All parameters use `SecureString` type (encrypted with KMS).
+| Parameter | Written by | Read by |
+|-----------|------------|---------|
+| `/k8s/${cluster_name}/join-command` | control plane bootstrap | worker bootstrap |
+| `/k8s/${cluster_name}/ca-cert-hash` | control plane bootstrap | worker bootstrap |
+| `/k8s/${cluster_name}/kubeconfig` | control plane bootstrap | `make kubeconfig`, `make smoke-test`, CI apply workflow |
+
+All parameters are deleted by a destroy-time provisioner on `tofu destroy`.
+
+**Token TTL**: `kubeadm token create --ttl 24h`. Workers that need to rejoin after 24h require a
+new token — see `docs/troubleshooting.md`.
 
 ### 3. Flannel CNI (Automatic via Bootstrap)
 
-**Why**: Flannel is simple, well-understood VXLAN overlay networking ideal for learning Kubernetes networking concepts.
+**Why over Cilium**: Cilium in `kubeProxyReplacement=true` mode requires
+`--skip-phases=addon/kube-proxy` at `kubeadm init` time. This creates a bootstrap deadlock:
+without kube-proxy, Service IP routing doesn't exist; Flannel/Cilium need to reach
+`10.96.0.1:443` (the `kubernetes` Service) to contact the API server; the deadlock cannot be
+broken from within cloud-init without manual post-apply steps. See ADR-003 for full context.
 
 **Implementation**:
-- kube-proxy is installed normally (required by Flannel for service IP routing)
-- `bootstrap/control-plane.yaml` runs `kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml` automatically
+- kube-proxy is installed normally — no `--skip-phases` flag
+- `bootstrap/control-plane.yaml` applies Flannel v0.28.4 automatically:
+  ```bash
+  kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml
+  ```
 - No manual CNI installation needed after cluster creation
 
-**Key**: Flannel requires kube-proxy. Never skip kube-proxy phase when using Flannel (`--skip-phases=addon/kube-proxy` was removed).
+**NEVER** add `--skip-phases=addon/kube-proxy` to the `kubeadm init` call — Flannel requires
+kube-proxy for Service IP routing.
 
 ### 4. Spot Workers + On-Demand Control Plane
 
@@ -319,7 +332,26 @@ locals {
 
 **Trade-off**: Workers can be reclaimed, but control plane (etcd, API server) is always available.
 
-**See**: ADR-002 for cost breakdown
+**See**: ADR-002 for full cost breakdown.
+
+### 5. Kubeconfig via SSM (ADR-004)
+
+**Problem**: CI smoke test needs `kubectl` access after apply. SSH from a runner requires dynamic
+security group changes (or opening port 22 to a runner CIDR range).
+
+**Solution**: After `kubeadm init`, bootstrap stores a patched kubeconfig in SSM:
+- Path: `/k8s/${cluster_name}/kubeconfig`
+- Type: `SecureString` (KMS default key)
+- Content: `/etc/kubernetes/admin.conf` with `server:` URL rewritten from private IP to EIP
+  (applied inline with `sed` before `aws ssm put-parameter`)
+
+Locally: `make kubeconfig` fetches it to `~/.kube/k8s-vanilla-lab.conf`.
+In CI: `make smoke-test` fetches to a temp file (not persisted to disk), runs
+`kubectl get nodes`, exits non-zero if any node is not `Ready`.
+
+**Caveat**: Contains cluster-admin credentials. Acceptable for a short-lived lab. On
+`tofu destroy`, a destroy-time provisioner deletes all `/k8s/${cluster_name}/*` parameters
+before the IAM role is removed.
 
 ---
 
@@ -373,68 +405,27 @@ make destroy
 
 ## Known Gotchas
 
-### Bootstrap Timing
+See `docs/troubleshooting.md` for full diagnostic procedures. Key things an assistant must know
+without opening another file:
 
-**Total time**: 8-12 minutes after `tofu apply` completes
-
-**Breakdown**:
-- common.yaml (containerd, kubeadm install): ~3-5 min
-- control-plane.yaml (kubeadm init, SSM store): ~5-7 min
-- worker.yaml (SSM poll, kubeadm join): ~2-3 min
-
-**How to check**:
-```bash
-# Control plane
-ssh ubuntu@${CONTROL_PLANE_IP}
-sudo tail -f /var/log/k8s-bootstrap.log       # Common bootstrap
-sudo tail -f /var/log/k8s-cp-bootstrap.log   # Control plane init
-
-# Workers
-ssh ubuntu@${WORKER_IP}
-sudo tail -f /var/log/k8s-bootstrap.log       # Common bootstrap
-sudo tail -f /var/log/k8s-worker-bootstrap.log # Worker join
-```
-
-### Spot Worker Interruptions
-
-**Symptom**: Worker node disappears from `kubectl get nodes`
-
-**Cause**: AWS reclaimed spot instance (2-minute notice)
-
-**Fix**: Spot instances auto-restart (instance_interruption_behavior = "stop"), but may take 5-10 minutes to rejoin cluster
-
-**Prevention**: Set `worker_capacity_type = "on-demand"` in `terraform.tfvars` for critical workloads
-
-### Flannel Not Ready / Pods Stuck in ContainerCreating
-
-**Symptom**: Pods stuck in `ContainerCreating`, nodes show `NotReady`
-
-**Cause**: Flannel hasn't finished initializing (usually resolves within 1-2 min of cluster creation)
-
-**Check**:
-```bash
-kubectl get pods -n kube-flannel
-kubectl logs -n kube-flannel -l app=flannel --tail=20
-```
-
-**Fix** (if Flannel pods are crashing):
-```bash
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-```
-
-### SSH Connection Failures
-
-**Symptom**: `ssh: connect to host X port 22: Connection refused`
-
-**Cause**: Bootstrap still running, SSH service not ready yet
-
-**Fix**: Wait 2-3 minutes after `tofu apply`, then retry
-
-### Backend Configuration
-
-**Partial backend config**: `tofu/envs/lab/backend.tf` declares `terraform { backend "s3" {} }` with no coordinates. The actual bucket, region, and DynamoDB table are in the gitignored `backend.hcl`. In CI, `backend.hcl` is generated from GitHub Variables. Locally, copy from `backend.hcl.example`.
-
-**NEVER** hardcode backend coordinates directly into `backend.tf`.
+- **Bootstrap takes 8-12 min after `make apply`**: cloud-init runs in the background. Logs at
+  `/var/log/k8s-bootstrap.log`, `/var/log/k8s-cp-bootstrap.log`,
+  `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
+- **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
+  re-execute bootstrap scripts. Only new instances run them.
+- **Flannel NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply uses the
+  pinned URL: `kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml`.
+- **Spot worker disappeared**: auto-restarts within 5-10 min
+  (`instance_interruption_behavior = "stop"`). Workers rejoin automatically.
+- **Join token TTL is 24h**: workers joining more than 24h after `kubeadm init` need a new
+  token. See `docs/troubleshooting.md` for the `kubeadm token create` procedure.
+- **`make destroy` may fail with DependencyViolation**: Flannel/K8s create ENIs at runtime
+  that OpenTofu doesn't track. Both security groups have `revoke_rules_on_delete = true` and
+  `terraform_data` destroy-time provisioners to clean orphaned ENIs automatically. If it still
+  fails on older state, see `docs/troubleshooting.md` for manual cleanup commands.
+- **Backend config**: `tofu/envs/lab/backend.tf` declares an empty `backend "s3" {}`. Actual
+  coordinates in gitignored `backend.hcl` (local) or generated from GitHub Variables in CI.
+  Never hardcode backend coordinates into `backend.tf`.
 
 ---
 
@@ -471,7 +462,11 @@ kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/
 
 ## References
 
-- **ADRs**: `docs/decisions/` (design decisions and alternatives)
+- **ADRs**: `docs/decisions/`
+  - ADR-001: OpenTofu vs Terraform (license, community governance)
+  - ADR-002: Spot workers + On-Demand control plane (cost breakdown)
+  - ADR-003: Flannel + kube-proxy over Cilium eBPF (bootstrap deadlock)
+  - ADR-004: Kubeconfig via SSM Parameter Store (CI smoke test without SSH)
 - **OpenTofu Docs**: https://opentofu.org/docs/
 - **kubeadm Docs**: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/
 - **Flannel Docs**: https://github.com/flannel-io/flannel
@@ -482,17 +477,44 @@ kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/
 ## Maintenance Notes for AI Assistants
 
 **When updating Kubernetes version**:
-1. Update `kubernetes_version` local in `tofu/envs/lab/main.tf`
-2. Update `bootstrap/common.yaml` Kubernetes repo version (v1.35 → v1.XX)
-3. Test bootstrap on fresh cluster
-4. Update README.md version table
+1. Update pinned packages in `bootstrap/common.yaml`:
+   `kubelet=X.Y.Z-1.1 kubeadm=X.Y.Z-1.1 kubectl=X.Y.Z-1.1`
+2. Update the apt repo line in `bootstrap/common.yaml`:
+   `stable:/v1.35` → `stable:/v1.XX`
+3. Update `kubernetes_version` local in `tofu/envs/lab/main.tf`
+4. Update the version table in `README.md` ("What gets deployed")
+5. Update CLAUDE.md Tech Stack table
+
+**When updating containerd version**:
+1. Update pinned version in `bootstrap/common.yaml`:
+   `apt-get install -y containerd.io=X.Y.Z-1~ubuntu.24.04~noble`
+2. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
+
+**When updating Flannel version**:
+1. Update the `kubectl apply` URL in `bootstrap/control-plane.yaml`:
+   `releases/download/vX.Y.Z/kube-flannel.yml`
+2. Update the re-apply URL in `docs/troubleshooting.md` ("Nodes show NotReady")
+3. Update the re-apply URL in Known Gotchas above (Flannel NotReady bullet)
+4. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
 
 **When updating OpenTofu version**:
-1. Update `.github/workflows/*.yml` `tofu_version` field
-2. Test `tofu validate` locally
-3. Update README.md prerequisites
+1. Update `tofu_version` in all three `.github/workflows/*.yml` files
+2. Run `make validate` locally with the new version
+3. Update CLAUDE.md Tech Stack table and `README.md` prerequisites table
+
+**When updating pre-commit hook versions**:
+1. Run `pre-commit autoupdate` — review the diff before committing (major version bumps
+   may introduce breaking changes or new findings)
+2. Run `pre-commit run --all-files` to verify all hooks pass with updated versions
+3. Update `docs/development.md` prerequisites table if install commands change
 
 **When modifying cloud-init templates**:
-1. Verify `$${}` escaping for shell variables
+1. Verify `$${}` escaping for shell variables (see Critical Rules §2)
 2. Test templatefile rendering: `tofu console` → `local.control_plane_user_data`
 3. Verify bootstrap logs after apply: `/var/log/k8s-*-bootstrap.log`
+
+**When changing infrastructure architecture**:
+1. Update `docs/architecture/diagram.py`
+2. Regenerate outputs: `cd docs/architecture && python3 diagram.py`
+3. Commit `architecture.svg` and `architecture.png` alongside `diagram.py`
+4. See `docs/architecture/README.md` for prerequisites (diagrams==0.25.1, graphviz)
