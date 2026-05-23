@@ -61,12 +61,19 @@ kubeconfig: ## Fetch kubeconfig from SSM and save to KUBECONFIG_PATH
 smoke-test: ## Verify all nodes are Ready (kubeconfig fetched from SSM, not persisted to disk)
 	@KUBECONFIG_FILE=$$(mktemp); \
 	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
-	aws ssm get-parameter \
+	if ! aws ssm get-parameter \
 	  --name "/k8s/$(CLUSTER_NAME)/kubeconfig" \
 	  --with-decryption \
 	  --query Parameter.Value \
 	  --output text \
-	  --region $(AWS_REGION) > "$$KUBECONFIG_FILE"; \
+	  --region $(AWS_REGION) > "$$KUBECONFIG_FILE" 2>&1; then \
+	  echo "✗ Failed to fetch kubeconfig from SSM (check AWS credentials and profile)"; \
+	  exit 1; \
+	fi; \
+	if [ ! -s "$$KUBECONFIG_FILE" ]; then \
+	  echo "✗ Kubeconfig is empty — SSM fetch may have failed silently"; \
+	  exit 1; \
+	fi; \
 	chmod 600 "$$KUBECONFIG_FILE"; \
 	echo "Cluster nodes:"; \
 	KUBECONFIG="$$KUBECONFIG_FILE" kubectl get nodes; \
