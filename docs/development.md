@@ -13,6 +13,8 @@ In addition to the tools listed in the [Bootstrap Guide](bootstrap.md), local de
 | pre-commit | `pip install pre-commit` or `brew install pre-commit` | `pip install pre-commit` |
 | tflint | `brew install tflint` | `curl -sfL https://github.com/terraform-linters/tflint/releases/download/v0.62.1/tflint_linux_amd64.zip -o /tmp/tflint.zip && unzip /tmp/tflint.zip -d /usr/local/bin` |
 | trivy | `brew install trivy` | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.70.0/contrib/install.sh \| sh -s -- -b /usr/local/bin v0.70.0` |
+| Python 3.9+ | preinstalled | preinstalled |
+| graphviz | `brew install graphviz` | `apt-get install graphviz` |
 
 gitleaks is installed automatically by pre-commit on first run (via `language: golang`).
 
@@ -93,3 +95,18 @@ Review the diff before committing — major version bumps may introduce breaking
 ## 7. CI enforcement
 
 The `validate` workflow (`.github/workflows/validate.yml`) runs `pre-commit/action@v3.0.1` against every PR and push to `main`. Any hook failure blocks the merge. CI installs Trivy via `aquasecurity/setup-trivy@v0.2.6` and tflint via `terraform-linters/setup-tflint@v6.2.2`; gitleaks is installed automatically by pre-commit.
+
+---
+
+## 8. Regenerating the architecture diagram
+
+The diagram source lives in `docs/architecture/diagram.py`. After any infrastructure change:
+
+```bash
+pip install diagrams==0.25.1   # first time only
+cd docs/architecture
+python3 diagram.py             # overwrites architecture.svg and architecture.png
+git add architecture.svg architecture.png
+```
+
+See [docs/architecture/README.md](architecture/README.md) for full prerequisites and regeneration details.
