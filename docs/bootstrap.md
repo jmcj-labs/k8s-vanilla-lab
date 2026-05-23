@@ -1,6 +1,6 @@
 # AWS Bootstrap Guide
 
-One-time setup of the AWS resources that the CI/CD workflows and OpenTofu state backend depend on. Run this once per AWS account before the first `tofu apply`.
+One-time setup of the AWS resources that the CI/CD workflows and OpenTofu state backend depend on. Run this once per AWS account before the first `tofu apply`. After completing this guide, proceed to [docs/walkthrough.md](walkthrough.md) for first deployment.
 
 ---
 
