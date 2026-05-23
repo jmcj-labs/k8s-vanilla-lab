@@ -106,7 +106,7 @@ resource "terraform_data" "cleanup_cp_enis" {
 
   input = {
     sg_id  = aws_security_group.control_plane.id
-    region = data.aws_region.current.name
+    region = data.aws_region.current.id
   }
 
   provisioner "local-exec" {
@@ -270,7 +270,7 @@ resource "terraform_data" "cleanup_cp_ssm" {
 
   input = {
     cluster_name = var.cluster_name
-    region       = data.aws_region.current.name
+    region       = data.aws_region.current.id
   }
 
   provisioner "local-exec" {

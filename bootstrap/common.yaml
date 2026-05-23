@@ -27,7 +27,7 @@ net.ipv4.ip_forward                 = 1
 EOF
 
 cat > /etc/apt/sources.list.d/kubernetes.list <<EOF
-deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.35/deb/ /
+deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /
 EOF
 
 log "✓ Config files created"
@@ -100,7 +100,7 @@ log "✓ sysctl parameters applied"
 
 # Step 6: Add Kubernetes repository
 log "Step 6/8: Adding Kubernetes v1.35 repository"
-curl -fsSL https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.35/deb/Release.key | \
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key | \
   gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 apt-get update
 log "✓ Kubernetes repository added"

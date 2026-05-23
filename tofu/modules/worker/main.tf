@@ -88,7 +88,7 @@ resource "terraform_data" "cleanup_worker_enis" {
 
   input = {
     sg_id  = aws_security_group.worker.id
-    region = data.aws_region.current.name
+    region = data.aws_region.current.id
   }
 
   provisioner "local-exec" {
