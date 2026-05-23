@@ -83,9 +83,7 @@ locals {
   kubernetes_version = "1.35.5"
 
   # SSM parameter paths
-  ssm_parameter_base    = "/k8s/${var.cluster_name}"
-  ssm_join_token_path   = "/k8s/${var.cluster_name}/join-token"
-  ssm_ca_cert_hash_path = "/k8s/${var.cluster_name}/ca-cert-hash"
+  ssm_parameter_base = "/k8s/${var.cluster_name}"
 
 }
 
