@@ -24,6 +24,7 @@ jobs:
     steps:
       - name: Validate confirmation (manual runs only)
         if: github.event_name == 'workflow_dispatch'
+        working-directory: ${{ github.workspace }}
         run: |
           if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
             echo "Confirmation failed. Type 'destroy' to proceed."
