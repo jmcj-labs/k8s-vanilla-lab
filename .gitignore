@@ -3,7 +3,6 @@
 *.tfstate
 *.tfstate.*
 *.tfstate.backup
-.terraform.lock.hcl
 *.tfvars
 backend.hcl
 override.tf
