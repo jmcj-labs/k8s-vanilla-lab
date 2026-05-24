@@ -15,3 +15,10 @@ AVD-AWS-0164
 # scope for a lab. Production setup would use VPC endpoints (ECR, S3,
 # EC2, STS, SSM) and allow-listed egress CIDRs for image registries.
 AVD-AWS-0104
+
+# AVD-AWS-0107 — SSH/RDP ingress from 0.0.0.0/0 on cluster security groups
+# Lab tradeoff: my_ip defaults to 0.0.0.0/0 because the operator's home IP
+# changes constantly. For a short-lived lab (destroyed nightly by cron) SSH
+# keys provide the real access control. Production setup would restrict to a
+# known CIDR or use AWS SSM Session Manager instead of direct SSH.
+AVD-AWS-0107
