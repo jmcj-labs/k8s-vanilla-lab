@@ -30,11 +30,12 @@ variable "key_name" {
 }
 
 variable "my_ip" {
-  description = "Your public IP for SSH access (CIDR format)"
+  description = "CIDR allowed for SSH access (0.0.0.0/0 = open, fine for a lab)"
   type        = string
+  default     = "0.0.0.0/0"
   validation {
     condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32)"
+    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"
   }
 }
 
