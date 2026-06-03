@@ -154,7 +154,7 @@ ip-10-0-1-120   Ready    <none>          6m    v1.35.5
 ip-10-0-1-62    Ready    <none>          6m    v1.35.5
 ```
 
-If nodes show `NotReady`, Cilium is still initializing — check `kubectl get pods -n kube-system -l k8s-app=cilium`.
+If nodes show `NotReady`, Cilium is still initializing — check `kubectl get pods -n kube-system -l app.kubernetes.io/part-of=cilium`.
 Usually resolves within 1-2 minutes. See [troubleshooting.md](troubleshooting.md) if it persists.
 
 ---
