@@ -9,17 +9,23 @@ run from `tofu/envs/lab/`.
 
 **Symptom**: `kubectl get nodes` shows `NotReady`
 
-**Cause**: Flannel CNI hasn't finished initializing. Usually resolves 1-2 minutes after nodes join.
+**Cause**: Cilium CNI hasn't finished initializing. Usually resolves 1-2 minutes after nodes join.
 
 ```bash
-kubectl get pods -n kube-flannel
-kubectl logs -n kube-flannel -l app=flannel --tail=20
+kubectl get pods -n kube-system -l k8s-app=cilium
+kubectl logs -n kube-system -l k8s-app=cilium --tail=20
 ```
 
-If Flannel pods are in `CrashLoopBackOff`, re-apply manually:
+If Cilium pods are in `CrashLoopBackOff`, re-apply manually:
 
 ```bash
-kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml
+helm repo add cilium https://helm.cilium.io/
+helm repo update
+helm upgrade --install cilium cilium/cilium \
+  --namespace kube-system \
+  --version 1.19.4 \
+  --set ipam.mode=kubernetes \
+  --set kubeProxyReplacement=false
 ```
 
 ---
@@ -180,7 +186,7 @@ Only force-unlock if you are certain no other apply or destroy is running agains
 DependencyViolation: resource sg-xxxxxxxx has a dependent object
 ```
 
-**Cause**: Kubernetes and Flannel create ENIs (network interfaces) at runtime that OpenTofu
+**Cause**: Kubernetes and CNI components create ENIs (network interfaces) at runtime that OpenTofu
 doesn't track. These orphaned ENIs hold a reference to the security group, blocking deletion.
 
 Both security groups have `revoke_rules_on_delete = true` and a `terraform_data` destroy-time

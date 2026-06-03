@@ -81,7 +81,7 @@ resource "aws_security_group" "worker" {
   )
 }
 
-# Cleanup orphaned ENIs (created by Kubernetes/Flannel, not tracked by OpenTofu)
+# Cleanup orphaned ENIs (created by Kubernetes/CNI, not tracked by OpenTofu)
 # before destroying the security group. On destroy this runs first, then the SG.
 resource "terraform_data" "cleanup_worker_enis" {
   depends_on = [aws_security_group.worker]
