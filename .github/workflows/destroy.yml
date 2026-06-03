@@ -17,6 +17,8 @@ jobs:
   destroy:
     name: Destroy Infrastructure
     runs-on: ubuntu-latest
+    outputs:
+      deployed_at: ${{ steps.deployed_at.outputs.value }}
     defaults:
       run:
         working-directory: tofu/envs/lab
@@ -62,6 +64,19 @@ jobs:
       - name: OpenTofu Init
         run: tofu init -backend-config=backend.hcl
 
+      - name: Read deploy timestamp from SSM
+        id: deployed_at
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          VALUE=$(aws ssm get-parameter \
+            --name "/k8s/${CLUSTER_NAME}/deployed-at" \
+            --query Parameter.Value \
+            --output text \
+            --region "${AWS_REGION}" 2>/dev/null || echo "")
+          echo "value=${VALUE}" >> "${GITHUB_OUTPUT}"
+
       - name: OpenTofu Destroy
         id: destroy
         env:
@@ -71,18 +86,93 @@ jobs:
           TF_VAR_aws_profile: ""
         run: tofu destroy -auto-approve -no-color
 
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    needs: destroy
+    if: needs.destroy.result == 'success' && github.actor != 'dependabot[bot]'
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Collect Slack context values
+        id: context
+        env:
+          DEPLOYED_AT: ${{ needs.destroy.outputs.deployed_at }}
+        run: |
+          NOW=$(date +%s)
+          CONTROL_PLANE_RATE=0.038
+          WORKER_SPOT_RATE=0.0055
+          N_WORKERS=2
+
+          if [[ "${DEPLOYED_AT}" =~ ^[0-9]+$ ]]; then
+            UPTIME_SECONDS=$((NOW - DEPLOYED_AT))
+            if [ "${UPTIME_SECONDS}" -lt 0 ]; then
+              UPTIME_SECONDS=0
+            fi
+
+            DAYS=$((UPTIME_SECONDS / 86400))
+            HOURS=$(((UPTIME_SECONDS % 86400) / 3600))
+            MINS=$(((UPTIME_SECONDS % 3600) / 60))
+
+            if [ "${DAYS}" -gt 0 ]; then
+              UPTIME="${DAYS}d ${HOURS}h ${MINS}m"
+            else
+              UPTIME="${HOURS}h ${MINS}m"
+            fi
+
+            UPTIME_HOURS=$(awk "BEGIN {printf \"%.2f\", ${UPTIME_SECONDS}/3600}")
+            EST_COST=$(awk "BEGIN {printf \"%.2f\", ${UPTIME_HOURS} * (${CONTROL_PLANE_RATE} + (${N_WORKERS} * ${WORKER_SPOT_RATE}))}")
+          else
+            UPTIME="unknown"
+            EST_COST="unknown"
+          fi
+
+          EPOCH=$(date +%s)
+          echo "uptime=${UPTIME}" >> "${GITHUB_OUTPUT}"
+          echo "est_cost=${EST_COST}" >> "${GITHUB_OUTPUT}"
+          echo "epoch=${EPOCH}" >> "${GITHUB_OUTPUT}"
+
       - name: Notify Slack
-        if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          STATUS: ${{ job.status }}
+          UPTIME: ${{ steps.context.outputs.uptime }}
+          EST_COST: ${{ steps.context.outputs.est_cost }}
           ACTOR: ${{ github.actor }}
           TRIGGER: ${{ github.event_name }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EPOCH: ${{ steps.context.outputs.epoch }}
         run: |
           if [ -z "${SLACK_WEBHOOK_URL}" ]; then exit 0; fi
-          COLOR=$([[ "${STATUS}" == "success" ]] && echo "good" || echo "danger")
-          TEXT="k8s-vanilla-lab destroy *${STATUS}* (trigger: ${TRIGGER}, actor: ${ACTOR}) | <${RUN_URL}|View run>"
+
+          PAYLOAD=$(jq -n \
+            --arg UPTIME "${UPTIME}" \
+            --arg EST_COST "${EST_COST}" \
+            --arg TRIGGER "${TRIGGER}" \
+            --arg ACTOR "${ACTOR}" \
+            --arg RUN_URL "${RUN_URL}" \
+            --arg EPOCH "${EPOCH}" \
+            '{
+              attachments: [{
+                color: "#e01e5a",
+                blocks: [
+                  { type: "header", text: { type: "plain_text", text: "🔴 Cluster destruido: k8s-vanilla-lab" } },
+                  { type: "section", fields: [
+                    { type: "mrkdwn", text: ("*Uptime:*\n" + $UPTIME) },
+                    { type: "mrkdwn", text: ("*Coste estimado:*\n~$" + $EST_COST) },
+                    { type: "mrkdwn", text: "*Región:*\neu-west-1" },
+                    { type: "mrkdwn", text: ("*Trigger:*\n" + $TRIGGER) }
+                  ]},
+                  { type: "context", elements: [
+                    { type: "mrkdwn", text: ("por " + $ACTOR + " · <" + $RUN_URL + "|run> · <!date^" + $EPOCH + "^{date_short} {time}|now>") }
+                  ]}
+                ]
+              }]
+            }')
+
           curl -s -X POST "${SLACK_WEBHOOK_URL}" \
             -H "Content-Type: application/json" \
-            -d "{\"attachments\":[{\"color\":\"${COLOR}\",\"text\":\"${TEXT}\"}]}"
+            -d "${PAYLOAD}"
