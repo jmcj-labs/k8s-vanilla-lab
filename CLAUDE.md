@@ -13,7 +13,7 @@ learning in public, not for production.
 1. **Learning**: Hands-on Kubernetes bootstrapping with kubeadm, containerd, and cloud-init
 2. **Golden Path**: Reusable, documented infrastructure patterns for platform engineers
 3. **Cost-Optimized**: Lab cluster for ~$36/month using spot instances
-4. **Modern Stack**: OpenTofu, Flannel CNI, OIDC, cloud-init automation
+4. **Modern Stack**: OpenTofu, Cilium CNI, OIDC, cloud-init automation
 
 **Not Goals**:
 - Production-ready cluster (no HA, no backups, spot workers)
@@ -29,7 +29,7 @@ learning in public, not for production.
 | IaC | OpenTofu (NOT Terraform) | 1.8.0 |
 | Kubernetes | kubeadm | 1.35.5 |
 | Container Runtime | containerd (Docker repo) | 2.2.4 |
-| CNI | Flannel (VXLAN) | v0.28.4 |
+| CNI | Cilium | v1.19.4 |
 | Cloud | AWS EC2 | - |
 | Bootstrap | cloud-init | - |
 | CI/CD | GitHub Actions (OIDC) | - |
@@ -243,7 +243,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 - Security group (SSH, kubelet API, NodePorts, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
-- `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/Flannel at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
+- `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/CNI components at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
 
 **Key Feature**: `capacity_type` variable:
 - `"spot"` (default): 70% cost savings, can be reclaimed
@@ -307,24 +307,22 @@ All parameters are deleted by a destroy-time provisioner on `tofu destroy`.
 **Token TTL**: `kubeadm token create --ttl 24h`. Workers that need to rejoin after 24h require a
 new token — see `docs/troubleshooting.md`.
 
-### 3. Flannel CNI (Automatic via Bootstrap)
+### 3. Cilium CNI (Automatic via Bootstrap)
 
-**Why over Cilium**: Cilium in `kubeProxyReplacement=true` mode requires
-`--skip-phases=addon/kube-proxy` at `kubeadm init` time. This creates a bootstrap deadlock:
-without kube-proxy, Service IP routing doesn't exist; Flannel/Cilium need to reach
-`10.96.0.1:443` (the `kubernetes` Service) to contact the API server; the deadlock cannot be
-broken from within cloud-init without manual post-apply steps. See ADR-003 for full context.
+**Why this mode**: Cilium in strict kube-proxy replacement mode can deadlock unattended bootstrap
+if kube-proxy is skipped too early. To keep cloud-init reliable, the cluster boots with kube-proxy
+enabled and installs Cilium in compatibility mode.
 
 **Implementation**:
 - kube-proxy is installed normally — no `--skip-phases` flag
-- `bootstrap/control-plane.yaml` applies Flannel v0.28.4 automatically:
+- `bootstrap/control-plane.yaml` installs Cilium via Helm:
   ```bash
-  kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml
+  helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.4 --set ipam.mode=kubernetes --set kubeProxyReplacement=false
   ```
 - No manual CNI installation needed after cluster creation
 
-**NEVER** add `--skip-phases=addon/kube-proxy` to the `kubeadm init` call — Flannel requires
-kube-proxy for Service IP routing.
+**NEVER** add `--skip-phases=addon/kube-proxy` to the default bootstrap path without also wiring
+`k8sServiceHost`/`k8sServicePort` and validating kube-proxy-free bring-up end-to-end.
 
 ### 4. Spot Workers + On-Demand Control Plane
 
@@ -413,13 +411,13 @@ without opening another file:
   `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
 - **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
   re-execute bootstrap scripts. Only new instances run them.
-- **Flannel NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply uses the
-  pinned URL: `kubectl apply -f https://github.com/flannel-io/flannel/releases/download/v0.28.4/kube-flannel.yml`.
+- **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply uses:
+  `helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.4 --set ipam.mode=kubernetes --set kubeProxyReplacement=false`.
 - **Spot worker disappeared**: auto-restarts within 5-10 min
   (`instance_interruption_behavior = "stop"`). Workers rejoin automatically.
 - **Join token TTL is 24h**: workers joining more than 24h after `kubeadm init` need a new
   token. See `docs/troubleshooting.md` for the `kubeadm token create` procedure.
-- **`make destroy` may fail with DependencyViolation**: Flannel/K8s create ENIs at runtime
+- **`make destroy` may fail with DependencyViolation**: Kubernetes/CNI components create ENIs at runtime
   that OpenTofu doesn't track. Both security groups have `revoke_rules_on_delete = true` and
   `terraform_data` destroy-time provisioners to clean orphaned ENIs automatically. If it still
   fails on older state, see `docs/troubleshooting.md` for manual cleanup commands.
@@ -456,7 +454,7 @@ without opening another file:
 
 1. Create `addons/my-addon/README.md` with installation instructions
 2. Include Helm chart or kubectl manifests
-3. Document dependencies (e.g., "requires Flannel/cluster running first")
+3. Document dependencies (e.g., "requires CNI/cluster running first")
 
 ---
 
@@ -465,11 +463,11 @@ without opening another file:
 - **ADRs**: `docs/decisions/`
   - ADR-001: OpenTofu vs Terraform (license, community governance)
   - ADR-002: Spot workers + On-Demand control plane (cost breakdown)
-  - ADR-003: Flannel + kube-proxy over Cilium eBPF (bootstrap deadlock)
+  - ADR-003: Cilium with kube-proxy compatibility mode (safe bootstrap path)
   - ADR-004: Kubeconfig via SSM Parameter Store (CI smoke test without SSH)
 - **OpenTofu Docs**: https://opentofu.org/docs/
 - **kubeadm Docs**: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/
-- **Flannel Docs**: https://github.com/flannel-io/flannel
+- **Cilium Docs**: https://docs.cilium.io/
 - **cloud-init Docs**: https://cloudinit.readthedocs.io/
 
 ---
@@ -490,11 +488,11 @@ without opening another file:
    `apt-get install -y containerd.io=X.Y.Z-1~ubuntu.24.04~noble`
 2. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
 
-**When updating Flannel version**:
-1. Update the `kubectl apply` URL in `bootstrap/control-plane.yaml`:
-   `releases/download/vX.Y.Z/kube-flannel.yml`
-2. Update the re-apply URL in `docs/troubleshooting.md` ("Nodes show NotReady")
-3. Update the re-apply URL in Known Gotchas above (Flannel NotReady bullet)
+**When updating Cilium version**:
+1. Update the Helm chart version in `bootstrap/control-plane.yaml`:
+   `--version X.Y.Z`
+2. Update the re-apply command in `docs/troubleshooting.md` ("Nodes show NotReady")
+3. Update the re-apply command in Known Gotchas above (Cilium NotReady bullet)
 4. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
 
 **When updating OpenTofu version**:

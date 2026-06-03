@@ -141,11 +141,10 @@ echo ""
 # ── Step 3: OIDC provider ─────────────────────────────────────────────────────
 log "Step 3/4: OIDC provider (token.actions.githubusercontent.com)"
 
-OIDC_ARN=$(aws iam list-open-id-connect-providers \
-  --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn | [0]" \
-  --output text 2>/dev/null || echo "")
+OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
 
-if [ -n "${OIDC_ARN}" ] && [ "${OIDC_ARN}" != "None" ]; then
+if aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn "${OIDC_ARN}" >/dev/null 2>&1; then
   ok "Already exists (${OIDC_ARN})"
 else
   log "Creating OIDC provider..."
@@ -159,9 +158,7 @@ else
     ok "Created (${OIDC_ARN})"
   } || {
     if echo "${CREATE_OUT}" | grep -q "EntityAlreadyExists"; then
-      OIDC_ARN=$(aws iam list-open-id-connect-providers \
-        --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn | [0]" \
-        --output text)
+      warn "OIDC provider already exists but could not be read with current permissions; continuing"
       ok "Already exists (${OIDC_ARN})"
     else
       echo "${CREATE_OUT}" >&2

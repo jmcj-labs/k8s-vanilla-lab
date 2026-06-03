@@ -243,8 +243,10 @@ aws dynamodb describe-table \
   --output table
 
 # OIDC provider is registered
-aws iam list-open-id-connect-providers \
-  --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')]"
+aws iam get-open-id-connect-provider \
+  --open-id-connect-provider-arn "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):oidc-provider/token.actions.githubusercontent.com" \
+  --query '{Url:Url,ClientIDList:ClientIDList}' \
+  --output json
 ```
 
 ---
@@ -263,10 +265,10 @@ aws iam delete-role-policy \
 aws iam delete-role --role-name k8s-vanilla-lab-github-actions
 
 # Delete OIDC provider
-OIDC_ARN=$(aws iam list-open-id-connect-providers \
-  --query "OIDCProviderList[?ends_with(Arn, 'token.actions.githubusercontent.com')].Arn" \
-  --output text)
-[ -n "${OIDC_ARN}" ] && aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "${OIDC_ARN}"
+OIDC_ARN="arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
+if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "${OIDC_ARN}" >/dev/null 2>&1; then
+  aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "${OIDC_ARN}"
+fi
 
 # Delete DynamoDB table
 aws dynamodb delete-table --table-name k8s-vanilla-lab-tflock

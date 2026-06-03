@@ -102,7 +102,7 @@ make ssh-cp
 
 # Inside the instance:
 sudo tail -f /var/log/k8s-bootstrap.log       # Stage 1 — containerd, kubeadm install
-sudo tail -f /var/log/k8s-cp-bootstrap.log    # Stage 2 — kubeadm init, Flannel, SSM store
+sudo tail -f /var/log/k8s-cp-bootstrap.log    # Stage 2 — kubeadm init, Cilium, SSM store
 ```
 
 Stage 2 is complete when the log ends with:
@@ -145,7 +145,7 @@ export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
 kubectl get nodes
 ```
 
-Expected output (Flannel is installed automatically during Stage 2, so all nodes come up `Ready`):
+Expected output (Cilium is installed automatically during Stage 2, so all nodes come up `Ready`):
 
 ```
 NAME            STATUS   ROLES           AGE   VERSION
@@ -154,7 +154,7 @@ ip-10-0-1-120   Ready    <none>          6m    v1.35.5
 ip-10-0-1-62    Ready    <none>          6m    v1.35.5
 ```
 
-If nodes show `NotReady`, Flannel is still initializing — check `kubectl get pods -n kube-flannel`.
+If nodes show `NotReady`, Cilium is still initializing — check `kubectl get pods -n kube-system -l k8s-app=cilium`.
 Usually resolves within 1-2 minutes. See [troubleshooting.md](troubleshooting.md) if it persists.
 
 ---

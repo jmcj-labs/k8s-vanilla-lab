@@ -147,5 +147,5 @@ If a Dependabot PR was opened before a fix landed on `main`, its CI check may sh
 This rebases the branch onto the updated `main` and triggers a fresh CI run.
 
 This complements the explicit version pinning of Kubernetes, containerd, and
-Flannel in `bootstrap/common.yaml` and `bootstrap/control-plane.yaml` — pinning
+Cilium in `bootstrap/common.yaml` and `bootstrap/control-plane.yaml` — pinning
 controls *when* you update, Dependabot surfaces *what* is available to update.

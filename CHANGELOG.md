@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `bootstrap/control-plane.yaml`: replaced Flannel install with pinned Cilium Helm install (`cilium/cilium` `1.19.4`) in kube-proxy compatibility mode (`kubeProxyReplacement=false`)
+- Updated docs to reflect Cilium as the default CNI (`README.md`, `docs/walkthrough.md`, `docs/troubleshooting.md`, `docs/decisions/ADR-003-cilium-ebpf.md`)
+- Updated module comments and development guide references from Flannel-specific wording to CNI/Cilium wording
+
 ## [0.1.0] - 2026-05-22
 
 ### Added

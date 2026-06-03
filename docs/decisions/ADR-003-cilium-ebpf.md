@@ -1,53 +1,43 @@
-# ADR-003: CNI Selection — Flannel over Cilium eBPF
+# ADR-003: CNI Selection — Cilium with kube-proxy compatibility mode
 
-**Status**: Superseded (originally Cilium, revised to Flannel)  
-**Date**: 2025-05-13 (revised 2025-05-22)  
+**Status**: Accepted  
+**Date**: 2025-05-13 (revised 2026-06-03)  
 **Deciders**: Platform Engineering Team
 
 ---
 
 ## Context
 
-Kubernetes requires a CNI plugin for pod-to-pod communication and Service networking. Two realistic options were evaluated for this lab:
+Kubernetes requires a CNI plugin for pod networking. The lab originally moved away from Cilium
+after hitting bootstrap failures in fully automated cloud-init runs.
 
-- **Cilium eBPF** — replaces kube-proxy entirely, uses eBPF for O(1) Service lookups, Layer 7 network policies, Hubble observability
-- **Flannel + kube-proxy** — VXLAN overlay networking, simple, widely understood, kube-proxy handles Service routing via iptables
-
-The original decision (2025-05-13) chose Cilium. This was revised after bootstrap issues were encountered.
-
----
-
-## Problem with Original Cilium Decision
-
-Cilium in `kubeProxyReplacement=true` mode requires kube-proxy to be **skipped at kubeadm init time**:
+The failure mode was specific to **Cilium kube-proxy replacement at bootstrap time**:
 
 ```bash
 kubeadm init --skip-phases=addon/kube-proxy
 ```
 
-This creates a **bootstrap deadlock**:
-
-1. kubeadm skips kube-proxy → no Service IP routing
-2. Flannel (or Cilium pre-install) needs to reach `10.96.0.1:443` (kubernetes Service) to contact the API server
-3. Without kube-proxy, Service IPs don't resolve → Cilium pod can't start → networking never initializes
-
-Cilium itself cannot break the deadlock because it needs the API server to pull its own config, but the API server is unreachable without Service IP routing.
-
-**Attempted fix**: Install Cilium via `--set k8sServiceHost=<private-IP>` to bypass Service IP. This works in theory but adds manual post-bootstrap steps that defeat the goal of fully automated cloud-init bootstrapping.
+Skipping kube-proxy before Cilium is operational can create a bootstrap deadlock because Service
+IP routing is not yet programmed.
 
 ---
 
-## Revised Decision
+## Decision
 
-**Use Flannel (VXLAN) + kube-proxy.**
+**Use Cilium as the default CNI, while keeping kube-proxy enabled during bootstrap.**
 
-kube-proxy is installed by default (no `--skip-phases` flag), which means Service IPs work immediately after `kubeadm init`. Flannel is then applied automatically within the same cloud-init script:
+Implementation in control-plane bootstrap:
 
 ```bash
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+helm upgrade --install cilium cilium/cilium \
+  --namespace kube-system \
+  --version 1.19.4 \
+  --set ipam.mode=kubernetes \
+  --set kubeProxyReplacement=false
 ```
 
-No manual steps. Cluster is fully operational (all nodes `Ready`, pods schedulable) before cloud-init exits.
+This keeps the bootstrap path zero-touch and avoids the deadlock from kube-proxy-free bring-up,
+while still standardizing the cluster on Cilium.
 
 ---
 
@@ -55,38 +45,41 @@ No manual steps. Cluster is fully operational (all nodes `Ready`, pods schedulab
 
 ### Positive
 
-- **Zero-touch bootstrap**: Flannel installs automatically, no post-apply manual steps
-- **Simplicity**: VXLAN overlay is a foundational concept — ideal for learning CNI internals
-- **Reliability**: kube-proxy + iptables is battle-tested and well-understood
-- **Debuggability**: Flannel issues are easier to diagnose than eBPF datapath problems
+- **Cilium by default**: modern eBPF data plane and policy engine are available from day 1
+- **Reliable bootstrap**: no `--skip-phases=addon/kube-proxy`, so Service routing is available immediately
+- **Zero-touch provisioning**: CNI still installs inside cloud-init with no post-apply manual steps
+- **Clear migration path**: kube-proxy replacement can be introduced later as a dedicated exercise
 
 ### Negative
 
-- **Performance**: iptables O(n) lookup vs eBPF O(1) — irrelevant at lab scale (<10 Services)
-- **No L7 policies**: NetworkPolicies are IP/port only (Layer 3/4)
-- **No Hubble**: Less network observability than Cilium
-- **Not production-modern**: Real production clusters increasingly use Cilium or Calico eBPF
+- **Not yet kube-proxy-free**: full Cilium datapath replacement benefits are deferred
+- **Extra moving part**: Helm is needed in bootstrap to install pinned Cilium chart versions
+- **Future tuning required**: kube-proxy replacement still needs API host/port wiring and validation
 
-### When to revisit
+---
 
-If the goal shifts from "learn Kubernetes bootstrapping" to "learn advanced CNI/eBPF networking", replace Flannel with Cilium — but keep kube-proxy installed initially, then migrate to `kubeProxyReplacement=true` as a separate learning exercise after the cluster is stable.
+## Deferred Follow-up
+
+When the objective shifts to kube-proxy-free operation, treat it as a separate change:
+
+1. bootstrap with kube-proxy enabled remains unchanged for cluster bring-up safety
+2. validate kernel compatibility and Cilium readiness on the running cluster
+3. migrate to `kubeProxyReplacement=true` with explicit `k8sServiceHost` and `k8sServicePort`
 
 ---
 
 ## Alternatives Considered
 
-| CNI | Decision | Reason |
-|-----|----------|--------|
-| Cilium (kube-proxy replacement) | Rejected | Bootstrap deadlock with automated cloud-init |
-| Cilium (alongside kube-proxy) | Future option | Works, but defeats Cilium's main advantage |
-| Calico eBPF | Not evaluated | Similar complexity to Cilium |
-| Flannel + kube-proxy | **Selected** | Simple, reliable, zero-touch bootstrap |
-| Weave Net | Not evaluated | Slower, less maintained |
+| Option | Decision | Reason |
+|--------|----------|--------|
+| Cilium with kube-proxy replacement at bootstrap | Rejected for bootstrap default | Deadlock-prone in unattended cloud-init bring-up |
+| Flannel + kube-proxy | Rejected | Stable but does not meet current objective to standardize on Cilium |
+| Cilium with kube-proxy compatibility mode | **Selected** | Meets Cilium objective with reliable automated bootstrap |
 
 ---
 
 ## References
 
-- [Flannel GitHub](https://github.com/flannel-io/flannel)
-- [kubeadm init phases](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-init/#init-phases)
+- [Cilium kubeadm installation](https://docs.cilium.io/en/stable/installation/k8s-install-kubeadm/)
 - [Cilium kube-proxy replacement](https://docs.cilium.io/en/stable/network/kubernetes/kubeproxy-free/)
+- [kubeadm init phases](https://kubernetes.io/docs/reference/setup-tools/kubeadm/kubeadm-init/#init-phases)

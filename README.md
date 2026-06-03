@@ -19,7 +19,7 @@ Kubernetes 1.35 bootstrapped with kubeadm on AWS EC2, automated with OpenTofu an
 | Component | Role |
 |-----------|------|
 | Control plane (t3.medium, on-demand) | kubeadm init, etcd, API server, Elastic IP |
-| Worker nodes × 2 (t3.medium, spot) | kubelet, containerd, Flannel agent |
+| Worker nodes × 2 (t3.medium, spot) | kubelet, containerd, Cilium agent |
 | Internet Gateway + public subnet | Single public subnet, no NAT gateway |
 | SSM Parameter Store | Join token, CA cert hash, kubeconfig distribution |
 | GitHub Actions (OIDC) | Validate, apply, destroy — no long-lived credentials |
@@ -38,7 +38,7 @@ server and etcd are never interrupted by spot reclamations. See
 | Kubernetes | 1.35.5 | Orchestration platform |
 | containerd | 2.2.4 | Container runtime (CRI) |
 | kubeadm / kubelet / kubectl | 1.35.5 | Cluster bootstrap and node management |
-| Flannel | v0.28.4 | VXLAN overlay CNI |
+| Cilium | v1.19.4 | eBPF-based CNI (kube-proxy compatibility mode) |
 | kube-proxy | 1.35.5 | Service IP routing (iptables) |
 | Ubuntu | 24.04 LTS | Base OS |
 | OpenTofu | 1.8.0 | Infrastructure as Code |
@@ -48,7 +48,7 @@ Deployment runs in three sequential stages:
 | Stage | What happens | Duration |
 |-------|-------------|----------|
 | 1 — Common bootstrap | containerd, kubeadm, kubelet, AWS CLI installed on all nodes | 3-5 min |
-| 2 — Control plane init | `kubeadm init`, Flannel applied, join data and kubeconfig stored in SSM | 5-7 min |
+| 2 — Control plane init | `kubeadm init`, Cilium installed, join data and kubeconfig stored in SSM | 5-7 min |
 | 3 — Workers join | Workers poll SSM for join token, run `kubeadm join` | 2-3 min |
 
 Total: 8-12 minutes after `make apply` completes.
@@ -114,7 +114,7 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
 |-----|----------|-----------|
 | [ADR-001](docs/decisions/ADR-001-opentofu-vs-terraform.md) | OpenTofu over Terraform | MPL 2.0 license; Linux Foundation governance |
 | [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md) | Spot workers + On-Demand control plane | 60% cost reduction ($92 → $36/month) without compromising cluster availability |
-| [ADR-003](docs/decisions/ADR-003-cilium-ebpf.md) | Flannel + kube-proxy over Cilium eBPF | Cilium caused a bootstrap deadlock in cloud-init; Flannel installs zero-touch |
+| [ADR-003](docs/decisions/ADR-003-cilium-ebpf.md) | Cilium in kube-proxy compatibility mode | Avoids kube-proxy-replacement bootstrap deadlock while still standardizing on Cilium |
 | [ADR-004](docs/decisions/ADR-004-kubeconfig-ssm.md) | Kubeconfig via SSM | CI smoke test without opening port 22 to runner CIDR |
 
 ---
