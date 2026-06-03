@@ -73,7 +73,6 @@ When the objective shifts to kube-proxy-free operation, treat it as a separate c
 | Option | Decision | Reason |
 |--------|----------|--------|
 | Cilium with kube-proxy replacement at bootstrap | Rejected for bootstrap default | Deadlock-prone in unattended cloud-init bring-up |
-| Flannel + kube-proxy | Rejected | Stable but does not meet current objective to standardize on Cilium |
 | Cilium with kube-proxy compatibility mode | **Selected** | Meets Cilium objective with reliable automated bootstrap |
 
 ---

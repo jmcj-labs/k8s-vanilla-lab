@@ -70,15 +70,131 @@ jobs:
           make smoke-test CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 
+      - name: Record deployment timestamp in SSM
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          DEPLOYED_AT=$(date +%s)
+          aws ssm put-parameter \
+            --name "/k8s/${CLUSTER_NAME}/deployed-at" \
+            --value "${DEPLOYED_AT}" \
+            --type String \
+            --overwrite \
+            --region "${AWS_REGION}"
+
+  notify-slack:
+    name: Notify Slack
+    runs-on: ubuntu-latest
+    needs: apply
+    if: needs.apply.result == 'success' && github.actor != 'dependabot[bot]'
+    defaults:
+      run:
+        working-directory: tofu/envs/lab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Generate backend.hcl
+        env:
+          TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          cat > backend.hcl << BACKENDCFG
+          bucket         = "${TF_BACKEND_BUCKET}"
+          key            = "k8s-vanilla-lab/terraform.tfstate"
+          region         = "${AWS_REGION}"
+          encrypt        = true
+          dynamodb_table = "k8s-vanilla-lab-tflock"
+          BACKENDCFG
+
+      - name: OpenTofu Init
+        run: tofu init -backend-config=backend.hcl
+
+      - name: Collect Slack context values
+        id: context
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          API_ENDPOINT=$(aws ssm get-parameter \
+            --name "/k8s/${CLUSTER_NAME}/api-endpoint" \
+            --with-decryption \
+            --query Parameter.Value \
+            --output text \
+            --region "${AWS_REGION}" 2>/dev/null || echo "unknown")
+
+          WORKER_COUNT=$(tofu output -json worker_public_ips | jq 'length' 2>/dev/null || echo "2")
+          NODE_COUNT=$((WORKER_COUNT + 1))
+
+          INSTANCE_TYPES=$(aws ec2 describe-instances \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceType' \
+            --output json \
+            --region "${AWS_REGION}" | jq -r 'if length==0 then "unknown" else group_by(.) | map("\(.[0]) x\(length)") | join(", ") end')
+
+          CONTROL_PLANE_RATE=0.038
+          WORKER_SPOT_RATE=0.0055
+          HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", ${CONTROL_PLANE_RATE} + (${WORKER_COUNT} * ${WORKER_SPOT_RATE})}")
+          EPOCH=$(date +%s)
+
+          echo "api_endpoint=${API_ENDPOINT}" >> "${GITHUB_OUTPUT}"
+          echo "node_count=${NODE_COUNT}" >> "${GITHUB_OUTPUT}"
+          echo "instance_types=${INSTANCE_TYPES}" >> "${GITHUB_OUTPUT}"
+          echo "hourly_cost=${HOURLY_COST}" >> "${GITHUB_OUTPUT}"
+          echo "epoch=${EPOCH}" >> "${GITHUB_OUTPUT}"
+
       - name: Notify Slack
-        if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          STATUS: ${{ job.status }}
+          NODE_COUNT: ${{ steps.context.outputs.node_count }}
+          API_ENDPOINT: ${{ steps.context.outputs.api_endpoint }}
+          INSTANCE_TYPES: ${{ steps.context.outputs.instance_types }}
+          HOURLY_COST: ${{ steps.context.outputs.hourly_cost }}
+          GIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EPOCH: ${{ steps.context.outputs.epoch }}
         run: |
           if [ -z "${SLACK_WEBHOOK_URL}" ]; then exit 0; fi
-          COLOR=$([[ "${STATUS}" == "success" ]] && echo "good" || echo "danger")
+
+          PAYLOAD=$(jq -n \
+            --arg NODE_COUNT "${NODE_COUNT}" \
+            --arg API_ENDPOINT "${API_ENDPOINT}" \
+            --arg INSTANCE_TYPES "${INSTANCE_TYPES}" \
+            --arg HOURLY_COST "${HOURLY_COST}" \
+            --arg GIT_SHA "${GIT_SHA}" \
+            --arg ACTOR "${ACTOR}" \
+            --arg RUN_URL "${RUN_URL}" \
+            --arg EPOCH "${EPOCH}" \
+            '{
+              attachments: [{
+                color: "#2eb67d",
+                blocks: [
+                  { type: "header", text: { type: "plain_text", text: "🟢 Cluster desplegado: k8s-vanilla-lab" } },
+                  { type: "section", fields: [
+                    { type: "mrkdwn", text: "*Región:*\neu-west-1" },
+                    { type: "mrkdwn", text: "*K8s:*\nv1.35.5" },
+                    { type: "mrkdwn", text: ("*Nodos:*\n" + $NODE_COUNT) },
+                    { type: "mrkdwn", text: ("*API endpoint:*\n" + $API_ENDPOINT) },
+                    { type: "mrkdwn", text: ("*Instancias:*\n" + $INSTANCE_TYPES) },
+                    { type: "mrkdwn", text: ("*Coste/hora:*\n~$" + $HOURLY_COST) }
+                  ]},
+                  { type: "context", elements: [
+                    { type: "mrkdwn", text: ("commit `" + $GIT_SHA + "` · por " + $ACTOR + " · <" + $RUN_URL + "|run> · <!date^" + $EPOCH + "^{date_short} {time}|now>") }
+                  ]}
+                ]
+              }]
+            }')
+
           curl -s -X POST "${SLACK_WEBHOOK_URL}" \
             -H "Content-Type: application/json" \
-            -d "{\"attachments\":[{\"color\":\"${COLOR}\",\"text\":\"k8s-vanilla-lab apply *${STATUS}* | <${RUN_URL}|View run>\"}]}"
+            -d "${PAYLOAD}"

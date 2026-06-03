@@ -12,8 +12,8 @@ run from `tofu/envs/lab/`.
 **Cause**: Cilium CNI hasn't finished initializing. Usually resolves 1-2 minutes after nodes join.
 
 ```bash
-kubectl get pods -n kube-system -l k8s-app=cilium
-kubectl logs -n kube-system -l k8s-app=cilium --tail=20
+kubectl get pods -n kube-system -l app.kubernetes.io/part-of=cilium
+kubectl logs -n kube-system -l app.kubernetes.io/part-of=cilium --tail=20
 ```
 
 If Cilium pods are in `CrashLoopBackOff`, re-apply manually:

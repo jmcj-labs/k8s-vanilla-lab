@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `bootstrap/control-plane.yaml`: replaced Flannel install with pinned Cilium Helm install (`cilium/cilium` `1.19.4`) in kube-proxy compatibility mode (`kubeProxyReplacement=false`)
+- `bootstrap/control-plane.yaml`: replaced previous CNI install step with pinned Cilium Helm install (`cilium/cilium` `1.19.4`) in kube-proxy compatibility mode (`kubeProxyReplacement=false`)
 - Updated docs to reflect Cilium as the default CNI (`README.md`, `docs/walkthrough.md`, `docs/troubleshooting.md`, `docs/decisions/ADR-003-cilium-ebpf.md`)
-- Updated module comments and development guide references from Flannel-specific wording to CNI/Cilium wording
+- Updated module comments and development guide references to CNI/Cilium wording
 
 ## [0.1.0] - 2026-05-22
 
@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Bootstrap automation (cloud-init)**
 - `bootstrap/common.yaml`: installs containerd 2.2.4, kubeadm/kubelet/kubectl 1.35.5, AWS CLI v2; handles containerd config v3 (2.x) and v2 (1.x) cgroup driver setup
-- `bootstrap/control-plane.yaml`: runs `kubeadm init`, installs Flannel v0.28.4, stores join token + CA cert hash + kubeconfig in SSM Parameter Store (SecureString)
+- `bootstrap/control-plane.yaml`: runs `kubeadm init`, installs Cilium, stores join token + CA cert hash + kubeconfig in SSM Parameter Store (SecureString)
 - `bootstrap/worker.yaml`: polls SSM until join parameters are available, runs `kubeadm join`
 
 **GitHub Actions workflows**
@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Architecture Decision Records**
 - ADR-001: OpenTofu over Terraform (license and community reasons)
 - ADR-002: Spot workers + On-Demand control plane (cost optimisation)
-- ADR-003: Flannel CNI over Cilium (bootstrap deadlock avoidance; Flannel requires kube-proxy, zero-touch cloud-init install)
+- ADR-003: Cilium with kube-proxy compatibility mode (safe bootstrap without kube-proxy replacement deadlock)
 - ADR-004: Kubeconfig distributed via SSM Parameter Store (CI smoke test without SSH; destroy-time cleanup provisioner)
 
 **Security hardening**
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EBS root volumes encrypted
 - IAM policies scoped to `/k8s/${cluster_name}/*` in SSM
 - `revoke_rules_on_delete = true` on all security groups (prevents `DependencyViolation` on destroy)
-- Destroy-time ENI cleanup provisioners (orphaned ENIs created by Flannel at runtime)
+- Destroy-time ENI cleanup provisioners (orphaned ENIs created by Kubernetes/CNI components at runtime)
 
 [Unreleased]: https://github.com/jmcastellanojimenez/k8s-vanilla-lab/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jmcastellanojimenez/k8s-vanilla-lab/releases/tag/v0.1.0
