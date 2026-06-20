@@ -4,14 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
     target-branch: "main"
 
   - package-ecosystem: "terraform"
     directory: "/tofu/envs/lab"
     schedule:
       interval: "weekly"
-    labels:
-      - "dependencies"
     target-branch: "main"
