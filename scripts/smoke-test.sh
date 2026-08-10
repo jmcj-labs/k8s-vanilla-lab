@@ -87,7 +87,11 @@ EOF
 # WaitForFirstConsumer: the PVC only binds once the pod is scheduled
 kubectl wait --for=jsonpath='{.status.phase}'=Bound pvc/smoke-test-pvc --timeout=300s \
   || FAIL "gp3 PVC did not reach Bound within 300s"
-OK "Dynamic gp3 PVC reached Bound (provisioned by ebs.csi.aws.com)"
+# Bound proves provisioning; a Ready pod proves the volume was also
+# attached and mounted (the kubelet mounts it before starting containers).
+kubectl wait --for=condition=Ready pod/smoke-test-pod --timeout=180s \
+  || FAIL "smoke-test-pod did not become Ready — volume attach/mount failed"
+OK "Dynamic gp3 PVC Bound + volume attached and mounted (ebs.csi.aws.com)"
 
 # ── 6. Shared Gateway programmed ─────────────────────────────────────────────
 kubectl -n infra wait --for=condition=Accepted gateway/shared-gw --timeout=120s \

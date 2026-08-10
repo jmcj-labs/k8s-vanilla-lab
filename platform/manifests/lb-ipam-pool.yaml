@@ -6,14 +6,22 @@
 # until the first pool exists): with this pool, the Service gets an IP and the
 # Gateway becomes Programmed.
 #
-# The CIDR is deliberately OUTSIDE the VPC (10.0.0.0/16): these IPs are
-# cluster-internal virtual IPs, not externally routable (that would need BGP,
-# L2 announcements, or a real NLB — the Sprint 2 ingress decision). External
-# access remains via the Service's NodePorts.
+# The CIDR is deliberately OUTSIDE the VPC (10.0.0.0/16): these are virtual
+# LoadBalancer IPs that are assigned but NOT announced externally (no BGP, no
+# L2 announcements, no AWS routes — a real NLB is the Sprint 2 ingress
+# decision). External access remains via the Service's NodePorts.
+#
+# serviceSelector scopes the pool to LoadBalancer Services in the infra
+# namespace (matched via Cilium's reserved io.kubernetes.service.namespace
+# label, so the Gateway's generated Service needs no labels of its own) —
+# future LB Services elsewhere must opt in via their own pool.
 apiVersion: cilium.io/v2
 kind: CiliumLoadBalancerIPPool
 metadata:
-  name: default-pool
+  name: infra-pool
 spec:
   blocks:
     - cidr: "172.20.255.0/24"
+  serviceSelector:
+    matchLabels:
+      io.kubernetes.service.namespace: infra

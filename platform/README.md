@@ -22,7 +22,7 @@ Prerequisites provided by the bootstrap layer (cloud-init):
   (creates the `cilium` GatewayClass).
 - Gateway API standard CRDs v1.2.1.
 - Node `spec.providerID` set on every node (EBS CSI requirement).
-- IMDSv2 hop limit 2 + `AmazonEBSCSIDriverPolicy` on node roles (OpenTofu).
+- IMDSv2 hop limit 3 + `AmazonEBSCSIDriverPolicy` on node roles (OpenTofu).
 
 ## How to run
 
