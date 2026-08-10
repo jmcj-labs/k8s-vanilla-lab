@@ -154,6 +154,9 @@ jobs:
           kubectl -n kube-system get configmap cilium-config \
             -o jsonpath='{.data}' 2>/dev/null \
             | tr ',' '\n' | grep -i "masq\|ipv4-native\|routing-mode" || true
+          echo "--- iptables NAT (via cilium agent, host netns) ---"
+          kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+            iptables-save -t nat 2>&1 | grep -i "CILIUM_POST\|MASQUERADE\|169.254" || true
           echo "=== EVENTS (most recent 50) ==="
           kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -50 || true
 

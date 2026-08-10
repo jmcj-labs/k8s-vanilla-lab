@@ -243,9 +243,12 @@ resource "aws_instance" "control_plane" {
   metadata_options {
     http_endpoint = "enabled"
     http_tokens   = "required"
-    # Hop limit 2 so containerized workloads (EBS CSI driver) can reach IMDSv2:
-    # with limit 1 the extra network hop through the container bridge drops the reply.
-    http_put_response_hop_limit = 2
+    # Hop limit 3 so pod-network workloads (EBS CSI driver: credentials +
+    # metadata) can reach IMDSv2. 1 only serves the host; 2 covers plain
+    # container bridges but NOT Cilium in tunnel routing mode, which adds an
+    # extra routing hop on the return path (verified 2026-08-10: with 2,
+    # IMDS times out from the pod network).
+    http_put_response_hop_limit = 3
   }
 
   tags = merge(
