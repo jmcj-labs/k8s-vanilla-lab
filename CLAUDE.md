@@ -342,8 +342,9 @@ Validated end-to-end in the 2026-08 manual sprint (see `docs/INCIDENTS.md`).
 - No manual CNI installation needed after cluster creation
 
 **providerID**: kubeadm leaves `spec.providerID` empty and the EBS CSI driver requires it.
-The CP patches its own Node after init; workers pass `--provider-id` to the kubelet before
-`kubeadm join` (`/etc/default/kubelet`). Never remove these steps.
+`bootstrap/common.yaml` (Step 7b) writes `--provider-id=aws:///<az>/<instance-id>` (from
+IMDSv2) into `/etc/default/kubelet` on every node BEFORE `kubeadm init`/`join`, so the
+kubelet publishes it at registration — same mechanism on CP and workers. Never remove it.
 
 ### 4. Spot Workers + On-Demand Control Plane
 
@@ -441,8 +442,8 @@ without opening another file:
 - **IMDS from pods**: unreachable even with hop limit 2 (suspected Cilium masquerading — see
   `docs/INCIDENTS.md` #4). Anything running on the pod network must NOT depend on IMDS; pass
   region/identity explicitly (e.g. `controller.region` for the EBS CSI driver).
-- **providerID**: never remove the CP node patch or the worker kubelet `--provider-id` flag;
-  without them the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
+- **providerID**: never remove the kubelet `--provider-id` step in `bootstrap/common.yaml`;
+  without it the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
 - **Spot worker disappeared**: auto-restarts within 5-10 min
   (`instance_interruption_behavior = "stop"`). Workers rejoin automatically.
 - **Join token TTL is 24h**: workers joining more than 24h after `kubeadm init` need a new

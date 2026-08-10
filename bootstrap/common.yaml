@@ -127,6 +127,22 @@ rm -rf /tmp/aws /tmp/awscliv2.zip
 aws --version
 log "✓ AWS CLI v2 installed"
 
+# Step 7b: Set kubelet providerID from IMDSv2 (required by the EBS CSI driver)
+# kubeadm without a cloud provider leaves node spec.providerID empty; passing
+# --provider-id to the kubelet BEFORE kubeadm init/join makes it publish the
+# value at node registration. Same mechanism on control plane and workers —
+# no post-init patch, no RBAC involved. /etc/default/kubelet is sourced by
+# kubeadm's kubelet systemd drop-in.
+log "Step 7b/8: Setting kubelet providerID from IMDSv2"
+IMDS_TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+AZ=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+  http://169.254.169.254/latest/meta-data/placement/availability-zone)
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+echo "KUBELET_EXTRA_ARGS=--provider-id=aws:///${AZ}/${INSTANCE_ID}" > /etc/default/kubelet
+log "✓ kubelet providerID set to aws:///${AZ}/${INSTANCE_ID}"
+
 # Step 8: Enable kubelet (don't start — kubeadm will handle that)
 log "Step 8/8: Enabling kubelet service"
 systemctl enable kubelet

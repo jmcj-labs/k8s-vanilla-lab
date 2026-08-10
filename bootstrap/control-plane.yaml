@@ -14,7 +14,7 @@ log() {
 log "=== Starting Control Plane bootstrap ==="
 
 # Step 1: Wait for common.yaml bootstrap to complete
-log "Step 1/9: Waiting for common bootstrap to complete"
+log "Step 1/8: Waiting for common bootstrap to complete"
 TIMEOUT=600  # 10 minutes
 ELAPSED=0
 INTERVAL=10
@@ -42,7 +42,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 2: Create kubeadm config file
-log "Step 2/9: Creating kubeadm configuration"
+log "Step 2/8: Creating kubeadm configuration"
 
 # CRITICAL: Use private IP for controlPlaneEndpoint so workers can join via internal network
 # Public IP is only added to certSANs for external kubectl access
@@ -80,7 +80,7 @@ log "✓ kubeadm config created at /tmp/kubeadm-config.yaml"
 cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
 
 # Step 3: Initialize control plane with kubeadm
-log "Step 3/9: Running kubeadm init (this takes 2-5 minutes)"
+log "Step 3/8: Running kubeadm init (this takes 2-5 minutes)"
 
 kubeadm init \
   --config /tmp/kubeadm-config.yaml \
@@ -95,7 +95,7 @@ fi
 log "✓ kubeadm init completed successfully"
 
 # Step 4: Configure kubectl for root user
-log "Step 4/9: Configuring kubectl for root user"
+log "Step 4/8: Configuring kubectl for root user"
 mkdir -p /root/.kube
 cp -f /etc/kubernetes/admin.conf /root/.kube/config
 chown root:root /root/.kube/config
@@ -103,27 +103,12 @@ chmod 600 /root/.kube/config
 export KUBECONFIG=/etc/kubernetes/admin.conf
 log "✓ kubectl configured for root user"
 
-# Step 5: Patch node providerID (required by the EBS CSI driver)
-# kubeadm without a cloud provider leaves spec.providerID empty; the EBS CSI
-# controller uses it as metadata source to resolve instance-id/AZ. Validated
-# in today's manual run. AZ and instance-id come from IMDSv2 on this node.
-log "Step 5/9: Patching node providerID from IMDSv2"
+# providerID note: spec.providerID is published by the kubelet itself via
+# --provider-id, set in common.yaml (Step 7b) before kubeadm init — same
+# mechanism on all nodes, so no post-init patch is needed here.
 
-IMDS_TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-AZ=$(curl -sf -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/placement/availability-zone)
-INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-id)
-NODE_NAME=$(hostname)
-
-kubectl patch node "$${NODE_NAME}" \
-  -p "{\"spec\":{\"providerID\":\"aws:///$${AZ}/$${INSTANCE_ID}\"}}" \
-  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-log "✓ providerID set to aws:///$${AZ}/$${INSTANCE_ID} on node $${NODE_NAME}"
-
-# Step 6: Install Cilium CNI in strict kube-proxy replacement mode
-log "Step 6/9: Installing Cilium CNI (kube-proxy replacement)"
+# Step 5: Install Cilium CNI in strict kube-proxy replacement mode
+log "Step 5/8: Installing Cilium CNI (kube-proxy replacement)"
 
 # Install Helm if not present (required to install Cilium chart)
 if ! command -v helm >/dev/null 2>&1; then
@@ -187,8 +172,8 @@ kubectl -n kube-system rollout status daemonset/cilium --timeout=300s \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 log "✓ Cilium CNI installed (kube-proxy replacement, Gateway API, Hubble)"
 
-# Step 7: Verify API server is responding
-log "Step 7/9: Verifying API server"
+# Step 6: Verify API server is responding
+log "Step 6/8: Verifying API server"
 TIMEOUT=120
 ELAPSED=0
 INTERVAL=5
@@ -211,8 +196,8 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
   fi
 done
 
-# Step 8: Generate and store join data in SSM Parameter Store
-log "Step 8/9: Generating join data and storing in SSM"
+# Step 7: Generate and store join data in SSM Parameter Store
+log "Step 7/8: Generating join data and storing in SSM"
 
 # Generate bootstrap token with 24h TTL
 JOIN_TOKEN=$(kubeadm token create --ttl 24h)
@@ -271,8 +256,8 @@ else
   exit 1
 fi
 
-# Step 9: Publish kubeconfig to SSM for CI smoke test
-log "Step 9/9: Publishing kubeconfig to SSM for CI smoke test"
+# Step 8: Publish kubeconfig to SSM for CI smoke test
+log "Step 8/8: Publishing kubeconfig to SSM for CI smoke test"
 KUBECONFIG_PATCHED=$(sed \
   "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
   /etc/kubernetes/admin.conf)

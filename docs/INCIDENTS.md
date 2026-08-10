@@ -40,13 +40,14 @@ nodes to EC2 instances.
 empty, and the EBS CSI driver requires it (`aws:///<az>/<instance-id>`) as its
 metadata source.
 
-**Fix**: control plane patches its own Node right after `kubeadm init` with
-AZ + instance-id read from IMDSv2 ([`bootstrap/control-plane.yaml`](../bootstrap/control-plane.yaml));
-workers pass `--provider-id` to the kubelet **before** `kubeadm join` via
-`/etc/default/kubelet`, so the kubelet publishes it at registration
-([`bootstrap/worker.yaml`](../bootstrap/worker.yaml) documents why this is the
-simplest option for workers). The smoke test asserts providerID is non-empty
-on every node.
+**Fix**: every node (CP and workers) passes `--provider-id` to the kubelet
+**before** `kubeadm init`/`join` via `/etc/default/kubelet`, written by
+[`bootstrap/common.yaml`](../bootstrap/common.yaml) (Step 7b) with AZ +
+instance-id read from IMDSv2 — the kubelet publishes it at node registration.
+Chosen over the post-init/post-join `kubectl patch` validated in the manual
+run because it is one mechanism for all nodes, needs no cluster credentials
+on workers and no reconciler on the CP. The smoke test asserts providerID is
+non-empty on every node.
 
 ## 4. IMDS unreachable from the pod network even with hop limit 2
 

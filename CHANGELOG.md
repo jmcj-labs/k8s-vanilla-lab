@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared Gateway `infra/shared-gw` (cilium class, HTTPS `*.logistics.lab`, TLS via
   cert-manager), CloudNativePG 0.29.0 and Strimzi 1.1.0 operators, kube-prometheus-stack
   88.2.0 (Grafana NodePort, Alertmanager off)
-- Node `spec.providerID` now set on every node (CP: post-init patch from IMDSv2; workers:
-  kubelet `--provider-id` before join) — required by the EBS CSI driver
+- Node `spec.providerID` now set on every node via kubelet `--provider-id` (from IMDSv2,
+  written to `/etc/default/kubelet` in the common bootstrap before init/join) — required
+  by the EBS CSI driver
 - `AmazonEBSCSIDriverPolicy` attached to control-plane and worker IAM roles
 - Extended smoke test (`scripts/smoke-test.sh`): nodes Ready, no kube-proxy pods, Cilium
   `KubeProxyReplacement: True`, providerID on all nodes, dynamic gp3 PVC Bound, Gateway

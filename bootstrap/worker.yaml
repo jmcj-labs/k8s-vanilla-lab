@@ -14,7 +14,7 @@ log() {
 log "=== Starting Worker bootstrap ==="
 
 # Step 1: Wait for common.yaml bootstrap to complete
-log "Step 1/6: Waiting for common bootstrap to complete"
+log "Step 1/5: Waiting for common bootstrap to complete"
 TIMEOUT=600  # 10 minutes
 ELAPSED=0
 INTERVAL=10
@@ -42,7 +42,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 2: Wait for control plane to store join parameters in SSM
-log "Step 2/6: Waiting for control plane join parameters in SSM"
+log "Step 2/5: Waiting for control plane join parameters in SSM"
 log "Polling SSM parameter: ${ssm_join_token_path}"
 
 TIMEOUT=900  # 15 minutes (CP init takes ~5min after common.yaml)
@@ -89,7 +89,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 3: Fetch join command from SSM
-log "Step 3/6: Fetching join command from SSM"
+log "Step 3/5: Fetching join command from SSM"
 
 JOIN_COMMAND=$(aws ssm get-parameter \
   --name "${ssm_join_token_path}" \
@@ -106,30 +106,12 @@ fi
 log "✓ Join command retrieved from SSM"
 log "Join command: $${JOIN_COMMAND}"
 
-# Step 4: Set kubelet providerID before joining (required by the EBS CSI driver)
-# kubeadm without a cloud provider leaves spec.providerID empty and the EBS CSI
-# controller needs it as metadata source. Simplest option (documented choice):
-# pass --provider-id to the kubelet BEFORE kubeadm join, so the kubelet itself
-# publishes it at node registration. A post-join "kubectl patch" from the worker
-# is not possible (the node has no cluster-admin credentials, and the kubelet's
-# own identity cannot modify spec.providerID under NodeRestriction), and a
-# control-plane-side reconciler would need EC2 API lookups plus a recurring
-# job to catch late joiners — far more moving parts for the same result.
-log "Step 4/6: Setting kubelet providerID from IMDSv2"
+# providerID note: spec.providerID is published by the kubelet itself via
+# --provider-id, set in common.yaml (Step 7b) before kubeadm join — same
+# mechanism on all nodes, no post-join patch and no RBAC involved.
 
-IMDS_TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
-  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-AZ=$(curl -sf -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/placement/availability-zone)
-INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
-  http://169.254.169.254/latest/meta-data/instance-id)
-
-# /etc/default/kubelet is sourced by kubeadm's kubelet systemd drop-in
-echo "KUBELET_EXTRA_ARGS=--provider-id=aws:///$${AZ}/$${INSTANCE_ID}" > /etc/default/kubelet
-log "✓ kubelet providerID set to aws:///$${AZ}/$${INSTANCE_ID}"
-
-# Step 5: Join the cluster
-log "Step 5/6: Joining Kubernetes cluster"
+# Step 4: Join the cluster
+log "Step 4/5: Joining Kubernetes cluster"
 
 # Execute join with explicit CRI socket
 $${JOIN_COMMAND} --cri-socket unix:///run/containerd/containerd.sock \
@@ -143,8 +125,8 @@ fi
 
 log "✓ kubeadm join completed successfully"
 
-# Step 6: Verify kubelet is running
-log "Step 6/6: Verifying kubelet service"
+# Step 5: Verify kubelet is running
+log "Step 5/5: Verifying kubelet service"
 
 TIMEOUT=60
 ELAPSED=0

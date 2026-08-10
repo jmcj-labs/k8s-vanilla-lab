@@ -61,9 +61,9 @@ Deployment runs in four sequential stages:
 
 | Stage | What happens | Duration |
 |-------|-------------|----------|
-| 1 — Common bootstrap | containerd, kubeadm, kubelet, AWS CLI installed on all nodes | 3-5 min |
-| 2 — Control plane init | `kubeadm init` (no kube-proxy), providerID patch, Gateway API CRDs, Cilium KPR, join data + kubeconfig in SSM | 5-7 min |
-| 3 — Workers join | Workers poll SSM, set kubelet `--provider-id`, run `kubeadm join` | 2-3 min |
+| 1 — Common bootstrap | containerd, kubeadm, kubelet (with `--provider-id` from IMDSv2), AWS CLI on all nodes | 3-5 min |
+| 2 — Control plane init | `kubeadm init` (no kube-proxy), Gateway API CRDs, Cilium KPR, join data + kubeconfig in SSM | 5-7 min |
+| 3 — Workers join | Workers poll SSM, run `kubeadm join` | 2-3 min |
 | 4 — Platform | `make platform` (automatic in the CI apply workflow) | 5-10 min |
 
 Total: 8-12 minutes of bootstrap after `make apply`, then the platform pass.
