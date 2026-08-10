@@ -157,6 +157,9 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
   `.trivyignore` (see `AVD-AWS-0164`)
 - **Admin kubeconfig in SSM**: full cluster-admin credentials persist until `make destroy`;
   acceptable for a short-lived lab, not for shared or long-lived environments
+- **K8s API open to 0.0.0.0/0** (`api_server_allowed_cidrs` default): required so CI runners
+  (dynamic IPs) can run platform install + smoke test via the SSM kubeconfig (ADR-004); the
+  API is TLS + cert-authenticated, and SSH remains restricted to `my_ip`
 
 ---
 

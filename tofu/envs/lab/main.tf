@@ -147,7 +147,7 @@ module "control_plane" {
   ami_id                   = data.aws_ami.ubuntu.id
   key_name                 = var.ssh_key_name
   my_ip                    = var.my_ip
-  api_server_allowed_cidrs = [] # Defaults to my_ip
+  api_server_allowed_cidrs = var.api_server_allowed_cidrs
   user_data                = data.cloudinit_config.control_plane.rendered
   cluster_name             = var.cluster_name
   tags                     = local.common_tags
