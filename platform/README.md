@@ -11,7 +11,7 @@ Installed in one ordered, idempotent pass by [`install.sh`](install.sh).
 | 1 | Namespaces + StorageClass | — | manifests | `logistics` labeled PSA `enforce=baseline`; `gp3` default SC (`ebs.csi.aws.com`, WaitForFirstConsumer, encrypted) |
 | 2 | EBS CSI driver | `kube-system` | `aws-ebs-csi-driver` 2.63.1 | `controller.region` set explicitly (IMDS unreachable from pod network — see `docs/INCIDENTS.md` #4) |
 | 3 | cert-manager | `infra` | `cert-manager` v1.21.1 | `crds.enabled=true`, `--enable-gateway-api`; plus `ClusterIssuer/selfsigned` |
-| 4 | Shared Gateway | `infra` | manifest | `shared-gw`: class `cilium`, HTTPS :443, `*.logistics.lab`, TLS Terminate with cert-manager cert, routes only from ns `logistics` |
+| 4 | Shared Gateway | `infra` | manifest | `shared-gw`: class `cilium`, HTTPS :443, `*.logistics.lab`, TLS Terminate with cert-manager cert, routes only from ns `logistics`. A Cilium LB-IPAM pool (`lb-ipam-pool.yaml`, virtual CIDR `172.20.255.0/24`) gives its LoadBalancer Service an address so the Gateway reaches `Programmed=True` — external access is via NodePort until the Sprint 2 ingress decision (NLB) |
 | 5 | CloudNativePG | `data` | `cloudnative-pg` 0.29.0 | operator only — PG clusters are app-owned |
 | 6 | Strimzi | `data` | `strimzi-kafka-operator` 1.1.0 | operator only — Kafka clusters are app-owned |
 | 7 | kube-prometheus-stack | `infra` | `kube-prometheus-stack` 88.2.0 | `grafana.service.type=NodePort`, `alertmanager.enabled=false` |

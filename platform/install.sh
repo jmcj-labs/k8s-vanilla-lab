@@ -104,8 +104,11 @@ log "Step 5/8: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
 # The 'cilium' GatewayClass is created by the cilium-operator at startup
 # (gatewayAPI.enabled=true in the bootstrap Helm install).
 kubectl wait --for=condition=Accepted gatewayclass/cilium --timeout=180s
+# LB-IPAM pool first: without it the Gateway's LoadBalancer Service never
+# gets an address (no cloud LB controller) and Programmed stays False.
+kubectl apply -f "${MANIFESTS}/lb-ipam-pool.yaml"
 kubectl apply -f "${MANIFESTS}/gateway-shared.yaml"
-log "✓ Gateway infra/shared-gw applied"
+log "✓ Gateway infra/shared-gw applied (LB IP from Cilium LB-IPAM; external access via NodePort)"
 
 log "Step 6/8: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg
