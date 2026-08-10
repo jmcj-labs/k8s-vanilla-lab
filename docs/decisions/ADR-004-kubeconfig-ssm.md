@@ -57,6 +57,7 @@ On `tofu destroy`, a `terraform_data` destroy-time provisioner deletes all param
 - **Admin credentials in SSM**: The stored kubeconfig grants full cluster-admin access. Acceptable for a short-lived lab cluster; unacceptable for long-lived or shared environments
 - **24h+ window**: Credentials persist in SSM until `tofu destroy` is run. A `--ttl` equivalent does not exist for SSM; the destroy-time provisioner is the cleanup mechanism
 - **Bootstrap failure leaves nothing**: If the control plane bootstrap fails after `kubeadm init` but before Step 7.5, the kubeconfig is not stored. CI must handle a missing parameter gracefully (fall back to skip or fail explicitly)
+- **API server must be publicly reachable**: using the kubeconfig from CI runners (dynamic IPs) requires 6443 open to 0.0.0.0/0 (`api_server_allowed_cidrs` default) — TLS + cert auth is the access control; SSH stays restricted to `my_ip`
 
 ---
 

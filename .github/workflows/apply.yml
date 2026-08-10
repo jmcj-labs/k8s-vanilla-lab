@@ -65,8 +65,23 @@ jobs:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
-          echo "Waiting 20 minutes for cluster bootstrap..."
-          sleep 1200
+          # Poll SSM for the kubeconfig (published at the end of the CP bootstrap)
+          # instead of a blind sleep: a fresh cluster takes 8-12 min, a re-run on
+          # a live cluster proceeds immediately — the workflow is re-entrant.
+          echo "Waiting for cluster bootstrap (SSM kubeconfig, max 20 min)..."
+          ELAPSED=0
+          until aws ssm get-parameter \
+              --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
+              --region "${AWS_REGION}" >/dev/null 2>&1; do
+            if [ "${ELAPSED}" -ge 1200 ]; then
+              echo "✗ Kubeconfig not in SSM after 20 min — CP bootstrap failed"
+              exit 1
+            fi
+            sleep 30
+            ELAPSED=$((ELAPSED + 30))
+            echo "  ...still bootstrapping (${ELAPSED}s)"
+          done
+          echo "✓ Kubeconfig available after ${ELAPSED}s"
           make platform CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 

@@ -24,10 +24,17 @@ KUBE_PROM_STACK_CHART_VERSION="88.2.0"  # prometheus-operator v0.93.0
 
 command -v kubectl >/dev/null 2>&1 || { echo "✗ kubectl not found" >&2; exit 1; }
 command -v helm >/dev/null 2>&1 || { echo "✗ helm not found" >&2; exit 1; }
-if ! kubectl version >/dev/null 2>&1; then
-  echo "✗ Cluster unreachable — set KUBECONFIG (make kubeconfig) and retry" >&2
-  exit 1
-fi
+# Retry briefly: right after bootstrap the API can take a few seconds to
+# accept external connections (EIP path, SG propagation).
+ELAPSED=0
+until kubectl version >/dev/null 2>&1; do
+  if [ "${ELAPSED}" -ge 120 ]; then
+    echo "✗ Cluster unreachable after ${ELAPSED}s — set KUBECONFIG (make kubeconfig) and retry" >&2
+    exit 1
+  fi
+  sleep 10
+  ELAPSED=$((ELAPSED + 10))
+done
 
 log "=== Installing platform layer (region: ${AWS_REGION}) ==="
 
