@@ -16,16 +16,23 @@ kubectl get pods -n kube-system -l app.kubernetes.io/part-of=cilium
 kubectl logs -n kube-system -l app.kubernetes.io/part-of=cilium --tail=20
 ```
 
-If Cilium pods are in `CrashLoopBackOff`, re-apply manually:
+If Cilium pods are in `CrashLoopBackOff`, re-apply manually (run on the control
+plane, where `hostname -i` resolves to the CP private IP — Cilium runs in strict
+kube-proxy replacement mode and needs the API server address explicitly):
 
 ```bash
 helm repo add cilium https://helm.cilium.io/
 helm repo update
 helm upgrade --install cilium cilium/cilium \
   --namespace kube-system \
-  --version 1.19.4 \
+  --version 1.19.6 \
   --set ipam.mode=kubernetes \
-  --set kubeProxyReplacement=false
+  --set kubeProxyReplacement=true \
+  --set k8sServiceHost=$(hostname -i | awk '{print $1}') \
+  --set k8sServicePort=6443 \
+  --set gatewayAPI.enabled=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true
 ```
 
 ---
