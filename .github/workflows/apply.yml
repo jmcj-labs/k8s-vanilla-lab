@@ -60,13 +60,21 @@ jobs:
           TF_VAR_aws_profile: ""
         run: tofu apply -auto-approve -no-color
 
-      - name: Smoke test
+      - name: Install platform layer
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           echo "Waiting 20 minutes for cluster bootstrap..."
           sleep 1200
+          make platform CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
+        working-directory: .
+
+      - name: Smoke test
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
           make smoke-test CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 
@@ -182,7 +190,7 @@ jobs:
                   { type: "header", text: { type: "plain_text", text: "🟢 Cluster desplegado: k8s-vanilla-lab" } },
                   { type: "section", fields: [
                     { type: "mrkdwn", text: "*Región:*\neu-west-1" },
-                    { type: "mrkdwn", text: "*K8s:*\nv1.35.5" },
+                    { type: "mrkdwn", text: "*K8s:*\nv1.35.x" },
                     { type: "mrkdwn", text: ("*Nodos:*\n" + $NODE_COUNT) },
                     { type: "mrkdwn", text: ("*API endpoint:*\n" + $API_ENDPOINT) },
                     { type: "mrkdwn", text: ("*Instancias:*\n" + $INSTANCE_TYPES) },
