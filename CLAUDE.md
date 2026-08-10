@@ -439,9 +439,14 @@ without opening another file:
   --set kubeProxyReplacement=true --set k8sServiceHost=$(hostname -i | awk '{print $1}')
   --set k8sServicePort=6443 --set gatewayAPI.enabled=true --set hubble.relay.enabled=true
   --set hubble.ui.enabled=true`.
-- **IMDS from pods**: unreachable even with hop limit 2 (suspected Cilium masquerading — see
-  `docs/INCIDENTS.md` #4). Anything running on the pod network must NOT depend on IMDS; pass
-  region/identity explicitly (e.g. `controller.region` for the EBS CSI driver).
+- **IMDS from pods**: needs `http_put_response_hop_limit = 3` — Cilium's tunnel routing adds
+  one routing hop on the return path, so the container-standard 2 is one short (root cause
+  confirmed; see `docs/INCIDENTS.md` #4). Never lower it. Security debt: with hop 3 every pod
+  can reach the instance profile; a CiliumNetworkPolicy restricting 169.254.169.254 to the
+  EBS CSI pods is pending and must land before untrusted workloads.
+- **Gateway `Programmed`**: requires an address on its LoadBalancer Service. No cloud LB here —
+  Cilium LB-IPAM (`platform/manifests/lb-ipam-pool.yaml`, virtual IPs, ns `infra` only)
+  provides it. External access is via NodePort until the Sprint 2 NLB decision.
 - **providerID**: never remove the kubelet `--provider-id` step in `bootstrap/common.yaml`;
   without it the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
 - **Spot worker disappeared**: auto-restarts within 5-10 min
