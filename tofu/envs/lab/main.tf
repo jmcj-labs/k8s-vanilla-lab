@@ -78,9 +78,10 @@ locals {
   common_tags = {}
 
   # Kubernetes network configuration
-  pod_cidr           = "10.244.0.0/16"
-  service_cidr       = "10.96.0.0/12"
-  kubernetes_version = "1.35.5"
+  # (K8s version is not pinned here: bootstrap installs the latest 1.35.x
+  # and kubeadm uses its own binary version for the cluster)
+  pod_cidr     = "10.244.0.0/16"
+  service_cidr = "10.96.0.0/12"
 
   # SSM parameter paths
   ssm_parameter_base = "/k8s/${var.cluster_name}"
@@ -105,7 +106,6 @@ data "cloudinit_config" "control_plane" {
       aws_region              = var.aws_region
       pod_cidr                = local.pod_cidr
       service_cidr            = local.service_cidr
-      kubernetes_version      = local.kubernetes_version
       control_plane_public_ip = module.control_plane.public_ip
       ssm_parameter_path      = local.ssm_parameter_base
     })
@@ -129,7 +129,6 @@ data "cloudinit_config" "worker" {
     content = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
       cluster_name          = var.cluster_name
       aws_region            = var.aws_region
-      kubernetes_version    = local.kubernetes_version
       ssm_join_token_path   = "${local.ssm_parameter_base}/join-command"
       ssm_ca_cert_hash_path = "${local.ssm_parameter_base}/ca-cert-hash"
     })

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Worker bootstrap for Kubernetes (K8s 1.35.x)
 # Purpose: Join Kubernetes cluster as worker node via SSM Parameter Store
-# Variables: cluster_name, aws_region, kubernetes_version, ssm_join_token_path, ssm_ca_cert_hash_path
+# Variables: cluster_name, aws_region, ssm_join_token_path, ssm_ca_cert_hash_path
 
 set -euo pipefail
 exec > >(tee -a /var/log/k8s-worker-bootstrap.log)

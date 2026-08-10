@@ -2,7 +2,7 @@
 # Control Plane bootstrap for Kubernetes (K8s 1.35.x)
 # Purpose: Initialize control plane with kubeadm (kube-proxy-free), install
 #          Cilium in strict kube-proxy replacement mode, store join data in SSM
-# Variables: cluster_name, aws_region, pod_cidr, service_cidr, kubernetes_version, control_plane_public_ip, ssm_parameter_path
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, control_plane_public_ip, ssm_parameter_path
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
