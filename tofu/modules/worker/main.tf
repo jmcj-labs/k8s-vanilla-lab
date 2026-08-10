@@ -170,6 +170,12 @@ resource "aws_iam_role_policy" "worker_ssm" {
   })
 }
 
+# EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
+resource "aws_iam_role_policy_attachment" "worker_ebs_csi" {
+  role       = aws_iam_role.worker.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+}
+
 # IAM Instance Profile
 resource "aws_iam_instance_profile" "worker" {
   name = "${var.name}-worker-profile"
@@ -228,9 +234,11 @@ resource "aws_instance" "worker" {
   }
 
   metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 2 so containerized workloads (EBS CSI driver) can reach IMDSv2:
+    # with limit 1 the extra network hop through the container bridge drops the reply.
+    http_put_response_hop_limit = 2
   }
 
   tags = merge(
