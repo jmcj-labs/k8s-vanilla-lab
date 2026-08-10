@@ -11,6 +11,12 @@ permissions:
   id-token: write
   contents: read
 
+# Serialize applies: two concurrent runs fight over the tofu state lock and
+# over Helm release operations (observed 2026-08-10).
+concurrency:
+  group: tofu-apply
+  cancel-in-progress: false
+
 jobs:
   apply:
     name: Apply Infrastructure
@@ -92,6 +98,42 @@ jobs:
         run: |
           make smoke-test CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
+
+      - name: Diagnostics on failure
+        if: failure()
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        working-directory: .
+        run: |
+          KUBECONFIG_FILE=$(mktemp)
+          trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
+          if ! aws ssm get-parameter \
+              --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
+              --with-decryption \
+              --query Parameter.Value \
+              --output text \
+              --region "${AWS_REGION}" > "${KUBECONFIG_FILE}" 2>/dev/null; then
+            echo "No kubeconfig in SSM — CP bootstrap did not complete; nothing to inspect"
+            exit 0
+          fi
+          chmod 600 "${KUBECONFIG_FILE}"
+          export KUBECONFIG="${KUBECONFIG_FILE}"
+          echo "=== NODES ==="
+          kubectl get nodes -o wide || true
+          echo "=== PODS (all namespaces) ==="
+          kubectl get pods -A -o wide || true
+          echo "=== HELM RELEASES ==="
+          helm list -A || true
+          echo "=== DESCRIBE NON-RUNNING PODS ==="
+          kubectl get pods -A --no-headers 2>/dev/null \
+            | awk '$4 != "Running" && $4 != "Completed" {print $1, $2}' \
+            | while read -r ns pod; do
+                echo "--- ${ns}/${pod} ---"
+                kubectl -n "${ns}" describe pod "${pod}" | tail -30 || true
+              done
+          echo "=== EVENTS (most recent 50) ==="
+          kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -50 || true
 
       - name: Record deployment timestamp in SSM
         env:

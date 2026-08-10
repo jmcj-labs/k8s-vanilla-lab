@@ -36,6 +36,29 @@ until kubectl version >/dev/null 2>&1; do
   ELAPSED=$((ELAPSED + 10))
 done
 
+# A release left in pending-* (concurrent run, killed job) or failed with no
+# deployed revision (first install timed out) cannot be upgraded — uninstall
+# it so the following `helm upgrade --install` starts clean. Makes the script
+# re-entrant after a failed or interrupted run.
+ensure_clean_release() {
+  local ns="$1" rel="$2" status deployed
+  status=$(helm status -n "${ns}" "${rel}" -o json 2>/dev/null | jq -r '.info.status' || echo "absent")
+  case "${status}" in
+    pending-install|pending-upgrade|pending-rollback)
+      log "⚠ Release ${ns}/${rel} stuck in ${status} — uninstalling for a clean retry"
+      helm uninstall -n "${ns}" "${rel}" --wait --timeout 3m || true
+      ;;
+    failed)
+      deployed=$(helm history -n "${ns}" "${rel}" -o json 2>/dev/null \
+        | jq '[.[] | select(.status=="deployed" or .status=="superseded")] | length' || echo 0)
+      if [ "${deployed}" -eq 0 ]; then
+        log "⚠ Release ${ns}/${rel} failed with no deployed revision — uninstalling for a clean retry"
+        helm uninstall -n "${ns}" "${rel}" --wait --timeout 3m || true
+      fi
+      ;;
+  esac
+}
+
 log "=== Installing platform layer (region: ${AWS_REGION}) ==="
 
 log "Step 1/8: Adding Helm repositories"
@@ -53,6 +76,7 @@ kubectl apply -f "${MANIFESTS}/storageclass-gp3.yaml"
 log "✓ Namespaces and default gp3 StorageClass applied"
 
 log "Step 3/8: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
+ensure_clean_release kube-system aws-ebs-csi-driver
 # controller.region is set explicitly: IMDS is not reachable from the pod
 # network even with hop limit 2 (see docs/INCIDENTS.md #4), so the controller
 # must not depend on instance metadata for region discovery.
@@ -64,6 +88,7 @@ helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver 
 log "✓ EBS CSI driver installed"
 
 log "Step 4/8: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
+ensure_clean_release infra cert-manager
 # --enable-gateway-api activates the gateway-shim controller that resolves
 # the cert-manager.io/cluster-issuer annotation on Gateway resources.
 helm upgrade --install cert-manager jetstack/cert-manager \
@@ -83,6 +108,7 @@ kubectl apply -f "${MANIFESTS}/gateway-shared.yaml"
 log "✓ Gateway infra/shared-gw applied"
 
 log "Step 6/8: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
+ensure_clean_release data cnpg
 # Operator only — PostgreSQL clusters are application-owned, not platform-owned.
 helm upgrade --install cnpg cnpg/cloudnative-pg \
   --namespace data \
@@ -91,6 +117,7 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
 log "✓ CloudNativePG operator installed"
 
 log "Step 7/8: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
+ensure_clean_release data strimzi
 # Operator only — Kafka clusters are application-owned, not platform-owned.
 helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
   --namespace data \
@@ -99,6 +126,7 @@ helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
 log "✓ Strimzi operator installed"
 
 log "Step 8/8: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
+ensure_clean_release infra kube-prometheus-stack
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace infra \
   --version "${KUBE_PROM_STACK_CHART_VERSION}" \

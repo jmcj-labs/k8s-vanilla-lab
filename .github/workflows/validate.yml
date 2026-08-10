@@ -5,23 +5,25 @@ on:
     paths:
       - "tofu/**"
       - "bootstrap/**"
+      - "platform/**"
       - "scripts/**"
       - "docs/**"
       - "Makefile"
       - ".pre-commit-config.yaml"
       - ".tflint.hcl"
-      - ".github/workflows/validate.yml"
+      - ".github/workflows/**"
   push:
     branches: [main]
     paths:
       - "tofu/**"
       - "bootstrap/**"
+      - "platform/**"
       - "scripts/**"
       - "docs/**"
       - "Makefile"
       - ".pre-commit-config.yaml"
       - ".tflint.hcl"
-      - ".github/workflows/validate.yml"
+      - ".github/workflows/**"
 
 permissions:
   id-token: write
