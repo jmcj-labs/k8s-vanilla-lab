@@ -125,12 +125,16 @@ jobs:
           kubectl get pods -A -o wide || true
           echo "=== HELM RELEASES ==="
           helm list -A || true
-          echo "=== DESCRIBE NON-RUNNING PODS ==="
+          echo "=== DESCRIBE + LOGS OF NON-RUNNING PODS ==="
           kubectl get pods -A --no-headers 2>/dev/null \
             | awk '$4 != "Running" && $4 != "Completed" {print $1, $2}' \
             | while read -r ns pod; do
-                echo "--- ${ns}/${pod} ---"
+                echo "--- describe ${ns}/${pod} ---"
                 kubectl -n "${ns}" describe pod "${pod}" | tail -30 || true
+                echo "--- logs ${ns}/${pod} (current) ---"
+                kubectl -n "${ns}" logs "${pod}" --all-containers --prefix --tail=25 2>&1 || true
+                echo "--- logs ${ns}/${pod} (previous crash) ---"
+                kubectl -n "${ns}" logs "${pod}" --all-containers --prefix --tail=25 --previous 2>&1 || true
               done
           echo "=== EVENTS (most recent 50) ==="
           kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -50 || true
