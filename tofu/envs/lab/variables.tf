@@ -17,9 +17,8 @@ variable "environment" {
 }
 
 variable "my_ip" {
-  description = "CIDR allowed for SSH and K8s API access. Defaults to 0.0.0.0/0 (open) — acceptable for a short-lived lab; override with your IP for tighter control."
+  description = "CIDR allowed for SSH and K8s API access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0)."
   type        = string
-  default     = "0.0.0.0/0"
   validation {
     condition     = can(cidrhost(var.my_ip, 0))
     error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"

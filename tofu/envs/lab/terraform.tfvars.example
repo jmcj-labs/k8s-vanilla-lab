@@ -8,8 +8,9 @@ environment  = "lab"
 # Leave empty (or omit) in CI; OIDC credentials are set via environment variables.
 aws_profile = "k8s-vanilla-lab"
 
-# SSH and K8s API access. Use 0.0.0.0/0 for a lab (default), or restrict to your IP.
-# my_ip = "0.0.0.0/0"
+# REQUIRED: CIDR allowed for SSH and K8s API access. No default — set your IP
+# (curl ifconfig.me) as x.x.x.x/32, or consciously open it with 0.0.0.0/0.
+my_ip = "1.2.3.4/32"
 
 # REQUIRED: Existing AWS SSH key pair name
 ssh_key_name = "your-key-name"
