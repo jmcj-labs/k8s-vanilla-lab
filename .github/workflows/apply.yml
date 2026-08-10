@@ -131,11 +131,29 @@ jobs:
             | while read -r ns pod; do
                 echo "--- describe ${ns}/${pod} ---"
                 kubectl -n "${ns}" describe pod "${pod}" | tail -30 || true
-                echo "--- logs ${ns}/${pod} (current) ---"
-                kubectl -n "${ns}" logs "${pod}" --all-containers --prefix --tail=25 2>&1 || true
-                echo "--- logs ${ns}/${pod} (previous crash) ---"
-                kubectl -n "${ns}" logs "${pod}" --all-containers --prefix --tail=25 --previous 2>&1 || true
+                # Per-container logs: only containers that actually restarted get
+                # a --previous dump, to keep the output signal-only
+                kubectl -n "${ns}" get pod "${pod}" \
+                  -o jsonpath='{range .status.containerStatuses[*]}{.name}{" "}{.restartCount}{"\n"}{end}' 2>/dev/null \
+                  | while read -r cname restarts; do
+                      echo "--- logs ${ns}/${pod} [${cname}] (current) ---"
+                      kubectl -n "${ns}" logs "${pod}" -c "${cname}" --tail=100 2>&1 || true
+                      if [ "${restarts:-0}" -gt 0 ]; then
+                        echo "--- logs ${ns}/${pod} [${cname}] (previous crash) ---"
+                        kubectl -n "${ns}" logs "${pod}" -c "${cname}" --tail=100 --previous 2>&1 || true
+                      fi
+                    done
               done
+          echo "=== CILIUM MASQUERADING ==="
+          kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+            cilium-dbg status --verbose 2>/dev/null | grep -iA4 "Masquerading" || true
+          echo "--- bpf ipmasq list ---"
+          kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+            cilium-dbg bpf ipmasq list 2>&1 || true
+          echo "--- cilium-config masquerade keys ---"
+          kubectl -n kube-system get configmap cilium-config \
+            -o jsonpath='{.data}' 2>/dev/null \
+            | tr ',' '\n' | grep -i "masq\|ipv4-native\|routing-mode" || true
           echo "=== EVENTS (most recent 50) ==="
           kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -50 || true
 
