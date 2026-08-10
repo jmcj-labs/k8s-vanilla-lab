@@ -3,6 +3,7 @@ SHELL        := bash
 
 CLUSTER_NAME    ?= k8s-vanilla-lab
 AWS_REGION      ?= eu-west-1
+EXPECTED_NODES  ?= 3
 TOFU_DIR        := tofu/envs/lab
 KUBECONFIG_PATH ?= $(HOME)/.kube/k8s-vanilla-lab.conf
 SSH_KEY_PATH    ?= $(HOME)/.ssh/k8s-vanilla-lab.pem
@@ -73,7 +74,7 @@ platform: ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, 
 	chmod 600 "$$KUBECONFIG_FILE"; \
 	KUBECONFIG="$$KUBECONFIG_FILE" AWS_REGION=$(AWS_REGION) bash platform/install.sh
 
-smoke-test: ## Verify all nodes are Ready (kubeconfig fetched from SSM, not persisted to disk)
+smoke-test: ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, operators)
 	@KUBECONFIG_FILE=$$(mktemp); \
 	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
 	if ! aws ssm get-parameter \
@@ -90,15 +91,8 @@ smoke-test: ## Verify all nodes are Ready (kubeconfig fetched from SSM, not pers
 	  exit 1; \
 	fi; \
 	chmod 600 "$$KUBECONFIG_FILE"; \
-	echo "Cluster nodes:"; \
-	KUBECONFIG="$$KUBECONFIG_FILE" kubectl get nodes; \
-	NOT_READY=$$(KUBECONFIG="$$KUBECONFIG_FILE" kubectl get nodes --no-headers \
-	  | awk '$$2 != "Ready" {n++} END {print n+0}'); \
-	if [ "$$NOT_READY" -gt 0 ]; then \
-	  echo "✗ $$NOT_READY node(s) not Ready"; \
-	  exit 1; \
-	fi; \
-	echo "✓ All nodes Ready"
+	KUBECONFIG="$$KUBECONFIG_FILE" EXPECTED_NODES=$(EXPECTED_NODES) \
+	  bash scripts/smoke-test.sh
 
 ssh-cp: ## SSH into the control plane node
 	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \
