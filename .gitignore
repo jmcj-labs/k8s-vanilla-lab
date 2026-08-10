@@ -39,3 +39,6 @@ Thumbs.db
 *.bak3
 .tmp
 *.tmp
+
+# Claude Code local config (accidentally committed once; kept local)
+.claude/
