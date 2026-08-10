@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/jmcastellano/**)",
+      "Bash(xargs tofu *)",
+      "Bash(trivy config *)",
+      "Bash(pre-commit run *)",
+      "Bash(brew install *)",
+      "Bash(trivy --version)",
+      "Bash(make validate *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/jmcastellano"
+    ]
+  }
+}
