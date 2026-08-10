@@ -180,6 +180,6 @@ jobs:
               }]
             }')
 
-          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+          curl --fail-with-body -sS -X POST "${SLACK_WEBHOOK_URL}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}"
