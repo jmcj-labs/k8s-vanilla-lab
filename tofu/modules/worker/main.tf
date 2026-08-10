@@ -113,15 +113,14 @@ resource "terraform_data" "cleanup_worker_enis" {
   }
 }
 
-# Security group rule to allow workers to reach control plane
-resource "aws_security_group_rule" "cp_from_workers" {
-  type                     = "ingress"
-  from_port                = 0
-  to_port                  = 0
-  protocol                 = "-1"
-  security_group_id        = var.control_plane_security_group_id
-  source_security_group_id = aws_security_group.worker.id
-  description              = "Allow all from worker nodes"
+# Allow workers to reach the control plane. Standalone rule attached to the
+# CP security group — the CP module deliberately defines no inline rules so
+# this cross-module attachment is safe (see control-plane/main.tf).
+resource "aws_vpc_security_group_ingress_rule" "cp_from_workers" {
+  security_group_id            = var.control_plane_security_group_id
+  description                  = "Allow all from worker nodes"
+  referenced_security_group_id = aws_security_group.worker.id
+  ip_protocol                  = "-1"
 }
 
 # IAM Role for Workers
@@ -200,7 +199,10 @@ resource "aws_instance" "worker" {
   key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.worker.id]
   iam_instance_profile   = aws_iam_instance_profile.worker.name
-  user_data              = var.user_data
+  # cloud-init is rendered gzip+base64 (cloudinit_config): the provider
+  # contract requires user_data_base64 for pre-encoded data — plain
+  # user_data corrupts it and breaks in-place instance updates.
+  user_data_base64 = var.user_data_base64
 
   # Spot or On-Demand configuration
   instance_market_options {
@@ -239,8 +241,8 @@ resource "aws_instance" "worker" {
     # Hop limit 3 so pod-network workloads (EBS CSI driver: credentials +
     # metadata) can reach IMDSv2. 1 only serves the host; 2 covers plain
     # container bridges but NOT Cilium in tunnel routing mode, which adds an
-    # extra routing hop on the return path (verified 2026-08-10: with 2,
-    # IMDS times out from the pod network).
+    # extra routing hop on the return path (observed 2026-08-10: with 2,
+    # IMDS times out from the pod network; 3 is the working hypothesis).
     http_put_response_hop_limit = 3
   }
 
@@ -255,8 +257,12 @@ resource "aws_instance" "worker" {
   )
 
   lifecycle {
+    # user_data kept alongside user_data_base64 to absorb the attribute
+    # migration on instances created before the rename (cloud-init is
+    # first-boot only, so bootstrap changes never rebuild instances).
     ignore_changes = [
       user_data,
+      user_data_base64,
       ami
     ]
   }

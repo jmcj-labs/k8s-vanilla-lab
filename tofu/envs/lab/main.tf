@@ -148,7 +148,7 @@ module "control_plane" {
   key_name                 = var.ssh_key_name
   my_ip                    = var.my_ip
   api_server_allowed_cidrs = var.api_server_allowed_cidrs
-  user_data                = data.cloudinit_config.control_plane.rendered
+  user_data_base64         = data.cloudinit_config.control_plane.rendered
   cluster_name             = var.cluster_name
   tags                     = local.common_tags
 
@@ -170,7 +170,7 @@ module "worker" {
   key_name                        = var.ssh_key_name
   my_ip                           = var.my_ip
   control_plane_security_group_id = module.control_plane.security_group_id
-  user_data                       = data.cloudinit_config.worker.rendered
+  user_data_base64                = data.cloudinit_config.worker.rendered
   cluster_name                    = var.cluster_name
   worker_count                    = var.worker_count
   capacity_type                   = var.worker_capacity_type

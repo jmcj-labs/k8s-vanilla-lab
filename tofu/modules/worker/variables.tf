@@ -43,8 +43,8 @@ variable "control_plane_security_group_id" {
   type        = string
 }
 
-variable "user_data" {
-  description = "cloud-init user data for worker bootstrap"
+variable "user_data_base64" {
+  description = "Base64-encoded (gzipped) cloud-init user data for worker bootstrap (cloudinit_config with gzip + base64_encode)"
   type        = string
 }
 
