@@ -11,7 +11,7 @@ SSH_USER        := ubuntu
 .DEFAULT_GOAL := help
 
 .PHONY: help init validate fmt plan apply destroy \
-        kubeconfig smoke-test ssh-cp ssh-worker \
+        kubeconfig platform smoke-test ssh-cp ssh-worker \
         clean bootstrap-aws
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
@@ -57,6 +57,21 @@ kubeconfig: ## Fetch kubeconfig from SSM and save to KUBECONFIG_PATH
 	@echo "✓ Kubeconfig saved to $(KUBECONFIG_PATH)"
 	@echo ""
 	@echo "  export KUBECONFIG=$(KUBECONFIG_PATH)"
+
+platform: ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, monitoring)
+	@KUBECONFIG_FILE=$$(mktemp); \
+	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
+	if ! aws ssm get-parameter \
+	  --name "/k8s/$(CLUSTER_NAME)/kubeconfig" \
+	  --with-decryption \
+	  --query Parameter.Value \
+	  --output text \
+	  --region $(AWS_REGION) > "$$KUBECONFIG_FILE"; then \
+	  echo "✗ Failed to fetch kubeconfig from SSM (check AWS credentials and profile)"; \
+	  exit 1; \
+	fi; \
+	chmod 600 "$$KUBECONFIG_FILE"; \
+	KUBECONFIG="$$KUBECONFIG_FILE" AWS_REGION=$(AWS_REGION) bash platform/install.sh
 
 smoke-test: ## Verify all nodes are Ready (kubeconfig fetched from SSM, not persisted to disk)
 	@KUBECONFIG_FILE=$$(mktemp); \

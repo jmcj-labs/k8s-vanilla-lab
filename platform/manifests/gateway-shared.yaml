@@ -1,0 +1,28 @@
+# Shared Gateway for app teams: HTTPS entrypoint terminating TLS with a
+# cert-manager certificate (gateway-shim reads the cluster-issuer annotation
+# and creates the shared-gw-tls Secret for the listener hostname).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shared-gw
+  namespace: infra
+  annotations:
+    cert-manager.io/cluster-issuer: selfsigned
+spec:
+  gatewayClassName: cilium
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.logistics.lab"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: shared-gw-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: logistics
