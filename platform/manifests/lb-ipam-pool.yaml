@@ -1,0 +1,19 @@
+# Cilium LB-IPAM pool — assigns virtual IPs to LoadBalancer Services.
+#
+# Without a cloud LoadBalancer controller (no cloud-controller-manager in this
+# lab), the Gateway's generated Service stays Pending forever and Cilium never
+# marks the Gateway Programmed=True. LB-IPAM is built into Cilium (dormant
+# until the first pool exists): with this pool, the Service gets an IP and the
+# Gateway becomes Programmed.
+#
+# The CIDR is deliberately OUTSIDE the VPC (10.0.0.0/16): these IPs are
+# cluster-internal virtual IPs, not externally routable (that would need BGP,
+# L2 announcements, or a real NLB — the Sprint 2 ingress decision). External
+# access remains via the Service's NodePorts.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: default-pool
+spec:
+  blocks:
+    - cidr: "172.20.255.0/24"
