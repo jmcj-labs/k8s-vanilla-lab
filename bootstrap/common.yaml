@@ -1,6 +1,6 @@
 #!/bin/bash
 # Common bootstrap for Kubernetes nodes (control-plane + workers)
-# Purpose: Install containerd, kubeadm, kubelet, kubectl (K8s 1.35.5)
+# Purpose: Install containerd, kubeadm, kubelet, kubectl (K8s 1.35.x series)
 # NO variables in this file — loaded with file() not templatefile()
 
 set -euo pipefail
@@ -43,7 +43,9 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 
 apt-get update
-apt-get install -y containerd.io=2.2.4-1~ubuntu.24.04~noble
+# Latest containerd from the Docker repository (2.3.x at sprint time).
+# Unpinned on purpose: the Docker repo only ships maintained releases.
+apt-get install -y containerd.io
 
 # Step 2a: Configure containerd with SystemdCgroup
 log "Step 2a/8: Configuring containerd with systemd cgroup driver (config v3)"
@@ -107,9 +109,11 @@ EOF
 apt-get update
 log "✓ Kubernetes repository added"
 
-# Step 7: Install kubeadm, kubelet, kubectl (version 1.35.*)
-log "Step 7/8: Installing kubelet, kubeadm, kubectl (v1.35)"
-apt-get install -y kubelet=1.35.5-1.1 kubeadm=1.35.5-1.1 kubectl=1.35.5-1.1
+# Step 7: Install kubeadm, kubelet, kubectl (latest of the 1.35 series)
+# The apt repo added in Step 6 is series-scoped (stable:/v1.35), so an
+# unpinned install always resolves to the newest 1.35.x patch.
+log "Step 7/8: Installing kubelet, kubeadm, kubectl (v1.35 series)"
+apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 log "✓ Kubernetes packages installed and held"
 
@@ -122,6 +126,22 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 rm -rf /tmp/aws /tmp/awscliv2.zip
 aws --version
 log "✓ AWS CLI v2 installed"
+
+# Step 7b: Set kubelet providerID from IMDSv2 (required by the EBS CSI driver)
+# kubeadm without a cloud provider leaves node spec.providerID empty; passing
+# --provider-id to the kubelet BEFORE kubeadm init/join makes it publish the
+# value at node registration. Same mechanism on control plane and workers —
+# no post-init patch, no RBAC involved. /etc/default/kubelet is sourced by
+# kubeadm's kubelet systemd drop-in.
+log "Step 7b/8: Setting kubelet providerID from IMDSv2"
+IMDS_TOKEN=$(curl -sf -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+AZ=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+  http://169.254.169.254/latest/meta-data/placement/availability-zone)
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+echo "KUBELET_EXTRA_ARGS=--provider-id=aws:///${AZ}/${INSTANCE_ID}" > /etc/default/kubelet
+log "✓ kubelet providerID set to aws:///${AZ}/${INSTANCE_ID}"
 
 # Step 8: Enable kubelet (don't start — kubeadm will handle that)
 log "Step 8/8: Enabling kubelet service"

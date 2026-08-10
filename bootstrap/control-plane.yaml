@@ -1,7 +1,8 @@
 #!/bin/bash
-# Control Plane bootstrap for Kubernetes (K8s 1.35.5)
-# Purpose: Initialize control plane with kubeadm, configure API server, store join data in SSM
-# Variables: cluster_name, aws_region, pod_cidr, service_cidr, kubernetes_version, control_plane_public_ip, ssm_parameter_path
+# Control Plane bootstrap for Kubernetes (K8s 1.35.x)
+# Purpose: Initialize control plane with kubeadm (kube-proxy-free), install
+#          Cilium in strict kube-proxy replacement mode, store join data in SSM
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, control_plane_public_ip, ssm_parameter_path
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
@@ -13,7 +14,7 @@ log() {
 log "=== Starting Control Plane bootstrap ==="
 
 # Step 1: Wait for common.yaml bootstrap to complete
-log "Step 1/6: Waiting for common bootstrap to complete"
+log "Step 1/8: Waiting for common bootstrap to complete"
 TIMEOUT=600  # 10 minutes
 ELAPSED=0
 INTERVAL=10
@@ -41,7 +42,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 2: Create kubeadm config file
-log "Step 2/6: Creating kubeadm configuration"
+log "Step 2/8: Creating kubeadm configuration"
 
 # CRITICAL: Use private IP for controlPlaneEndpoint so workers can join via internal network
 # Public IP is only added to certSANs for external kubectl access
@@ -54,10 +55,15 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 nodeRegistration:
   criSocket: unix:///run/containerd/containerd.sock
+# kube-proxy is never installed: Cilium runs in strict kube-proxy
+# replacement mode (kubeProxyReplacement=true + k8sServiceHost/Port below)
+skipPhases:
+  - addon/kube-proxy
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: v${kubernetes_version}
+# Use the installed kubeadm version (latest 1.35.x from common bootstrap)
+kubernetesVersion: $(kubeadm version -o short)
 clusterName: ${cluster_name}
 controlPlaneEndpoint: "$${PRIVATE_IP}:6443"
 apiServer:
@@ -74,7 +80,7 @@ log "✓ kubeadm config created at /tmp/kubeadm-config.yaml"
 cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
 
 # Step 3: Initialize control plane with kubeadm
-log "Step 3/7: Running kubeadm init (this takes 2-5 minutes)"
+log "Step 3/8: Running kubeadm init (this takes 2-5 minutes)"
 
 kubeadm init \
   --config /tmp/kubeadm-config.yaml \
@@ -89,7 +95,7 @@ fi
 log "✓ kubeadm init completed successfully"
 
 # Step 4: Configure kubectl for root user
-log "Step 4/7: Configuring kubectl for root user"
+log "Step 4/8: Configuring kubectl for root user"
 mkdir -p /root/.kube
 cp -f /etc/kubernetes/admin.conf /root/.kube/config
 chown root:root /root/.kube/config
@@ -97,8 +103,12 @@ chmod 600 /root/.kube/config
 export KUBECONFIG=/etc/kubernetes/admin.conf
 log "✓ kubectl configured for root user"
 
-# Step 5: Install Cilium CNI (keep kube-proxy enabled for bootstrap reliability)
-log "Step 5/7: Installing Cilium CNI (kube-proxy compatibility mode)"
+# providerID note: spec.providerID is published by the kubelet itself via
+# --provider-id, set in common.yaml (Step 7b) before kubeadm init — same
+# mechanism on all nodes, so no post-init patch is needed here.
+
+# Step 5: Install Cilium CNI in strict kube-proxy replacement mode
+log "Step 5/8: Installing Cilium CNI (kube-proxy replacement)"
 
 # Install Helm if not present (required to install Cilium chart)
 if ! command -v helm >/dev/null 2>&1; then
@@ -123,25 +133,47 @@ if ! command -v helm >/dev/null 2>&1; then
   log "✓ Helm installed"
 fi
 
+# Gateway API standard CRDs must exist BEFORE Cilium starts, so the operator
+# enables its Gateway API controller. Applied here (fresh bootstrap); if
+# Cilium were already installed, restart its operator to pick them up.
+log "Installing Gateway API standard CRDs (v1.2.1)"
+kubectl apply -f \
+  https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+if kubectl -n kube-system get deployment cilium-operator &>/dev/null; then
+  log "Cilium already present; restarting cilium-operator to pick up Gateway API CRDs"
+  kubectl -n kube-system rollout restart deployment/cilium-operator \
+    2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+fi
+
 helm repo add cilium https://helm.cilium.io \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 helm repo update \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
+# Strict kube-proxy replacement: kube-proxy was skipped at init, so Cilium
+# needs the API server address explicitly (it cannot rely on the
+# kubernetes.default Service before it is running itself).
 helm upgrade --install cilium cilium/cilium \
   --namespace kube-system \
   --create-namespace \
-  --version 1.19.4 \
+  --version 1.19.6 \
   --set ipam.mode=kubernetes \
-  --set kubeProxyReplacement=false \
+  --set kubeProxyReplacement=true \
+  --set k8sServiceHost="$${PRIVATE_IP}" \
+  --set k8sServicePort=6443 \
+  --set gatewayAPI.enabled=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 kubectl -n kube-system rollout status daemonset/cilium --timeout=300s \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-log "✓ Cilium CNI installed"
+log "✓ Cilium CNI installed (kube-proxy replacement, Gateway API, Hubble)"
 
 # Step 6: Verify API server is responding
-log "Step 6/7: Verifying API server"
+log "Step 6/8: Verifying API server"
 TIMEOUT=120
 ELAPSED=0
 INTERVAL=5
@@ -165,7 +197,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 7: Generate and store join data in SSM Parameter Store
-log "Step 7/7: Generating join data and storing in SSM"
+log "Step 7/8: Generating join data and storing in SSM"
 
 # Generate bootstrap token with 24h TTL
 JOIN_TOKEN=$(kubeadm token create --ttl 24h)
@@ -224,8 +256,8 @@ else
   exit 1
 fi
 
-# Step 7.5: Publish kubeconfig to SSM for CI smoke test
-log "Step 7.5/7: Publishing kubeconfig to SSM for CI smoke test"
+# Step 8: Publish kubeconfig to SSM for CI smoke test
+log "Step 8/8: Publishing kubeconfig to SSM for CI smoke test"
 KUBECONFIG_PATCHED=$(sed \
   "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
   /etc/kubernetes/admin.conf)
@@ -246,5 +278,5 @@ kubectl cluster-info >> /var/log/k8s-cp-bootstrap.log
 log "Node status:"
 kubectl get nodes -o wide >> /var/log/k8s-cp-bootstrap.log
 log ""
-log "CNI: Cilium installed (kube-proxy compatibility mode), pod networking is ready"
+log "CNI: Cilium installed (strict kube-proxy replacement, Gateway API, Hubble), pod networking is ready"
 log "Workers can now join using parameters from SSM: ${ssm_parameter_path}/*"

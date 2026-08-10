@@ -1,7 +1,8 @@
 # ADR-003: CNI Selection — Cilium with kube-proxy compatibility mode
 
-**Status**: Accepted  
-**Date**: 2025-05-13 (revised 2026-06-03)  
+**Status**: Accepted — superseded in part by the 2026-08-10 update below
+(bootstrap now runs strict kube-proxy replacement)  
+**Date**: 2025-05-13 (revised 2026-06-03; updated 2026-08-10)  
 **Deciders**: Platform Engineering Team
 
 ---
@@ -74,6 +75,24 @@ When the objective shifts to kube-proxy-free operation, treat it as a separate c
 |--------|----------|--------|
 | Cilium with kube-proxy replacement at bootstrap | Rejected for bootstrap default | Deadlock-prone in unattended cloud-init bring-up |
 | Cilium with kube-proxy compatibility mode | **Selected** | Meets Cilium objective with reliable automated bootstrap |
+
+---
+
+## Update 2026-08-10 — migrated to strict kube-proxy replacement
+
+The "Deferred Follow-up" above was executed after validating kube-proxy-free
+bring-up end to end in a manual sprint. The bootstrap default is now:
+
+- `kubeadm init` with `skipPhases: [addon/kube-proxy]` (InitConfiguration v1beta4)
+  — kube-proxy is never installed.
+- Cilium 1.19.6 with `kubeProxyReplacement=true` and explicit
+  `k8sServiceHost=<CP private IP>` / `k8sServicePort=6443`, which removes the
+  deadlock that motivated compatibility mode: the agent no longer depends on
+  Service routing to reach the API server.
+- Gateway API standard CRDs (v1.2.1) applied before the Cilium install, with
+  `gatewayAPI.enabled=true`, plus Hubble relay/UI.
+
+The compatibility-mode rationale above is kept for historical context.
 
 ---
 

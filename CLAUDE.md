@@ -27,11 +27,17 @@ learning in public, not for production.
 | Component | Technology | Version |
 |-----------|------------|---------|
 | IaC | OpenTofu (NOT Terraform) | 1.8.0 |
-| Kubernetes | kubeadm | 1.35.5 |
-| Container Runtime | containerd (Docker repo) | 2.2.4 |
-| CNI | Cilium | v1.19.4 |
+| Kubernetes | kubeadm | 1.35.x (latest patch, unpinned) |
+| Container Runtime | containerd (Docker repo) | latest (2.3.x at sprint time) |
+| CNI | Cilium (strict kube-proxy replacement) | v1.19.6 |
+| Gateway API | standard CRDs | v1.2.1 |
+| Storage | EBS CSI driver + gp3 default SC | chart 2.63.1 |
+| Certificates | cert-manager (+ selfsigned ClusterIssuer) | chart v1.21.1 |
+| Data operators | CloudNativePG / Strimzi | charts 0.29.0 / 1.1.0 |
+| Monitoring | kube-prometheus-stack | chart 88.2.0 |
 | Cloud | AWS EC2 | - |
 | Bootstrap | cloud-init | - |
+| Platform layer | `platform/install.sh` via `make platform` | - |
 | CI/CD | GitHub Actions (OIDC) | - |
 | OS | Ubuntu 24.04 LTS | - |
 
@@ -45,7 +51,12 @@ learning in public, not for production.
 k8s-vanilla-lab/
 ├── Makefile                         # Primary local interface — see §6 below
 ├── scripts/
-│   └── bootstrap-aws.sh            # One-time AWS setup (S3, DynamoDB, OIDC, IAM)
+│   ├── bootstrap-aws.sh            # One-time AWS setup (S3, DynamoDB, OIDC, IAM)
+│   └── smoke-test.sh               # Cluster + platform verification (invoked by make smoke-test)
+├── platform/
+│   ├── install.sh                  # Ordered, idempotent platform install (make platform)
+│   ├── README.md                   # Components, versions, execution model
+│   └── manifests/                  # namespaces, gp3 SC, ClusterIssuer, shared Gateway
 ├── tofu/
 │   ├── modules/
 │   │   ├── control-plane/          # Control plane EC2, EIP, IAM, security groups
@@ -63,8 +74,8 @@ k8s-vanilla-lab/
 │   └── opencost/                   # OpenCost for cost attribution
 ├── .github/workflows/
 │   ├── validate.yml                # PR + push to main: pre-commit + make validate + plan
-│   ├── apply.yml                   # Manual: make apply + 10min wait + make smoke-test
-│   └── destroy.yml                 # Nightly cron (0 22 * * *) + manual dispatch
+│   ├── apply.yml                   # Manual: make apply + 20min wait + make platform + make smoke-test
+│   └── destroy.yml                 # Manual dispatch (nightly cron paused during sprint)
 ├── docs/
 │   ├── architecture/
 │   │   ├── diagram.py              # Architecture diagram source (diagrams==0.25.1)
@@ -77,6 +88,7 @@ k8s-vanilla-lab/
 │   │   └── ADR-004-kubeconfig-ssm.md
 │   ├── bootstrap.md                # AWS one-time setup guide
 │   ├── development.md              # Pre-commit, tflint, trivy — local dev setup
+│   ├── INCIDENTS.md                # Findings from the 2026-08 manual platform sprint
 │   ├── troubleshooting.md          # Diagnostic procedures for common issues
 │   └── walkthrough.md              # First deployment step-by-step
 ├── .pre-commit-config.yaml         # Hook definitions (trailing-ws, tofu-fmt, tflint, trivy, gitleaks)
@@ -184,7 +196,8 @@ The `Makefile` is the single source of truth for operational commands. **Any pro
 | `make apply` | `tofu apply -auto-approve` |
 | `make destroy` | `tofu destroy -auto-approve` |
 | `make kubeconfig` | Fetch kubeconfig from SSM → `~/.kube/k8s-vanilla-lab.conf` |
-| `make smoke-test` | Fetch kubeconfig (temp file), run `kubectl get nodes`, exit non-zero if any NotReady |
+| `make platform` | Fetch kubeconfig (temp file), run `platform/install.sh` (EBS CSI, cert-manager, Gateway, operators, monitoring) |
+| `make smoke-test` | Fetch kubeconfig (temp file), run `scripts/smoke-test.sh`: nodes Ready, no kube-proxy, Cilium KPR True, providerID set, gp3 PVC Bound, Gateway Programmed, operators Ready |
 | `make ssh-cp` | SSH into control plane |
 | `make ssh-worker` | SSH into first worker node |
 | `make clean` | Remove `.terraform/` cache and `*.tfstate.backup` |
@@ -307,22 +320,31 @@ All parameters are deleted by a destroy-time provisioner on `tofu destroy`.
 **Token TTL**: `kubeadm token create --ttl 24h`. Workers that need to rejoin after 24h require a
 new token — see `docs/troubleshooting.md`.
 
-### 3. Cilium CNI (Automatic via Bootstrap)
+### 3. Cilium CNI — strict kube-proxy replacement (Automatic via Bootstrap)
 
-**Why this mode**: Cilium in strict kube-proxy replacement mode can deadlock unattended bootstrap
-if kube-proxy is skipped too early. To keep cloud-init reliable, the cluster boots with kube-proxy
-enabled and installs Cilium in compatibility mode.
+**Mode**: kube-proxy is never installed. `kubeadm init` runs with
+`skipPhases: [addon/kube-proxy]` (InitConfiguration v1beta4) and Cilium replaces it entirely.
+Validated end-to-end in the 2026-08 manual sprint (see `docs/INCIDENTS.md`).
 
-**Implementation**:
-- kube-proxy is installed normally — no `--skip-phases` flag
-- `bootstrap/control-plane.yaml` installs Cilium via Helm:
+**Implementation** (`bootstrap/control-plane.yaml`):
+- Gateway API standard CRDs v1.2.1 are applied BEFORE the Cilium install (the operator only
+  enables its Gateway API controller if the CRDs exist; if Cilium were already installed,
+  restart `deploy/cilium-operator` after applying them)
+- Cilium installed via Helm:
   ```bash
-  helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.4 --set ipam.mode=kubernetes --set kubeProxyReplacement=false
+  helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.6 \
+    --set ipam.mode=kubernetes --set kubeProxyReplacement=true \
+    --set k8sServiceHost=<CP private IP> --set k8sServicePort=6443 \
+    --set gatewayAPI.enabled=true --set hubble.relay.enabled=true --set hubble.ui.enabled=true
   ```
+- `k8sServiceHost`/`k8sServicePort` MUST stay wired: without them the agent cannot reach the
+  API server before Service routing exists (the historical bootstrap deadlock, see ADR-003)
 - No manual CNI installation needed after cluster creation
 
-**NEVER** add `--skip-phases=addon/kube-proxy` to the default bootstrap path without also wiring
-`k8sServiceHost`/`k8sServicePort` and validating kube-proxy-free bring-up end-to-end.
+**providerID**: kubeadm leaves `spec.providerID` empty and the EBS CSI driver requires it.
+`bootstrap/common.yaml` (Step 7b) writes `--provider-id=aws:///<az>/<instance-id>` (from
+IMDSv2) into `/etc/default/kubelet` on every node BEFORE `kubeadm init`/`join`, so the
+kubelet publishes it at registration — same mechanism on CP and workers. Never remove it.
 
 ### 4. Spot Workers + On-Demand Control Plane
 
@@ -411,8 +433,17 @@ without opening another file:
   `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
 - **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
   re-execute bootstrap scripts. Only new instances run them.
-- **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply uses:
-  `helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.4 --set ipam.mode=kubernetes --set kubeProxyReplacement=false`.
+- **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply (from the CP,
+  so `hostname -i` gives the private IP): `helm upgrade --install cilium cilium/cilium
+  --namespace kube-system --version 1.19.6 --set ipam.mode=kubernetes
+  --set kubeProxyReplacement=true --set k8sServiceHost=$(hostname -i | awk '{print $1}')
+  --set k8sServicePort=6443 --set gatewayAPI.enabled=true --set hubble.relay.enabled=true
+  --set hubble.ui.enabled=true`.
+- **IMDS from pods**: unreachable even with hop limit 2 (suspected Cilium masquerading — see
+  `docs/INCIDENTS.md` #4). Anything running on the pod network must NOT depend on IMDS; pass
+  region/identity explicitly (e.g. `controller.region` for the EBS CSI driver).
+- **providerID**: never remove the kubelet `--provider-id` step in `bootstrap/common.yaml`;
+  without it the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
 - **Spot worker disappeared**: auto-restarts within 5-10 min
   (`instance_interruption_behavior = "stop"`). Workers rejoin automatically.
 - **Join token TTL is 24h**: workers joining more than 24h after `kubeadm init` need a new
@@ -474,19 +505,15 @@ without opening another file:
 
 ## Maintenance Notes for AI Assistants
 
-**When updating Kubernetes version**:
-1. Update pinned packages in `bootstrap/common.yaml`:
-   `kubelet=X.Y.Z-1.1 kubeadm=X.Y.Z-1.1 kubectl=X.Y.Z-1.1`
-2. Update the apt repo line in `bootstrap/common.yaml`:
+**When updating the Kubernetes series** (patch versions are unpinned — nodes always install
+the latest patch of the series in `bootstrap/common.yaml`):
+1. Update the apt repo line in `bootstrap/common.yaml`:
    `stable:/v1.35` → `stable:/v1.XX`
-3. Update `kubernetes_version` local in `tofu/envs/lab/main.tf`
-4. Update the version table in `README.md` ("What gets deployed")
-5. Update CLAUDE.md Tech Stack table
+2. Update the version table in `README.md` ("What gets deployed")
+3. Update CLAUDE.md Tech Stack table
 
-**When updating containerd version**:
-1. Update pinned version in `bootstrap/common.yaml`:
-   `apt-get install -y containerd.io=X.Y.Z-1~ubuntu.24.04~noble`
-2. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
+**When updating containerd**: nothing to pin — `common.yaml` installs the latest from the
+Docker repo. Update the "at sprint time" mentions in CLAUDE.md / `README.md` if relevant.
 
 **When updating Cilium version**:
 1. Update the Helm chart version in `bootstrap/control-plane.yaml`:
@@ -494,6 +521,11 @@ without opening another file:
 2. Update the re-apply command in `docs/troubleshooting.md` ("Nodes show NotReady")
 3. Update the re-apply command in Known Gotchas above (Cilium NotReady bullet)
 4. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
+
+**When updating platform chart versions**:
+1. Update the pinned versions at the top of `platform/install.sh`
+2. Update the table in `platform/README.md` (kept in sync by convention)
+3. Update CLAUDE.md Tech Stack table and `README.md` ("What gets deployed")
 
 **When updating OpenTofu version**:
 1. Update `tofu_version` in all three `.github/workflows/*.yml` files

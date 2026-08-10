@@ -6,8 +6,9 @@ on:
       confirm:
         description: 'Type "destroy" to confirm'
         required: true
-  schedule:
-    - cron: "0 22 * * *" # 22:00 UTC nightly
+  # Nightly schedule paused during the platform sprint — re-enable when it ends.
+  # schedule:
+  #   - cron: "0 22 * * *" # 22:00 UTC nightly
 
 permissions:
   id-token: write
