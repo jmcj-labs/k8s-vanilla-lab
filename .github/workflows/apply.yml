@@ -11,10 +11,11 @@ permissions:
   id-token: write
   contents: read
 
-# Serialize applies: two concurrent runs fight over the tofu state lock and
-# over Helm release operations (observed 2026-08-10).
+# Shared group with destroy.yml: any two runs touching the tofu state fight
+# over the state lock (and applies also over Helm operations, observed
+# 2026-08-10). A queued run waits for the active one to finish.
 concurrency:
-  group: tofu-apply
+  group: tofu-state
   cancel-in-progress: false
 
 jobs:

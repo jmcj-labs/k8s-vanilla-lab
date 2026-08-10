@@ -12,83 +12,17 @@ terraform {
 data "aws_region" "current" {}
 
 # Security Group for Control Plane
+#
+# NO inline ingress/egress blocks here: the worker module attaches its own
+# rule (worker -> CP) to this SG, and OpenTofu treats inline rules as the
+# complete rule set — any apply would delete the externally added rule
+# (observed 2026-08-10: the worker->CP rule was wiped by a partial apply).
+# All rules live as standalone aws_vpc_security_group_*_rule resources.
 resource "aws_security_group" "control_plane" {
   name                   = "${var.name}-cp-sg"
   description            = "Security group for Kubernetes control plane"
   vpc_id                 = var.vpc_id
   revoke_rules_on_delete = true
-
-  # SSH access from my IP only
-  ingress {
-    description = "SSH from my IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
-  }
-
-  # Kubernetes API server - restricted by default to my_ip, expandable via variable
-  ingress {
-    description = "Kubernetes API"
-    from_port   = 6443
-    to_port     = 6443
-    protocol    = "tcp"
-    cidr_blocks = length(var.api_server_allowed_cidrs) > 0 ? var.api_server_allowed_cidrs : [var.my_ip]
-  }
-
-  # etcd server client API (control plane to control plane)
-  ingress {
-    description = "etcd server client API"
-    from_port   = 2379
-    to_port     = 2380
-    protocol    = "tcp"
-    self        = true
-  }
-
-  # Kubelet API
-  ingress {
-    description = "Kubelet API"
-    from_port   = 10250
-    to_port     = 10250
-    protocol    = "tcp"
-    self        = true
-  }
-
-  # kube-scheduler
-  ingress {
-    description = "kube-scheduler"
-    from_port   = 10259
-    to_port     = 10259
-    protocol    = "tcp"
-    self        = true
-  }
-
-  # kube-controller-manager
-  ingress {
-    description = "kube-controller-manager"
-    from_port   = 10257
-    to_port     = 10257
-    protocol    = "tcp"
-    self        = true
-  }
-
-  # Allow all traffic from workers (self = placeholder; actual rule added via aws_security_group_rule in worker module)
-  ingress {
-    description = "All from workers"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    self        = true
-  }
-
-  # Egress - allow all
-  egress {
-    description = "Allow all outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   tags = merge(
     var.tags,
@@ -97,6 +31,78 @@ resource "aws_security_group" "control_plane" {
       Role = "control-plane"
     }
   )
+}
+
+resource "aws_vpc_security_group_ingress_rule" "ssh" {
+  security_group_id = aws_security_group.control_plane.id
+  description       = "SSH from my IP"
+  cidr_ipv4         = var.my_ip
+  from_port         = 22
+  to_port           = 22
+  ip_protocol       = "tcp"
+}
+
+# Kubernetes API server - restricted by default to my_ip, expandable via variable
+resource "aws_vpc_security_group_ingress_rule" "api_server" {
+  for_each          = toset(length(var.api_server_allowed_cidrs) > 0 ? var.api_server_allowed_cidrs : [var.my_ip])
+  security_group_id = aws_security_group.control_plane.id
+  description       = "Kubernetes API"
+  cidr_ipv4         = each.value
+  from_port         = 6443
+  to_port           = 6443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "etcd" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "etcd server client API (control plane to control plane)"
+  referenced_security_group_id = aws_security_group.control_plane.id
+  from_port                    = 2379
+  to_port                      = 2380
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "kubelet" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "Kubelet API"
+  referenced_security_group_id = aws_security_group.control_plane.id
+  from_port                    = 10250
+  to_port                      = 10250
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "kube_scheduler" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "kube-scheduler"
+  referenced_security_group_id = aws_security_group.control_plane.id
+  from_port                    = 10259
+  to_port                      = 10259
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "kube_controller_manager" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "kube-controller-manager"
+  referenced_security_group_id = aws_security_group.control_plane.id
+  from_port                    = 10257
+  to_port                      = 10257
+  ip_protocol                  = "tcp"
+}
+
+# All traffic between control-plane ENIs (self). The worker -> CP rule is
+# owned by the worker module (aws_vpc_security_group_ingress_rule.cp_from_workers).
+resource "aws_vpc_security_group_ingress_rule" "all_from_self" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "All traffic from this SG (self)"
+  referenced_security_group_id = aws_security_group.control_plane.id
+  ip_protocol                  = "-1"
+}
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.control_plane.id
+  description       = "Allow all outbound"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
 }
 
 # Cleanup orphaned ENIs (created by Kubernetes/CNI, not tracked by OpenTofu)
@@ -223,7 +229,10 @@ resource "aws_instance" "control_plane" {
   key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.control_plane.id]
   iam_instance_profile   = aws_iam_instance_profile.control_plane.name
-  user_data              = var.user_data
+  # cloud-init is rendered gzip+base64 (cloudinit_config): the provider
+  # contract requires user_data_base64 for pre-encoded data — plain
+  # user_data corrupts it and breaks in-place instance updates.
+  user_data_base64 = var.user_data_base64
 
   root_block_device {
     volume_type           = var.root_volume_type
@@ -246,8 +255,8 @@ resource "aws_instance" "control_plane" {
     # Hop limit 3 so pod-network workloads (EBS CSI driver: credentials +
     # metadata) can reach IMDSv2. 1 only serves the host; 2 covers plain
     # container bridges but NOT Cilium in tunnel routing mode, which adds an
-    # extra routing hop on the return path (verified 2026-08-10: with 2,
-    # IMDS times out from the pod network).
+    # extra routing hop on the return path (observed 2026-08-10: with 2,
+    # IMDS times out from the pod network; 3 is the working hypothesis).
     http_put_response_hop_limit = 3
   }
 
@@ -261,8 +270,12 @@ resource "aws_instance" "control_plane" {
   )
 
   lifecycle {
+    # user_data kept alongside user_data_base64 to absorb the attribute
+    # migration on instances created before the rename (cloud-init is
+    # first-boot only, so bootstrap changes never rebuild instances).
     ignore_changes = [
       user_data,
+      user_data_base64,
       ami
     ]
   }

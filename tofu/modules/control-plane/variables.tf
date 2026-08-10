@@ -38,8 +38,8 @@ variable "my_ip" {
   }
 }
 
-variable "user_data" {
-  description = "cloud-init user data for control plane bootstrap"
+variable "user_data_base64" {
+  description = "Base64-encoded (gzipped) cloud-init user data for control plane bootstrap (cloudinit_config with gzip + base64_encode)"
   type        = string
 }
 
