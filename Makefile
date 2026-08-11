@@ -26,12 +26,16 @@ help: ## Show available targets
 init: ## Initialise OpenTofu with backend config (requires tofu/envs/lab/backend.hcl)
 	cd $(TOFU_DIR) && tofu init -backend-config=backend.hcl
 
-validate: ## Check formatting and validate configuration (no backend required)
-	@VALIDATE_TMP=$$(mktemp -d); \
-	trap 'rm -rf "$$VALIDATE_TMP"' EXIT; \
-	tofu fmt -check -recursive tofu/ && \
-	  cd $(TOFU_DIR) && TF_DATA_DIR="$$VALIDATE_TMP" tofu init -backend=false -input=false && \
-	  TF_DATA_DIR="$$VALIDATE_TMP" tofu validate
+validate: ## Check formatting and validate all stacks (no backend required)
+	@tofu fmt -check -recursive tofu/; \
+	for STACK in tofu/envs/lab tofu/envs/identity; do \
+	  VALIDATE_TMP=$$(mktemp -d); \
+	  echo "── validating $$STACK ──"; \
+	  ( cd "$$STACK" && \
+	    TF_DATA_DIR="$$VALIDATE_TMP" tofu init -backend=false -input=false >/dev/null && \
+	    TF_DATA_DIR="$$VALIDATE_TMP" tofu validate ) || { rm -rf "$$VALIDATE_TMP"; exit 1; }; \
+	  rm -rf "$$VALIDATE_TMP"; \
+	done
 
 fmt: ## Format all .tf files recursively
 	tofu fmt -recursive tofu/

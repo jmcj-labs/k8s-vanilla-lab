@@ -263,11 +263,21 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "iam:RemoveRoleFromInstanceProfile",
         "iam:TagInstanceProfile",
         "iam:TagRole",
-        "iam:UntagRole"
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy"
       ],
       "Resource": [
         "arn:aws:iam::${ACCOUNT_ID}:role/k8s-vanilla-lab-*",
         "arn:aws:iam::${ACCOUNT_ID}:instance-profile/k8s-vanilla-lab-*"
+      ]
+    },
+    {
+      "Sid": "AssumeAccessRolesForRBACSmoke",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-vanilla-lab-platform-admin",
+        "arn:aws:iam::${ACCOUNT_ID}:role/k8s-vanilla-lab-developer"
       ]
     },
     {

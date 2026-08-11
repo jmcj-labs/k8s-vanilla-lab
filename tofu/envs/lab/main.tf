@@ -158,6 +158,15 @@ module "control_plane" {
   depends_on = [aws_internet_gateway.main]
 }
 
+# Stable Kubernetes-access IAM roles (aws-iam-authenticator identities).
+# No dependency on the node modules: pure IAM, zero permissions of their own.
+module "access" {
+  source = "../../modules/access"
+
+  cluster_name = var.cluster_name
+  tags         = local.common_tags
+}
+
 # Worker Module
 module "worker" {
   source = "../../modules/worker"

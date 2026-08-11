@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in. NEVER version the real file:
+# it carries account IDs and personal data (repo rule + gitignore).
+
+# Organization management account (where IAM Identity Center lives)
+management_account_id = "111111111111"
+
+# Lab member account (cluster + stable IAM roles; assignments target this one)
+lab_account_id = "222222222222"
+
+# Username of your EXISTING Identity Center user (looked up, never managed)
+platform_user_name = "your-existing-username"
+
+# Local AWS profile with management-account credentials
+aws_profile = "management"
+
+# The new developer identity (managed by this stack)
+dev_given_name  = "Nombre"
+dev_family_name = "Apellido"
+dev_email       = "jm-dev@example.com"
