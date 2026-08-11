@@ -191,10 +191,10 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
 - **K8s API open to 0.0.0.0/0** (`api_server_allowed_cidrs` default): required so CI runners
   (dynamic IPs) can run platform install + smoke test via the SSM kubeconfig (ADR-004); the
   API is TLS + cert-authenticated, and SSH remains restricted to `my_ip`
-- **IMDS reachable from the pod network** (hop limit 3, required by the EBS CSI driver with
-  Cilium in tunnel mode — INCIDENTS #4): every pod can reach the node's instance profile. A
-  CiliumNetworkPolicy restricting IMDS to the EBS CSI pods is pending — required before
-  running untrusted workloads
+- **IMDS from pods: closed by policy** (2026-08-11): hop limit 3 is still required (EBS CSI,
+  Cilium tunnel — INCIDENTS #4) but a clusterwide Cilium policy denies `169.254.169.254`
+  to every pod except the EBS CSI (`platform/policies/`), verified by the smoke via
+  Hubble drops
 - **Gateway IP is virtual** (Cilium LB-IPAM, not announced externally): external access to
   the Gateway is via NodePort until a real NLB lands (Sprint 2 ingress decision)
 

@@ -20,8 +20,10 @@ este documento no lo duplica, lo referencia.
 
 ## 2. Arquitectura
 
-**Cómputo**: 1 control plane t3.medium on-demand (+EIP) · 2 workers t3.medium
-spot · Ubuntu 24.04 LTS · IMDSv2 obligatorio con hop limit 3 · EBS cifrado.
+**Cómputo**: 1 control plane t3.medium on-demand (+EIP) · 3 workers t3.medium
+spot (3, no 2: anti-affinity real para la topología de datos de fase 2 —
+CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS · IMDSv2 obligatorio con hop limit 3 ·
+EBS cifrado.
 
 **Red**: VPC dedicada `10.0.0.0/16`, subred pública `10.0.1.0/24` (sin NAT
 por coste) · pods `10.244.0.0/16` · services `10.96.0.0/12` · **sin
@@ -92,7 +94,7 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
   `http://<ip-worker>:<nodeport>` (password en el secret
   `kube-prometheus-stack-grafana`)
 
-**FinOps**: ~$0.049/h (CP $0.038 + 2×spot $0.0055) ≈ **$1.2/día** si se deja
+**FinOps**: ~$0.055/h (CP $0.038 + 3×spot $0.0055) ≈ **$1.3/día** si se deja
 encendido. El cron de destroy nocturno está **pausado** durante el sprint —
 el cluster no se apaga solo: destruir a mano al terminar el día. Slack
 notifica cada apply (coste/hora) y cada destroy (uptime y coste estimado).
@@ -101,9 +103,11 @@ notifica cada apply (coste/hora) y cada destroy (uptime y coste estimado).
 
 Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 
-- **IMDS alcanzable desde toda la red de pods** (consecuencia del hop 3).
-  Prioridad: CiliumNetworkPolicy restringiendo `169.254.169.254` a los pods
-  del EBS CSI **antes de cargas no confiables**.
+- ~~IMDS alcanzable desde toda la red de pods~~ **CERRADA (2026-08-11)**:
+  CiliumClusterwideNetworkPolicy deniega `169.254.169.254` a todos los pods
+  excepto el EBS CSI (`platform/policies/`), verificada en el smoke con
+  drops de Hubble — incluida la comprobación anti-falso-negativo de la
+  excepción (caché STS ~1h).
 - **Exposición del Gateway por NodePort** (IP LB virtual, no anunciada) —
   hasta el NLB de Sprint 2.
 - **Ingreso sin e2e probado**: `Programmed=True` demuestra reconciliación,

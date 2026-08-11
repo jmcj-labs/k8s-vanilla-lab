@@ -250,3 +250,30 @@ aws s3 rm s3://YOUR-BUCKET/k8s-vanilla-lab/terraform.tfstate
 
 After manual cleanup, `make destroy` will error on already-deleted resources. Use
 `tofu state rm` to remove each orphaned resource from state before re-deploying.
+
+## Network policy drops — inspecting with Hubble
+
+Default-deny (`logistics`) and the clusterwide IMDS deny are the #1 suspects
+when something degrades silently (DNS, Prometheus scrape, app→data traffic).
+Hubble first, always:
+
+```bash
+# From any cilium agent (drops are seen by the agent on the node hosting
+# the SOURCE pod — loop all agents if unsure):
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+  hubble observe --verdict DROPPED --last 50
+
+# Only drops towards IMDS (the CCNP):
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+  hubble observe --verdict DROPPED --to-ip 169.254.169.254 --last 50
+
+# Only drops involving a namespace:
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+  hubble observe --verdict DROPPED --namespace logistics --last 50
+```
+
+Reading a drop line: `<src pod> -> <dst> ... Policy denied DROPPED` — the
+policy that matched is on the SOURCE (egress) or DESTINATION (ingress)
+endpoint. `kubectl get cnp -n <ns>` / `kubectl get ccnp` lists the policies;
+the smoke's positive-first checks (DNS from logistics, control-pod egress)
+tell you whether the openings themselves are broken.

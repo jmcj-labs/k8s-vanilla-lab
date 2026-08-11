@@ -444,9 +444,10 @@ without opening another file:
   --set hubble.ui.enabled=true`.
 - **IMDS from pods**: needs `http_put_response_hop_limit = 3` — Cilium's tunnel routing adds
   one routing hop on the return path, so the container-standard 2 is one short (root cause
-  confirmed; see `docs/INCIDENTS.md` #4). Never lower it. Security debt: with hop 3 every pod
-  can reach the instance profile; a CiliumNetworkPolicy restricting 169.254.169.254 to the
-  EBS CSI pods is pending and must land before untrusted workloads.
+  confirmed; see `docs/INCIDENTS.md` #4). Never lower it. The instance-profile exposure this
+  creates is CLOSED by policy: a CiliumClusterwideNetworkPolicy in `platform/policies/`
+  denies 169.254.169.254 to every pod except the EBS CSI (exception via endpointSelector
+  exclusion — deny is not compensable in Cilium). Never remove it.
 - **Gateway `Programmed`**: requires an address on its LoadBalancer Service. No cloud LB here —
   Cilium LB-IPAM (`platform/manifests/lb-ipam-pool.yaml`, virtual IPs, ns `infra` only)
   provides it. External access is via NodePort until the Sprint 2 NLB decision.
