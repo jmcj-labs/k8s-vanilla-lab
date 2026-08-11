@@ -4,7 +4,7 @@
 # fetched from SSM. Exits non-zero on the first failed check.
 #
 # Checks:
-#   1. All nodes Ready (EXPECTED_NODES, default 3)
+#   1. All nodes Ready (EXPECTED_NODES, default 4)
 #   2. No kube-proxy pods (kube-proxy-free bootstrap)
 #   3. Cilium reports KubeProxyReplacement: True
 #   4. spec.providerID set on every node
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-EXPECTED_NODES="${EXPECTED_NODES:-3}"
+EXPECTED_NODES="${EXPECTED_NODES:-4}"
 FAIL() { echo "✗ $*" >&2; exit 1; }
 OK() { echo "✓ $*"; }
 
@@ -214,5 +214,90 @@ echo "${DENIED_OUT}" | grep -q "Forbidden" \
 OK "IAM developer: infra is Forbidden (RBAC denial, not an error)"
 fi
 
+# ── 9. Network policies (IMDS deny + logistics default-deny) ─────────────────
+# Positive checks FIRST: broken DNS or broken egress make every negative
+# test pass for the wrong reason.
+type cleanup_iam >/dev/null 2>&1 || cleanup_iam() { :; }
+cleanup_netpol() {
+  kubectl -n infra delete pod smoke-target --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n infra delete svc smoke-target --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n default delete pod smoke-ctl --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n logistics delete pod smoke-app --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_pvc; cleanup_iam; cleanup_netpol' EXIT
+
+hubble_drops_to_imds() {
+  # Prints DROPPED flows towards IMDS as seen by every cilium agent
+  for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+    kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+      hubble observe --verdict DROPPED --to-ip 169.254.169.254 --last 100 2>/dev/null || true
+  done
+}
+
+# Temporary HTTP target in infra + control pod in default (a namespace with
+# NO egress policy — using logistics here would false-positive on its own
+# default-deny) + app pod in logistics.
+kubectl -n infra run smoke-target --image=registry.k8s.io/e2e-test-images/agnhost:2.47 \
+  --restart=Never --port=8080 -- netexec --http-port=8080 >/dev/null
+kubectl -n infra expose pod smoke-target --port=80 --target-port=8080 --name=smoke-target >/dev/null
+kubectl -n default run smoke-ctl --image=busybox:1.36 --restart=Never -- sleep 600 >/dev/null
+kubectl -n logistics run smoke-app --image=busybox:1.36 --restart=Never -- sleep 600 >/dev/null
+kubectl -n infra wait --for=condition=Ready pod/smoke-target --timeout=120s >/dev/null \
+  || FAIL "smoke-target pod not Ready in infra"
+kubectl -n default wait --for=condition=Ready pod/smoke-ctl --timeout=120s >/dev/null \
+  || FAIL "smoke-ctl pod not Ready in default"
+kubectl -n logistics wait --for=condition=Ready pod/smoke-app --timeout=120s >/dev/null \
+  || FAIL "smoke-app pod not Ready in logistics"
+
+# 9a. POSITIVE: DNS resolves from logistics (its default-deny must leave
+# kube-dns open or every later negative is meaningless)
+kubectl -n logistics exec smoke-app -- nslookup kubernetes.default.svc.cluster.local >/dev/null 2>&1 \
+  || FAIL "DNS from logistics broken — default-deny is eating kube-dns"
+OK "DNS resolves from logistics (positive baseline)"
+
+# 9b. POSITIVE: the control pod has working general egress
+kubectl -n default exec smoke-ctl -- wget -q -T 5 -O /dev/null http://smoke-target.infra.svc.cluster.local 2>/dev/null \
+  || FAIL "control pod (default) cannot reach infra service — negatives would be meaningless"
+OK "Control pod (default) reaches infra service (positive baseline)"
+
+# 9c. NEGATIVE: IMDS unreachable from the pod network, with Hubble evidence
+set +e
+kubectl -n default exec smoke-ctl -- wget -q -T 5 -O /dev/null http://169.254.169.254/latest/meta-data/ >/dev/null 2>&1
+IMDS_RC=$?
+set -e
+[ "${IMDS_RC}" -ne 0 ] || FAIL "IMDS reachable from the pod network — CCNP deny not effective"
+hubble_drops_to_imds | grep -q "smoke-ctl" \
+  || FAIL "IMDS attempt did not appear as a Hubble DROP (a timeout is not a policy verdict)"
+OK "IMDS denied from pod network (request fails + Hubble DROP confirmed)"
+
+# 9d. CSI exception verified via Hubble — avoids the STS-cache false
+# negative: the controller holds cached credentials (~1h), so 'PVC still
+# mounts' would stay green for an hour even with a broken selector. No
+# DROP towards IMDS may exist from the CSI pods. Definitive validation is
+# the next fresh apply.
+if hubble_drops_to_imds | grep -q "ebs-csi"; then
+  FAIL "IMDS drops from EBS CSI pods — the deny exception selector is wrong"
+fi
+OK "EBS CSI exception verified (no IMDS drops from CSI pods)"
+
+# 9e. NEGATIVE: logistics cannot reach infra (name resolves, connection dropped)
+kubectl -n logistics exec smoke-app -- nslookup smoke-target.infra.svc.cluster.local >/dev/null 2>&1 \
+  || FAIL "smoke-target name does not resolve from logistics (DNS should be open)"
+set +e
+kubectl -n logistics exec smoke-app -- wget -q -T 5 -O /dev/null http://smoke-target.infra.svc.cluster.local >/dev/null 2>&1
+DENY_RC=$?
+set -e
+[ "${DENY_RC}" -ne 0 ] || FAIL "logistics reaches infra — default-deny not effective"
+NP_DROP=""
+for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+  if kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+       hubble observe --verdict DROPPED --last 100 2>/dev/null | grep -q "smoke-app"; then
+    NP_DROP=yes
+    break
+  fi
+done
+[ -n "${NP_DROP}" ] || FAIL "logistics→infra denial did not appear as a Hubble DROP"
+OK "logistics→infra denied (resolves, connection dropped, Hubble DROP confirmed)"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform layer and IAM access are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM access and network policies are healthy"

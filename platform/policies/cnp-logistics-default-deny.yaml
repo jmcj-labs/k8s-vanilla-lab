@@ -1,0 +1,55 @@
+# Default-deny for the app namespace (logistics), with explicit openings.
+#
+# Selecting every pod ({}) with ingress+egress sections present flips the
+# namespace to default-deny in both directions; each rule below is an
+# explicit opening. Policies compose by union — phase 2 adds its own
+# (Prometheus scrape into workloads, data-namespace policy) without
+# touching this one.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: logistics-default-deny
+  namespace: logistics
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-policies
+spec:
+  endpointSelector: {}
+  ingress:
+    # Traffic forwarded by Gateway API arrives from Cilium's reserved
+    # `ingress` identity (the Envoy proxy) — NOT from infra pods; do not
+    # select infra here.
+    - fromEntities:
+        - ingress
+    # app -> app inside the namespace
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: logistics
+  egress:
+    # DNS: pinned to kube-dns in kube-system, port 53 UDP+TCP — never a
+    # generic allow (the #1 silent breaker under default-deny).
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Data plane (phase 2 operands): PostgreSQL + Kafka in ns data
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: data
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+            - port: "9092"
+              protocol: TCP
+            - port: "9093"
+              protocol: TCP
+    # app -> app inside the namespace
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: logistics

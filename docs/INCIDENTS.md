@@ -77,6 +77,9 @@ explicit `--set controller.region` in
 profile) reachable from ANY pod, not just the EBS CSI. Before running
 untrusted workloads, add a CiliumNetworkPolicy allowing 169.254.169.254 only
 from the EBS CSI pods and denying it for the rest of the pod network.
+**→ Paid on 2026-08-11**: `platform/policies/ccnp-deny-imds.yaml`
+(clusterwide egressDeny, EBS CSI excluded from the endpointSelector),
+verified by the smoke with Hubble drop evidence.
 
 ## 5. Gzip cloud-init passed as plain `user_data` broke in-place updates
 

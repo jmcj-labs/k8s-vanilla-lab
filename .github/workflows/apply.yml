@@ -59,6 +59,69 @@ jobs:
       - name: OpenTofu Init
         run: tofu init -backend-config=backend.hcl
 
+      # New workers joining a LIVE cluster need a valid bootstrap token, but
+      # the join-command in SSM carries the one minted at kubeadm init
+      # (TTL 24h). If the cluster already exists (kubeconfig in SSM), mint a
+      # fresh token BEFORE the apply and rewrite join-command preserving the
+      # existing private endpoint and CA hash. Fresh cluster (no kubeconfig
+      # yet): skip — the CP bootstrap mints its own token as always.
+      # kubectl only, no kubeadm on the runner: a bootstrap token is just a
+      # Secret of type bootstrap.kubernetes.io/token in kube-system.
+      # Token and join-command are never echoed.
+      - name: Preflight join token (live cluster only)
+        working-directory: .
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          KUBECONFIG_FILE=$(mktemp)
+          trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
+          if ! aws ssm get-parameter \
+              --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
+              --with-decryption \
+              --query Parameter.Value \
+              --output text \
+              --region "${AWS_REGION}" > "${KUBECONFIG_FILE}" 2>/dev/null; then
+            echo "No kubeconfig in SSM — fresh cluster, preflight skipped"
+            exit 0
+          fi
+          chmod 600 "${KUBECONFIG_FILE}"
+          export KUBECONFIG="${KUBECONFIG_FILE}"
+
+          JOIN_CMD=$(aws ssm get-parameter \
+            --name "/k8s/${CLUSTER_NAME}/join-command" \
+            --with-decryption --query Parameter.Value --output text \
+            --region "${AWS_REGION}")
+          API_ENDPOINT=$(echo "${JOIN_CMD}" | awk '{print $3}')
+          CA_HASH=$(echo "${JOIN_CMD}" | grep -o 'sha256:[a-f0-9]*')
+
+          TOKEN_ID=$(openssl rand -hex 3)
+          TOKEN_SECRET=$(openssl rand -hex 8)
+          EXPIRATION=$(date -u -d "+24 hours" +%Y-%m-%dT%H:%M:%SZ)
+
+          kubectl apply -f - >/dev/null <<TOKEN_EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: bootstrap-token-${TOKEN_ID}
+            namespace: kube-system
+          type: bootstrap.kubernetes.io/token
+          stringData:
+            token-id: ${TOKEN_ID}
+            token-secret: ${TOKEN_SECRET}
+            expiration: "${EXPIRATION}"
+            usage-bootstrap-authentication: "true"
+            usage-bootstrap-signing: "true"
+            auth-extra-groups: system:bootstrappers:kubeadm:default-node-token
+          TOKEN_EOF
+
+          aws ssm put-parameter \
+            --name "/k8s/${CLUSTER_NAME}/join-command" \
+            --value "kubeadm join ${API_ENDPOINT} --token ${TOKEN_ID}.${TOKEN_SECRET} --discovery-token-ca-cert-hash ${CA_HASH}" \
+            --type SecureString --overwrite \
+            --region "${AWS_REGION}" >/dev/null
+          echo "✓ Fresh 24h bootstrap token minted; join-command updated (endpoint ${API_ENDPOINT} preserved)"
+
       - name: OpenTofu Apply
         env:
           TF_VAR_my_ip: ${{ vars.TF_VAR_MY_IP }}

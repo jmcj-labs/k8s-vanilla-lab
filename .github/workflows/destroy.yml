@@ -114,7 +114,7 @@ jobs:
           NOW=$(date +%s)
           CONTROL_PLANE_RATE=0.038
           WORKER_SPOT_RATE=0.0055
-          N_WORKERS=2
+          N_WORKERS=3
 
           if [[ "${DEPLOYED_AT}" =~ ^[0-9]+$ ]]; then
             UPTIME_SECONDS=$((NOW - DEPLOYED_AT))
