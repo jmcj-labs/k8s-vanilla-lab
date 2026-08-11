@@ -129,3 +129,29 @@ scoped to namespace `infra` — Cilium LB-IPAM assigns a virtual IP
 (`172.20.255.0/24`, not announced externally) and the Gateway programs.
 External access remains via NodePort until the Sprint 2 ingress decision
 (NLB).
+
+## 8. A deny-only Cilium policy blacked out the whole cluster's egress
+
+**Symptom**: right after applying the clusterwide IMDS deny, the smoke's gp3
+PVC never bound. Live diagnosis: the EBS CSI controller could not resolve
+`ec2.eu-west-1.amazonaws.com`; CoreDNS logged i/o timeouts to its upstream
+(10.0.0.2); Hubble showed **Policy denied DROPPED** from CoreDNS to both the
+VPC resolver and the API server. Every pod except the EBS CSI had lost all
+egress.
+
+**Root cause**: in Cilium, a policy containing ONLY deny rules still flips
+the selected endpoints into **default-deny** for that direction. The CCNP
+selected every endpoint except the CSI with an `egressDeny` — so everything
+else's egress became "deny everything", not "deny just IMDS".
+
+**Fix**: `enableDefaultDeny: {egress: false, ingress: false}` on the CCNP —
+the documented switch that turns a policy into a pure deny overlay
+([`platform/policies/ccnp-deny-imds.yaml`](../platform/policies/ccnp-deny-imds.yaml)).
+Verified live: DNS recovered instantly, IMDS still denied with
+`Policy denied by denylist` drops, CSI exception intact.
+
+**Bonus finding (smoke flakiness)**: `hubble observe | grep -q` under
+`set -o pipefail` is racy — `grep -q` exits on first match, the writer can
+catch SIGPIPE, and the pipeline (inside `if`) reads as false. The smoke now
+captures output first and greps the variable, plus uses precise `--from-pod`
+filters instead of fishing in the last-N global drops.
