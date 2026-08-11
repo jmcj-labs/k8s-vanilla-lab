@@ -56,6 +56,7 @@ Platform layer (installed by `make platform` — see [platform/README.md](platfo
 | CloudNativePG | 0.29.0 | PostgreSQL operator (ns `data`, operator only) |
 | Strimzi | 1.1.0 | Kafka operator (ns `data`, operator only) |
 | kube-prometheus-stack | 88.2.0 | Monitoring; Grafana on NodePort, Alertmanager off |
+| aws-iam-authenticator | v0.7.18 | IAM auth webhook (DynamicFile); daily access — admin kubeconfig is break-glass (ADR-005) |
 
 Deployment runs in four sequential stages:
 
@@ -116,6 +117,36 @@ The CI apply workflow runs the same chain automatically:
 
 Full walkthrough, bootstrap monitoring, and day-2 operations:
 [docs/walkthrough.md](docs/walkthrough.md).
+
+## Access (IAM — ADR-005)
+
+Daily access authenticates against the API server with IAM via
+aws-iam-authenticator; the kubeadm admin kubeconfig (`make kubeconfig`,
+ADR-004) is **break-glass only**. Onboarding a person = adding them to an
+Identity Center group (`tofu/envs/identity` — separate, persistent stack
+applied locally against the management account; see its README for the
+one-time manual `jm-dev` password bootstrap).
+
+Two separate `sso-session` blocks in `~/.aws/config` — they are two distinct
+users, and sharing one session would make a `jm-dev` login replace the
+platform user's:
+
+```
+sso-session: k8s-platform · profile: k8s-platform · user: existing human user · permission set: K8sPlatformBridge
+sso-session: k8s-dev      · profile: k8s-dev      · user: jm-dev              · permission set: K8sDevBridge
+```
+
+```bash
+make kubeconfig-admin   # exec → aws-iam-authenticator token -r …-platform-admin
+make kubeconfig-dev     # exec → aws-iam-authenticator token -r …-developer (ns logistics)
+aws sso login --profile k8s-platform   # when the session expires
+AWS_PROFILE=k8s-platform kubectl get nodes
+```
+
+The generated kubeconfigs contain no Kubernetes credentials (only endpoint +
+public CA + the exec block); `aws sso login` uses the standard AWS SSO cache
+on disk. Profiles/mappings/RBAC come from `platform/access/profiles.yaml` —
+profiles, not people.
 
 ---
 

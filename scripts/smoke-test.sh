@@ -111,5 +111,87 @@ kubectl -n data wait --for=condition=Ready pod \
   || FAIL "Strimzi operator pod not Ready"
 OK "Strimzi operator Running"
 
+# ── 8. IAM access (aws-iam-authenticator) ────────────────────────────────────
+# Everything above ran on the BREAK-GLASS kubeconfig (SSM static cert) — its
+# continued validity is itself part of the acceptance criteria (ADR-005).
+OK "Break-glass kubeconfig (SSM) works — sections 1-7 ran on it"
+
+command -v aws-iam-authenticator >/dev/null 2>&1 \
+  || FAIL "aws-iam-authenticator client not installed on this runner (pin v0.7.18)"
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
+AWS_REGION="${AWS_REGION:-eu-west-1}"
+CLUSTER_ID="${ACCOUNT_ID}.${AWS_REGION}.${CLUSTER_NAME}"
+
+# First STS, then Kubernetes: a failed assume-role is an IAM problem and must
+# read as one — not as an authenticator or RBAC failure. Never print tokens.
+for ACCESS_ROLE in platform-admin developer; do
+  aws sts assume-role \
+    --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/${CLUSTER_NAME}-${ACCESS_ROLE}" \
+    --role-session-name "smoke-${ACCESS_ROLE}" \
+    --query 'AssumedRoleUser.Arn' --output text >/dev/null \
+    || FAIL "sts:AssumeRole failed for ${CLUSTER_NAME}-${ACCESS_ROLE} (IAM side, not Kubernetes)"
+done
+OK "sts:AssumeRole works for both access roles"
+
+# Ephemeral IAM kubeconfigs: endpoint+CA reused from the break-glass one.
+IAM_SERVER=$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}')
+IAM_CA=$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+
+make_iam_kubeconfig() {
+  cat > "$2" <<IAMCFG
+apiVersion: v1
+kind: Config
+clusters:
+  - name: smoke
+    cluster: {server: "${IAM_SERVER}", certificate-authority-data: "${IAM_CA}"}
+contexts:
+  - name: smoke
+    context: {cluster: smoke, user: iam}
+current-context: smoke
+users:
+  - name: iam
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: aws-iam-authenticator
+        args: [token, -i, "${CLUSTER_ID}", -r, "arn:aws:iam::${ACCOUNT_ID}:role/${CLUSTER_NAME}-$1", --forward-session-name]
+        interactiveMode: Never
+IAMCFG
+}
+
+ADMIN_KC=$(mktemp) && DEV_KC=$(mktemp)
+cleanup_iam() {
+  KUBECONFIG="${ADMIN_KC}" kubectl -n logistics delete deployment smoke-dev-access \
+    --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  rm -f "${ADMIN_KC}" "${DEV_KC}"
+}
+trap 'cleanup_pvc; cleanup_iam' EXIT
+make_iam_kubeconfig platform-admin "${ADMIN_KC}"
+make_iam_kubeconfig developer "${DEV_KC}"
+
+KUBECONFIG="${ADMIN_KC}" kubectl get nodes >/dev/null \
+  || FAIL "IAM platform-admin kubeconfig cannot list nodes"
+OK "IAM platform-admin: kubectl get nodes works"
+
+KUBECONFIG="${DEV_KC}" kubectl -n logistics create deployment smoke-dev-access \
+  --image=registry.k8s.io/pause:3.10 >/dev/null \
+  || FAIL "IAM developer cannot create a deployment in logistics"
+OK "IAM developer: create deployment in logistics works"
+
+# Negative test with teeth: it only passes on a REAL RBAC denial. A timeout
+# or an authenticator error is a failure, not a lucky Forbidden.
+set +e
+DENIED_OUT=$(KUBECONFIG="${DEV_KC}" kubectl get pods -n infra 2>&1)
+DENIED_RC=$?
+set -e
+if [ "${DENIED_RC}" -eq 0 ]; then
+  FAIL "IAM developer can read pods in infra — segregation broken"
+fi
+echo "${DENIED_OUT}" | grep -q "Forbidden" \
+  || FAIL "developer denial was not an RBAC Forbidden (got: ${DENIED_OUT})"
+OK "IAM developer: infra is Forbidden (RBAC denial, not an error)"
+
 echo ""
-echo "✓ Smoke test passed: cluster and platform layer are healthy"
+echo "✓ Smoke test passed: cluster, platform layer and IAM access are healthy"

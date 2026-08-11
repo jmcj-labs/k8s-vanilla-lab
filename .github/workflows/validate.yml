@@ -92,6 +92,7 @@ jobs:
           TF_VAR_ssh_key_name: ${{ vars.TF_VAR_SSH_KEY_NAME }}
           TF_VAR_aws_region: ${{ vars.AWS_REGION }}
           TF_VAR_aws_profile: ""
+          TF_VAR_lab_account_id: ${{ vars.LAB_ACCOUNT_ID }}
         # -lock=false: the plan is read-only and speculative; without it,
         # pushes to main during an apply/destroy run fail on the state lock.
         run: tofu plan -no-color -lock=false

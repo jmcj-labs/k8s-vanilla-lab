@@ -8,6 +8,10 @@ environment  = "lab"
 # Leave empty (or omit) in CI; OIDC credentials are set via environment variables.
 aws_profile = "k8s-vanilla-lab"
 
+# Lab member account ID (multi-account guard — never version the real value;
+# in CI it comes from the LAB_ACCOUNT_ID GitHub Variable)
+lab_account_id = "222222222222"
+
 # REQUIRED: CIDR allowed for SSH and K8s API access. No default — set your IP
 # (curl ifconfig.me) as x.x.x.x/32, or consciously open it with 0.0.0.0/0.
 my_ip = "1.2.3.4/32"

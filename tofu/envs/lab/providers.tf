@@ -17,6 +17,11 @@ provider "aws" {
   region  = var.aws_region
   profile = var.aws_profile != "" ? var.aws_profile : null
 
+  # Multi-account guard: with two accounts in play (management for Identity
+  # Center, member for the lab) an apply against the wrong credentials must
+  # fail fast. Empty (unset) skips the guard for backwards compatibility.
+  allowed_account_ids = var.lab_account_id != "" ? [var.lab_account_id] : null
+
   default_tags {
     tags = {
       Environment = var.environment

@@ -41,6 +41,49 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
   fi
 done
 
+# Step 1b: aws-iam-authenticator webhook material — MUST exist before
+# kubeadm init (the API server starts with the webhook flags pointing at
+# these files). If anything here fails, ABORT: continuing would produce a
+# cluster silently missing IAM auth.
+log "Step 1b/8: Installing aws-iam-authenticator v0.7.18 (server init)"
+
+IAM_AUTH_VERSION="0.7.18"
+IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a5"
+
+curl -fsSL -o /usr/local/bin/aws-iam-authenticator \
+  "https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v$${IAM_AUTH_VERSION}/aws-iam-authenticator_$${IAM_AUTH_VERSION}_linux_amd64"
+if ! echo "$${IAM_AUTH_SHA256}  /usr/local/bin/aws-iam-authenticator" | sha256sum -c -; then
+  log "✗ ERROR: aws-iam-authenticator checksum mismatch — aborting bootstrap"
+  exit 1
+fi
+chmod 0755 /usr/local/bin/aws-iam-authenticator
+
+# clusterID disambiguated across accounts and regions: ACCOUNT.REGION.NAME —
+# the exact same value is computed by platform/install.sh, the Makefile and
+# the CI smoke.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CLUSTER_ID="$${ACCOUNT_ID}.${aws_region}.${cluster_name}"
+log "authenticator clusterID: $${CLUSTER_ID}"
+
+# init (default feature gates) writes cert.pem/key.pem/aws-iam-authenticator.kubeconfig
+# into the CURRENT directory; run it inside the server state dir and move the
+# webhook kubeconfig where the API server expects it.
+mkdir -p /var/aws-iam-authenticator /etc/kubernetes/aws-iam-authenticator
+cd /var/aws-iam-authenticator
+aws-iam-authenticator init -i "$${CLUSTER_ID}" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+mv -f aws-iam-authenticator.kubeconfig /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml
+cd /
+
+for REQUIRED in /var/aws-iam-authenticator/cert.pem \
+                /var/aws-iam-authenticator/key.pem \
+                /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml; do
+  if [ ! -s "$${REQUIRED}" ]; then
+    log "✗ ERROR: authenticator init did not produce $${REQUIRED} — aborting bootstrap"
+    exit 1
+  fi
+done
+log "✓ aws-iam-authenticator webhook material in place"
+
 # Step 2: Create kubeadm config file
 log "Step 2/8: Creating kubeadm configuration"
 
@@ -67,6 +110,20 @@ kubernetesVersion: $(kubeadm version -o short)
 clusterName: ${cluster_name}
 controlPlaneEndpoint: "$${PRIVATE_IP}:6443"
 apiServer:
+  # IAM auth: token webhook against the local aws-iam-authenticator.
+  # v1beta4 extraArgs is a {name,value} LIST (not a map). The webhook
+  # version must be v1 explicitly (the kube-apiserver default is v1beta1).
+  extraArgs:
+    - name: authentication-token-webhook-config-file
+      value: /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml
+    - name: authentication-token-webhook-version
+      value: v1
+  extraVolumes:
+    - name: aws-iam-authenticator
+      hostPath: /etc/kubernetes/aws-iam-authenticator
+      mountPath: /etc/kubernetes/aws-iam-authenticator
+      readOnly: true
+      pathType: Directory
   certSANs:
     - ${control_plane_public_ip}
     - $${PRIVATE_IP}

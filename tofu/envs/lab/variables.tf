@@ -94,6 +94,12 @@ variable "owner" {
   default     = "platform-engineering"
 }
 
+variable "lab_account_id" {
+  description = "AWS account ID of the lab member account. Supply via terraform.tfvars (never versioned) or TF_VAR_lab_account_id / the LAB_ACCOUNT_ID GitHub Variable in CI. Empty skips the account guard."
+  type        = string
+  default     = ""
+}
+
 variable "aws_profile" {
   description = "AWS CLI profile for local authentication. Leave empty in CI (OIDC sets credentials via environment variables)."
   type        = string

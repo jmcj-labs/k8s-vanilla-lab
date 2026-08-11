@@ -12,8 +12,8 @@ SSH_USER        := ubuntu
 .DEFAULT_GOAL := help
 
 .PHONY: help init validate fmt plan apply destroy \
-        kubeconfig platform smoke-test ssh-cp ssh-worker \
-        clean bootstrap-aws
+        kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
+        ssh-cp ssh-worker clean bootstrap-aws
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
 
@@ -26,12 +26,16 @@ help: ## Show available targets
 init: ## Initialise OpenTofu with backend config (requires tofu/envs/lab/backend.hcl)
 	cd $(TOFU_DIR) && tofu init -backend-config=backend.hcl
 
-validate: ## Check formatting and validate configuration (no backend required)
-	@VALIDATE_TMP=$$(mktemp -d); \
-	trap 'rm -rf "$$VALIDATE_TMP"' EXIT; \
-	tofu fmt -check -recursive tofu/ && \
-	  cd $(TOFU_DIR) && TF_DATA_DIR="$$VALIDATE_TMP" tofu init -backend=false -input=false && \
-	  TF_DATA_DIR="$$VALIDATE_TMP" tofu validate
+validate: ## Check formatting and validate all stacks (no backend required)
+	@tofu fmt -check -recursive tofu/; \
+	for STACK in tofu/envs/lab tofu/envs/identity; do \
+	  VALIDATE_TMP=$$(mktemp -d); \
+	  echo "── validating $$STACK ──"; \
+	  ( cd "$$STACK" && \
+	    TF_DATA_DIR="$$VALIDATE_TMP" tofu init -backend=false -input=false >/dev/null && \
+	    TF_DATA_DIR="$$VALIDATE_TMP" tofu validate ) || { rm -rf "$$VALIDATE_TMP"; exit 1; }; \
+	  rm -rf "$$VALIDATE_TMP"; \
+	done
 
 fmt: ## Format all .tf files recursively
 	tofu fmt -recursive tofu/
@@ -47,7 +51,15 @@ destroy: ## Destroy all infrastructure (auto-approve)
 
 # ── Cluster access ────────────────────────────────────────────────────────────
 
-kubeconfig: ## Fetch kubeconfig from SSM and save to KUBECONFIG_PATH
+kubeconfig-admin: ## IAM-auth kubeconfig (platform-admin role) → ~/.kube/k8s-vanilla-lab-admin.conf
+	@CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
+	  bash scripts/iam-kubeconfig.sh admin $(HOME)/.kube/k8s-vanilla-lab-admin.conf
+
+kubeconfig-dev: ## IAM-auth kubeconfig (developer role, ns logistics) → ~/.kube/k8s-vanilla-lab-dev.conf
+	@CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
+	  bash scripts/iam-kubeconfig.sh dev $(HOME)/.kube/k8s-vanilla-lab-dev.conf
+
+kubeconfig: ## BREAK-GLASS admin kubeconfig from SSM (static cert — daily use is kubeconfig-admin)
 	@aws ssm get-parameter \
 	  --name "/k8s/$(CLUSTER_NAME)/kubeconfig" \
 	  --with-decryption \
@@ -72,7 +84,7 @@ platform: ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, 
 	  exit 1; \
 	fi; \
 	chmod 600 "$$KUBECONFIG_FILE"; \
-	KUBECONFIG="$$KUBECONFIG_FILE" AWS_REGION=$(AWS_REGION) bash platform/install.sh
+	KUBECONFIG="$$KUBECONFIG_FILE" AWS_REGION=$(AWS_REGION) CLUSTER_NAME=$(CLUSTER_NAME) bash platform/install.sh
 
 smoke-test: ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, operators)
 	@KUBECONFIG_FILE=$$(mktemp); \

@@ -52,3 +52,13 @@ output "cluster_info" {
     kubernetes_api = "https://${module.control_plane.public_ip}:6443"
   }
 }
+
+output "platform_admin_role_arn" {
+  description = "Stable IAM role for cluster-admin access (aws-iam-authenticator)"
+  value       = module.access.platform_admin_role_arn
+}
+
+output "developer_role_arn" {
+  description = "Stable IAM role for namespace-scoped developer access (aws-iam-authenticator)"
+  value       = module.access.developer_role_arn
+}
