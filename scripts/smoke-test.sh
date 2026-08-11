@@ -266,7 +266,19 @@ kubectl -n default exec smoke-ctl -- wget -q -T 5 -O /dev/null http://169.254.16
 IMDS_RC=$?
 set -e
 [ "${IMDS_RC}" -ne 0 ] || FAIL "IMDS reachable from the pod network — CCNP deny not effective"
-hubble_drops_to_imds | grep -q "smoke-ctl" \
+# Precise --from-pod filter: an unfiltered '--last N' window gets flooded
+# by unrelated drops and produces flaky misses.
+IMDS_DROP=""
+for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+  HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+    hubble observe --verdict DROPPED --from-pod default/smoke-ctl \
+    --to-ip 169.254.169.254 --last 20 2>/dev/null || true)
+  if echo "${HUBBLE_OUT}" | grep -q "DROPPED"; then
+    IMDS_DROP=yes
+    break
+  fi
+done
+[ -n "${IMDS_DROP}" ] \
   || FAIL "IMDS attempt did not appear as a Hubble DROP (a timeout is not a policy verdict)"
 OK "IMDS denied from pod network (request fails + Hubble DROP confirmed)"
 
@@ -275,7 +287,8 @@ OK "IMDS denied from pod network (request fails + Hubble DROP confirmed)"
 # mounts' would stay green for an hour even with a broken selector. No
 # DROP towards IMDS may exist from the CSI pods. Definitive validation is
 # the next fresh apply.
-if hubble_drops_to_imds | grep -q "ebs-csi"; then
+CSI_DROPS=$(hubble_drops_to_imds || true)
+if echo "${CSI_DROPS}" | grep -q "ebs-csi"; then
   FAIL "IMDS drops from EBS CSI pods — the deny exception selector is wrong"
 fi
 OK "EBS CSI exception verified (no IMDS drops from CSI pods)"
@@ -290,8 +303,9 @@ set -e
 [ "${DENY_RC}" -ne 0 ] || FAIL "logistics reaches infra — default-deny not effective"
 NP_DROP=""
 for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
-  if kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
-       hubble observe --verdict DROPPED --last 100 2>/dev/null | grep -q "smoke-app"; then
+  HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+    hubble observe --verdict DROPPED --from-pod logistics/smoke-app --last 20 2>/dev/null || true)
+  if echo "${HUBBLE_OUT}" | grep -q "DROPPED"; then
     NP_DROP=yes
     break
   fi

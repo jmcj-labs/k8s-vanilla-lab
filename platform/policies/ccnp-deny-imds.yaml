@@ -11,8 +11,12 @@
 # metadata).
 #
 # Notes:
-# - egressDeny does NOT flip anything into default-deny: pods keep their
-#   normal traffic, they just lose 169.254.169.254.
+# - enableDefaultDeny.egress=false is LOAD-BEARING: in Cilium, a policy
+#   with only deny rules still flips selected endpoints into default-deny
+#   for that direction (verified the hard way 2026-08-11: without it, this
+#   policy cut ALL egress cluster-wide — CoreDNS lost its upstream and the
+#   API server). With it, this is a pure deny overlay: pods keep their
+#   normal traffic and only lose 169.254.169.254.
 # - hostNetwork pods (e.g. aws-iam-authenticator) are host endpoints, not
 #   selected here — the HOST keeps IMDS access, as it must.
 apiVersion: cilium.io/v2
@@ -28,6 +32,9 @@ spec:
         operator: NotIn
         values:
           - aws-ebs-csi-driver
+  enableDefaultDeny:
+    egress: false
+    ingress: false
   egressDeny:
     - toCIDR:
         - 169.254.169.254/32
