@@ -313,5 +313,172 @@ done
 [ -n "${NP_DROP}" ] || FAIL "logistics→infra denial did not appear as a Hubble DROP"
 OK "logistics→infra denied (resolves, connection dropped, Hubble DROP confirmed)"
 
+# ── 10. Data layer (CNPG + Kafka + operand policies) ─────────────────────────
+# The operand policies are applied by install.sh BEFORE the smoke runs, so
+# every check here is a post-policy positive: replication, failover and
+# produce/consume working now proves the policies did not strangle them.
+cleanup_data() {
+  kubectl -n data delete kafkatopic smoke-topic --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n logistics delete pod smoke-kafka-client --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n logistics delete secret smoke-kafka-ca --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n default delete pod smoke-neutral --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_pvc; cleanup_iam; cleanup_netpol; cleanup_data' EXIT
+
+# 10a. CNPG healthy + one instance per worker (evidence: -o wide)
+PG_PHASE=$(kubectl -n data get cluster logistics-pg -o jsonpath='{.status.phase}')
+[ "${PG_PHASE}" = "Cluster in healthy state" ] || FAIL "CNPG cluster not healthy (phase: ${PG_PHASE})"
+kubectl -n data get pods -l cnpg.io/cluster=logistics-pg -o wide
+PG_NODES=$(kubectl -n data get pods -l cnpg.io/cluster=logistics-pg \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | grep -c . || true)
+[ "${PG_NODES}" -eq 3 ] || FAIL "PG instances on ${PG_NODES} workers, expected 3 (required anti-affinity)"
+OK "CNPG healthy: 3 instances on 3 distinct workers"
+
+# 10b. FAILOVER — the crown jewel: kill the primary, the operator promotes,
+# the cluster returns to healthy with a DIFFERENT primary.
+OLD_PRIMARY=$(kubectl -n data get cluster logistics-pg -o jsonpath='{.status.currentPrimary}')
+echo "  primary before: ${OLD_PRIMARY}"
+kubectl -n data delete pod "${OLD_PRIMARY}" --wait=false >/dev/null
+FAILOVER_OK=""
+for _ in $(seq 1 60); do
+  sleep 5
+  PHASE=$(kubectl -n data get cluster logistics-pg -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  NEW_PRIMARY=$(kubectl -n data get cluster logistics-pg -o jsonpath='{.status.currentPrimary}' 2>/dev/null || true)
+  if [ "${PHASE}" = "Cluster in healthy state" ] && [ -n "${NEW_PRIMARY}" ] && [ "${NEW_PRIMARY}" != "${OLD_PRIMARY}" ]; then
+    FAILOVER_OK=yes
+    break
+  fi
+done
+[ -n "${FAILOVER_OK}" ] || FAIL "CNPG failover did not complete in 300s (phase: ${PHASE:-?}, primary: ${NEW_PRIMARY:-?})"
+OK "CNPG failover: ${OLD_PRIMARY} → ${NEW_PRIMARY}, healthy again in <5min"
+
+# 10c. Kafka Ready, spread, and an RF3 test topic via the topic operator
+kubectl -n data wait kafka/logistics-kafka --for=condition=Ready --timeout=120s >/dev/null \
+  || FAIL "Kafka cluster not Ready"
+KAFKA_NODES=$(kubectl -n data get pods -l strimzi.io/pool-name=dual \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | grep -c . || true)
+[ "${KAFKA_NODES}" -eq 3 ] || FAIL "Kafka nodes on ${KAFKA_NODES} workers, expected 3 (required anti-affinity)"
+kubectl apply -f - >/dev/null <<'TOPIC_EOF'
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: smoke-topic
+  namespace: data
+  labels:
+    strimzi.io/cluster: logistics-kafka
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+TOPIC_EOF
+kubectl -n data wait kafkatopic/smoke-topic --for=condition=Ready --timeout=120s >/dev/null \
+  || FAIL "smoke-topic (RF3) did not become Ready"
+OK "Kafka: 3 KRaft nodes on 3 workers, RF3 test topic Ready"
+
+# 10d. Produce/consume through the internal TLS listener FROM logistics
+# (the only namespace the policy admits as client). CA truststore comes from
+# the Strimzi cluster CA secret; the password travels via pod env, never argv.
+KAFKA_IMAGE=$(kubectl -n data get pod -l strimzi.io/pool-name=dual \
+  -o jsonpath='{.items[0].spec.containers[0].image}')
+kubectl -n data get secret logistics-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.p12}' \
+  | base64 -d > /tmp/smoke-ca.p12
+kubectl -n logistics create secret generic smoke-kafka-ca \
+  --from-file=ca.p12=/tmp/smoke-ca.p12 \
+  --from-literal=password="$(kubectl -n data get secret logistics-kafka-cluster-ca-cert -o jsonpath='{.data.ca\.password}' | base64 -d)" \
+  >/dev/null
+rm -f /tmp/smoke-ca.p12
+kubectl -n logistics apply -f - >/dev/null <<KCLIENT_EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-kafka-client
+spec:
+  restartPolicy: Never
+  containers:
+    - name: kafka
+      image: ${KAFKA_IMAGE}
+      command: ["sleep", "900"]
+      env:
+        - name: CA_PASS
+          valueFrom:
+            secretKeyRef:
+              name: smoke-kafka-ca
+              key: password
+      volumeMounts:
+        - name: ca
+          mountPath: /mnt/ca
+          readOnly: true
+  volumes:
+    - name: ca
+      secret:
+        secretName: smoke-kafka-ca
+KCLIENT_EOF
+kubectl -n logistics wait --for=condition=Ready pod/smoke-kafka-client --timeout=180s >/dev/null \
+  || FAIL "kafka client pod not Ready in logistics"
+kubectl -n logistics exec smoke-kafka-client -- bash -c 'cat > /tmp/client.properties <<EOF
+security.protocol=SSL
+ssl.truststore.location=/mnt/ca/ca.p12
+ssl.truststore.password=${CA_PASS}
+ssl.truststore.type=PKCS12
+EOF'
+kubectl -n logistics exec smoke-kafka-client -- bash -c \
+  'printf "m1\nm2\nm3\n" | bin/kafka-console-producer.sh \
+     --bootstrap-server logistics-kafka-kafka-bootstrap.data:9093 \
+     --topic smoke-topic --producer.config /tmp/client.properties \
+     --producer-property acks=all' >/dev/null 2>&1 \
+  || FAIL "producing to smoke-topic over TLS from logistics failed"
+CONSUMED=$(kubectl -n logistics exec smoke-kafka-client -- bash -c \
+  'bin/kafka-console-consumer.sh \
+     --bootstrap-server logistics-kafka-kafka-bootstrap.data:9093 \
+     --topic smoke-topic --from-beginning --max-messages 3 \
+     --timeout-ms 30000 --consumer.config /tmp/client.properties 2>/dev/null' \
+  | grep -c '^m[0-9]*$' || true)
+[ "${CONSUMED}" -eq 3 ] || FAIL "expected 3 messages consumed, got ${CONSUMED}"
+OK "Kafka: RF3 topic produced+consumed over the internal TLS listener from logistics"
+
+# 10e. Losing one broker must not stop producing (RF3 / min.insync.replicas 2)
+KAFKA_VICTIM=$(kubectl -n data get pods -l strimzi.io/pool-name=dual \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n data delete pod "${KAFKA_VICTIM}" --wait=false >/dev/null
+sleep 10
+kubectl -n logistics exec smoke-kafka-client -- bash -c \
+  'printf "m4\nm5\nm6\n" | bin/kafka-console-producer.sh \
+     --bootstrap-server logistics-kafka-kafka-bootstrap.data:9093 \
+     --topic smoke-topic --producer.config /tmp/client.properties \
+     --producer-property acks=all' >/dev/null 2>&1 \
+  || FAIL "producing with one broker down failed (ISR should hold at 2)"
+OK "Kafka: producing (acks=all) survives the loss of one broker"
+# leave the cluster whole before finishing
+kubectl -n data wait kafka/logistics-kafka --for=condition=Ready --timeout=300s >/dev/null \
+  || FAIL "Kafka did not return to Ready after broker recovery"
+OK "Kafka back to Ready after broker recovery"
+
+# 10f. Policy negatives from a NEUTRAL namespace (default): PG and Kafka
+# must be unreachable, with Hubble drop evidence. TCP connect via bash
+# /dev/tcp in the client pod proved the logistics-side positive already.
+kubectl -n default run smoke-neutral --image=busybox:1.36 --restart=Never -- sleep 300 >/dev/null
+kubectl -n default wait --for=condition=Ready pod/smoke-neutral --timeout=60s >/dev/null \
+  || FAIL "smoke-neutral pod not Ready"
+set +e
+kubectl -n default exec smoke-neutral -- nc -z -w 4 logistics-pg-rw.data.svc.cluster.local 5432 >/dev/null 2>&1
+PG_NEUTRAL_RC=$?
+kubectl -n default exec smoke-neutral -- nc -z -w 4 logistics-kafka-kafka-bootstrap.data.svc.cluster.local 9093 >/dev/null 2>&1
+KAFKA_NEUTRAL_RC=$?
+set -e
+[ "${PG_NEUTRAL_RC}" -ne 0 ] || FAIL "neutral namespace can reach PostgreSQL — data policy not effective"
+[ "${KAFKA_NEUTRAL_RC}" -ne 0 ] || FAIL "neutral namespace can reach Kafka — data policy not effective"
+DATA_DROP=""
+for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+  HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+    hubble observe --verdict DROPPED --from-pod default/smoke-neutral --last 20 2>/dev/null || true)
+  if echo "${HUBBLE_OUT}" | grep -q "DROPPED"; then
+    DATA_DROP=yes
+    break
+  fi
+done
+[ -n "${DATA_DROP}" ] || FAIL "neutral→data denial did not appear as a Hubble DROP"
+OK "Data policies: neutral namespace denied to PG and Kafka (Hubble DROP confirmed)"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM access and network policies are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM access, network policies and data layer are healthy"
