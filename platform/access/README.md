@@ -32,6 +32,20 @@ kubectl get nodes
 
 ## Developer (jm-dev — the non-escalatable identity)
 
+> **Browser-cookie gotcha (observed 2026-08-11)**: separate sso-sessions
+> isolate the CLI caches, but the BROWSER shares the portal cookie — a
+> plain `aws sso login` after the platform login authorizes the dev
+> session as the WRONG user, and `GetRoleCredentials` fails with
+> `ForbiddenException: No access` (correctly: that user has no
+> K8sDevBridge assignment). Log in as jm-dev from a **private/incognito
+> window** using device code:
+>
+> ```bash
+> aws sso logout --sso-session k8s-dev        # drop any mis-issued token
+> aws sso login --profile k8s-dev --use-device-code
+> # open the printed URL in an INCOGNITO window, log in as jm-dev
+> ```
+
 ```bash
 aws sso login --profile k8s-dev             # browser → log in AS jm-dev
 export KUBECONFIG=~/.kube/k8s-vanilla-lab-dev.conf
