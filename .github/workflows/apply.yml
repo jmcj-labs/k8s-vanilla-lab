@@ -93,6 +93,16 @@ jobs:
           make platform CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 
+      - name: Install aws-iam-authenticator client (pinned)
+        working-directory: .
+        run: |
+          IAM_AUTH_VERSION="0.7.18"
+          IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a5"
+          curl -fsSL -o /tmp/aws-iam-authenticator \
+            "https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v${IAM_AUTH_VERSION}/aws-iam-authenticator_${IAM_AUTH_VERSION}_linux_amd64"
+          echo "${IAM_AUTH_SHA256}  /tmp/aws-iam-authenticator" | sha256sum -c -
+          sudo install -m 0755 /tmp/aws-iam-authenticator /usr/local/bin/aws-iam-authenticator
+
       - name: Smoke test
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
@@ -161,6 +171,17 @@ jobs:
             iptables-save -t nat 2>&1 | grep -i "CILIUM_POST\|MASQUERADE\|169.254" || true
           echo "=== EVENTS (most recent 50) ==="
           kubectl get events -A --sort-by=.lastTimestamp 2>/dev/null | tail -50 || true
+          echo "=== IAM ACCESS (authenticator) ==="
+          aws sts get-caller-identity || true
+          kubectl -n kube-system get ds aws-iam-authenticator -o wide 2>&1 || true
+          kubectl -n kube-system logs ds/aws-iam-authenticator --tail=60 2>&1 || true
+          echo "--- rendered mappings ---"
+          kubectl -n kube-system get configmap aws-iam-authenticator \
+            -o jsonpath='{.data.dynamic-mappings\.json}' 2>/dev/null || true
+          echo ""
+          echo "--- RBAC objects ---"
+          kubectl get clusterrolebindings -l app.kubernetes.io/part-of=k8s-vanilla-lab-access 2>&1 || true
+          kubectl get rolebindings -A -l app.kubernetes.io/part-of=k8s-vanilla-lab-access 2>&1 || true
 
       - name: Record deployment timestamp in SSM
         env:
