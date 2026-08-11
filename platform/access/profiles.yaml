@@ -1,0 +1,19 @@
+# Access profiles — the SINGLE source of truth for who-can-what.
+#
+# Profiles, not people: onboarding a person is adding them to an Identity
+# Center group (tofu/envs/identity); nothing here changes. From this file
+# platform/install.sh renders BOTH the aws-iam-authenticator DynamicFile
+# mappings and the RBAC bindings. Do not hand-edit the rendered outputs.
+#
+# iamRoleName must stay within the k8s-vanilla-lab-* prefix (the only one
+# the CI role can administer) and exist in tofu/modules/access.
+accessProfiles:
+  - name: platform-admin
+    iamRoleName: k8s-vanilla-lab-platform-admin
+    kubernetesGroups: [platform-admins]
+    rbacProfile: cluster-admin
+  - name: developer
+    iamRoleName: k8s-vanilla-lab-developer
+    kubernetesGroups: [developers]
+    rbacProfile: developer
+    namespaces: [logistics]

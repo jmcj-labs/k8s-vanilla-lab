@@ -1,0 +1,37 @@
+# ClusterRole for the developer rbacProfile. Bound per-namespace via
+# RoleBindings rendered from profiles.yaml (never a ClusterRoleBinding).
+# Closed verb sets — no wildcards anywhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-access
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: [get, update, patch]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: [get, list, watch]

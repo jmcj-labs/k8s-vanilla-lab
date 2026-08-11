@@ -13,7 +13,9 @@ set -euo pipefail
 log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
 AWS_REGION="${AWS_REGION:-eu-west-1}"
+CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 MANIFESTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/manifests" && pwd)"
+ACCESS="$(cd "$(dirname "${BASH_SOURCE[0]}")/access" && pwd)"
 
 # Pinned chart versions (keep in sync with platform/README.md)
 EBS_CSI_CHART_VERSION="2.63.1"          # app v1.63.1
@@ -74,6 +76,108 @@ log "Step 2/8: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
 kubectl apply -f "${MANIFESTS}/storageclass-gp3.yaml"
 log "✓ Namespaces and default gp3 StorageClass applied"
+
+log "Step 2b/8: IAM access — authenticator mappings, RBAC and DaemonSet"
+# Rendered from the single source of truth (profiles.yaml, ADR-005 decision 4).
+# The bootstrap already placed the webhook material on the CP; everything
+# reentrant lives here: mappings ConfigMap (DynamicFile), RBAC, DaemonSet.
+command -v yq >/dev/null 2>&1 || { echo "✗ yq not found (needed to render access profiles)" >&2; exit 1; }
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ACCOUNT_ID
+# Same clusterID as bootstrap and Makefile: ACCOUNT.REGION.NAME
+CLUSTER_ID="${ACCOUNT_ID}.${AWS_REGION}.${CLUSTER_NAME}"
+
+ACCESS_RENDER=$(mktemp -d)
+trap 'rm -rf "${ACCESS_RENDER}"' EXIT
+
+# Server config: DynamicFile has no CLI flag in v0.7.18 — backend mode and
+# file path only exist as config-file keys.
+cat > "${ACCESS_RENDER}/config.yaml" <<AUTHCFG
+clusterID: ${CLUSTER_ID}
+server:
+  backendmode:
+    - DynamicFile
+  dynamicfilepath: /etc/aws-iam-authenticator/dynamic-mappings.json
+AUTHCFG
+
+# DynamicFile mappings (JSON): one mapRoles entry per profile.
+# username carries {{SessionName}} — with --forward-session-name on the
+# client, audit lines show WHO assumed the role, not just the role.
+yq -o=json '{
+  "mapRoles": [.accessProfiles[] | {
+    "rolearn": ("arn:aws:iam::" + strenv(ACCOUNT_ID) + ":role/" + .iamRoleName),
+    "username": (.name + ":{{SessionName}}"),
+    "groups": .kubernetesGroups
+  }],
+  "mapUsers": [],
+  "mapAccounts": []
+}' "${ACCESS}/profiles.yaml" > "${ACCESS_RENDER}/dynamic-mappings.json"
+
+kubectl -n kube-system create configmap aws-iam-authenticator \
+  --from-file=config.yaml="${ACCESS_RENDER}/config.yaml" \
+  --from-file=dynamic-mappings.json="${ACCESS_RENDER}/dynamic-mappings.json" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# RBAC: the developer ClusterRole is static; bindings are rendered per profile.
+kubectl apply -f "${ACCESS}/clusterrole-developer.yaml"
+
+PROFILE_COUNT=$(yq '.accessProfiles | length' "${ACCESS}/profiles.yaml")
+for i in $(seq 0 $((PROFILE_COUNT - 1))); do
+  P_NAME=$(yq -r ".accessProfiles[${i}].name" "${ACCESS}/profiles.yaml")
+  P_RBAC=$(yq -r ".accessProfiles[${i}].rbacProfile" "${ACCESS}/profiles.yaml")
+  P_GROUPS=$(yq -r ".accessProfiles[${i}].kubernetesGroups[]" "${ACCESS}/profiles.yaml")
+
+  if [ "${P_RBAC}" = "cluster-admin" ]; then
+    # Built-in ClusterRole on purpose: revocable binding, no local wildcard
+    # copy — the dangerous thing is system:masters, not cluster-admin.
+    for GRP in ${P_GROUPS}; do
+      kubectl apply -f - <<BINDING
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: access-${P_NAME}-${GRP}
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: ${GRP}
+BINDING
+    done
+  else
+    P_NAMESPACES=$(yq -r ".accessProfiles[${i}].namespaces[]" "${ACCESS}/profiles.yaml")
+    for NS in ${P_NAMESPACES}; do
+      for GRP in ${P_GROUPS}; do
+        kubectl apply -f - <<BINDING
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: access-${P_NAME}-${GRP}
+  namespace: ${NS}
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-access
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${P_RBAC}
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: ${GRP}
+BINDING
+      done
+    done
+  fi
+done
+
+kubectl apply -f "${ACCESS}/daemonset.yaml"
+kubectl -n kube-system rollout status ds/aws-iam-authenticator --timeout=180s
+log "✓ IAM access ready (DynamicFile mappings, RBAC, authenticator DaemonSet)"
 
 log "Step 3/8: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
 ensure_clean_release kube-system aws-ebs-csi-driver
