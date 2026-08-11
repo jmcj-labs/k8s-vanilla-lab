@@ -3,7 +3,7 @@ SHELL        := bash
 
 CLUSTER_NAME    ?= k8s-vanilla-lab
 AWS_REGION      ?= eu-west-1
-EXPECTED_NODES  ?= 3
+EXPECTED_NODES  ?= 4
 TOFU_DIR        := tofu/envs/lab
 KUBECONFIG_PATH ?= $(HOME)/.kube/k8s-vanilla-lab.conf
 SSH_KEY_PATH    ?= $(HOME)/.ssh/k8s-vanilla-lab.pem

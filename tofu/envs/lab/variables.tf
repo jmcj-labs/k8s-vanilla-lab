@@ -38,9 +38,11 @@ variable "my_ip" {
 }
 
 variable "worker_count" {
+  # 3, not 2: real anti-affinity for the phase-2 data topology
+  # (CNPG x3 instances, Kafka x3 brokers — one per worker).
   description = "Number of worker nodes"
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "ssh_key_name" {
