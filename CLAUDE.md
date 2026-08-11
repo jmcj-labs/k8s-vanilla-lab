@@ -35,6 +35,7 @@ learning in public, not for production.
 | Certificates | cert-manager (+ selfsigned ClusterIssuer) | chart v1.21.1 |
 | Data operators | CloudNativePG / Strimzi | charts 0.29.0 / 1.1.0 |
 | Monitoring | kube-prometheus-stack | chart 88.2.0 |
+| IAM auth | aws-iam-authenticator (DynamicFile, ADR-005) | v0.7.18 |
 | Cloud | AWS EC2 | - |
 | Bootstrap | cloud-init | - |
 | Platform layer | `platform/install.sh` via `make platform` | - |
@@ -195,7 +196,9 @@ The `Makefile` is the single source of truth for operational commands. **Any pro
 | `make plan` | `tofu plan` |
 | `make apply` | `tofu apply -auto-approve` |
 | `make destroy` | `tofu destroy -auto-approve` |
-| `make kubeconfig` | Fetch kubeconfig from SSM → `~/.kube/k8s-vanilla-lab.conf` |
+| `make kubeconfig` | BREAK-GLASS: fetch admin kubeconfig from SSM → `~/.kube/k8s-vanilla-lab.conf` |
+| `make kubeconfig-admin` | IAM-auth kubeconfig (platform-admin role, exec → aws-iam-authenticator) |
+| `make kubeconfig-dev` | IAM-auth kubeconfig (developer role, ns logistics only) |
 | `make platform` | Fetch kubeconfig (temp file), run `platform/install.sh` (EBS CSI, cert-manager, Gateway, operators, monitoring) |
 | `make smoke-test` | Fetch kubeconfig (temp file), run `scripts/smoke-test.sh`: nodes Ready, no kube-proxy, Cilium KPR True, providerID set, gp3 PVC Bound, Gateway Programmed, operators Ready |
 | `make ssh-cp` | SSH into control plane |
