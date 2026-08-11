@@ -1,0 +1,33 @@
+# Deny IMDS from the pod network — the security debt of INCIDENTS #4:
+# hop limit 3 (required by the EBS CSI) makes the node's instance profile
+# reachable from EVERY pod. This clusterwide policy closes it for everyone
+# except the EBS CSI itself.
+#
+# The exception is implemented by EXCLUDING the CSI pods from the deny's
+# endpointSelector — in Cilium, deny always wins and cannot be compensated
+# by an allow policy. Label verified live on the running chart (2.63.1):
+# app.kubernetes.io/name=aws-ebs-csi-driver is set on both the controller
+# Deployment and the node DaemonSet pods (both need IMDS: credentials and
+# metadata).
+#
+# Notes:
+# - egressDeny does NOT flip anything into default-deny: pods keep their
+#   normal traffic, they just lose 169.254.169.254.
+# - hostNetwork pods (e.g. aws-iam-authenticator) are host endpoints, not
+#   selected here — the HOST keeps IMDS access, as it must.
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: deny-imds-except-ebs-csi
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-policies
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values:
+          - aws-ebs-csi-driver
+  egressDeny:
+    - toCIDR:
+        - 169.254.169.254/32

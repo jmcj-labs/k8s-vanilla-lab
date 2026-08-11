@@ -63,7 +63,7 @@ ensure_clean_release() {
 
 log "=== Installing platform layer (region: ${AWS_REGION}) ==="
 
-log "Step 1/8: Adding Helm repositories"
+log "Step 1/9: Adding Helm repositories"
 helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver >/dev/null
 helm repo add jetstack https://charts.jetstack.io >/dev/null
 helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null
@@ -72,12 +72,12 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update >/dev/null
 log "✓ Helm repositories ready"
 
-log "Step 2/8: Namespaces (infra, data, logistics) + StorageClass gp3"
+log "Step 2/9: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
 kubectl apply -f "${MANIFESTS}/storageclass-gp3.yaml"
 log "✓ Namespaces and default gp3 StorageClass applied"
 
-log "Step 2b/8: IAM access — authenticator mappings, RBAC and DaemonSet"
+log "Step 2b/9: IAM access — authenticator mappings, RBAC and DaemonSet"
 # Rendered from the single source of truth (profiles.yaml, ADR-005 decision 4).
 # The bootstrap already placed the webhook material on the CP; everything
 # reentrant lives here: mappings ConfigMap (DynamicFile), RBAC, DaemonSet.
@@ -179,7 +179,7 @@ kubectl apply -f "${ACCESS}/daemonset.yaml"
 kubectl -n kube-system rollout status ds/aws-iam-authenticator --timeout=180s
 log "✓ IAM access ready (DynamicFile mappings, RBAC, authenticator DaemonSet)"
 
-log "Step 3/8: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
+log "Step 3/9: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
 ensure_clean_release kube-system aws-ebs-csi-driver
 # controller.region is set explicitly: IMDS is not reachable from the pod
 # network even with hop limit 2 (see docs/INCIDENTS.md #4), so the controller
@@ -191,7 +191,7 @@ helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver 
   --wait --timeout 5m
 log "✓ EBS CSI driver installed"
 
-log "Step 4/8: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
+log "Step 4/9: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
 ensure_clean_release infra cert-manager
 # --enable-gateway-api activates the gateway-shim controller that resolves
 # the cert-manager.io/cluster-issuer annotation on Gateway resources.
@@ -204,7 +204,7 @@ helm upgrade --install cert-manager jetstack/cert-manager \
 kubectl apply -f "${MANIFESTS}/clusterissuer-selfsigned.yaml"
 log "✓ cert-manager installed, ClusterIssuer 'selfsigned' applied"
 
-log "Step 5/8: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
+log "Step 5/9: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
 # The 'cilium' GatewayClass is created by the cilium-operator at startup
 # (gatewayAPI.enabled=true in the bootstrap Helm install).
 kubectl wait --for=condition=Accepted gatewayclass/cilium --timeout=180s
@@ -214,7 +214,7 @@ kubectl apply -f "${MANIFESTS}/lb-ipam-pool.yaml"
 kubectl apply -f "${MANIFESTS}/gateway-shared.yaml"
 log "✓ Gateway infra/shared-gw applied (LB IP from Cilium LB-IPAM; external access via NodePort)"
 
-log "Step 6/8: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
+log "Step 6/9: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg
 # Operator only — PostgreSQL clusters are application-owned, not platform-owned.
 helm upgrade --install cnpg cnpg/cloudnative-pg \
@@ -223,7 +223,7 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
   --wait --timeout 5m
 log "✓ CloudNativePG operator installed"
 
-log "Step 7/8: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
+log "Step 7/9: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
 ensure_clean_release data strimzi
 # Operator only — Kafka clusters are application-owned, not platform-owned.
 helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
@@ -232,7 +232,7 @@ helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
   --wait --timeout 5m
 log "✓ Strimzi operator installed"
 
-log "Step 8/8: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
+log "Step 8/9: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
 ensure_clean_release infra kube-prometheus-stack
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace infra \
@@ -241,6 +241,17 @@ helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheu
   --set alertmanager.enabled=false \
   --wait --timeout 10m
 log "✓ kube-prometheus-stack installed"
+
+log "Step 9/9: Cilium network policies (IMDS deny + logistics default-deny)"
+# Applied last: everything above must be able to install without them, and
+# the deny-IMDS exception (EBS CSI) is verified by the smoke right after.
+# The data-namespace policy is deliberately DEFERRED to phase 2: today it
+# holds the CNPG/Strimzi operators (which talk to the API server) and the
+# operand replication ports do not exist yet.
+POLICIES="$(cd "$(dirname "${BASH_SOURCE[0]}")/policies" && pwd)"
+kubectl apply -f "${POLICIES}/ccnp-deny-imds.yaml"
+kubectl apply -f "${POLICIES}/cnp-logistics-default-deny.yaml"
+log "✓ Network policies applied (deny IMDS except EBS CSI; logistics default-deny)"
 
 log "=== Platform layer installed successfully ==="
 log "Grafana NodePort: kubectl -n infra get svc kube-prometheus-stack-grafana"
