@@ -75,7 +75,7 @@ resource "aws_identitystore_group_membership" "jm_dev" {
 # EC2/IAM query returns AccessDenied. The bridge is the whole point.
 resource "aws_ssoadmin_permission_set" "platform_bridge" {
   name             = "K8sPlatformBridge"
-  description      = "Bridge to ${var.cluster_name}-platform-admin — sts:AssumeRole only"
+  description      = "Bridge to ${var.cluster_name}-platform-admin - sts:AssumeRole only"
   instance_arn     = local.sso_instance_arn
   session_duration = "PT8H"
 }
@@ -97,7 +97,7 @@ resource "aws_ssoadmin_permission_set_inline_policy" "platform_bridge" {
 
 resource "aws_ssoadmin_permission_set" "dev_bridge" {
   name             = "K8sDevBridge"
-  description      = "Bridge to ${var.cluster_name}-developer — sts:AssumeRole only"
+  description      = "Bridge to ${var.cluster_name}-developer - sts:AssumeRole only"
   instance_arn     = local.sso_instance_arn
   session_duration = "PT8H"
 }
