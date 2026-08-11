@@ -1,0 +1,79 @@
+# Network policy for the PostgreSQL operand pods (deferred from phase 1,
+# now with real ports). Selects the OPERAND pods by label — never the whole
+# namespace, so the CNPG operator itself stays unconstrained.
+#
+# Selecting the pods with ingress+egress sections flips them into
+# default-deny both ways (intended here, unlike the IMDS overlay); every
+# rule below is an explicit opening. Kubelet probes come from the host
+# identity, which Cilium allows by default.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: data-postgres
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-policies
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: logistics-pg
+  ingress:
+    # App clients from logistics
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: logistics
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # Streaming replication between instances
+    - fromEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: logistics-pg
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # CNPG operator → instance manager (status :8000) and SQL (:5432)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: data
+            app.kubernetes.io/name: cloudnative-pg
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+            - port: "8000"
+              protocol: TCP
+    # Prometheus scrape → metrics (:9187)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: infra
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9187"
+              protocol: TCP
+  egress:
+    # DNS pinned to kube-dns (never generic)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Replication towards peers
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: logistics-pg
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # The CNPG instance manager patches its own status against the API server
+    - toEntities:
+        - kube-apiserver
