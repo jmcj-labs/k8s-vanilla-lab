@@ -155,3 +155,34 @@ Verified live: DNS recovered instantly, IMDS still denied with
 catch SIGPIPE, and the pipeline (inside `if`) reads as false. The smoke now
 captures output first and greps the variable, plus uses precise `--from-pod`
 filters instead of fishing in the last-N global drops.
+
+## 9. Kafka under network policy: three traps found live (phase 2)
+
+**Symptom(s)**: (a) the entity operator stayed Pending forever and the Kafka
+CR never went Ready; (b) after fixing that, a neutral-namespace pod could
+still reach the brokers on 9093 despite the operand CNP; (c) after a broker
+restart, that broker never became Ready and operator reconciliation stalled.
+
+**Root causes** (each pinned with live evidence, not theory):
+
+1. **Label spillover**: Strimzi puts `strimzi.io/cluster` (and `kind=Kafka`)
+   on the entity operator too. Both the required anti-affinity and the CNP
+   endpointSelector must use `strimzi.io/pool-name` — the only label
+   exclusive to the broker/controller pods — or the entity operator gets
+   repelled off every worker / strangled by the operand default-deny.
+2. **Strimzi generates its own per-listener NetworkPolicy, open to ANY** —
+   and network policies compose by union of allows, so the generated
+   `ANY:9093` defeats the CNP's scoping (seen as `Allow Ingress ANY
+   9093/TCP` in the BPF policy map). The listener's `networkPolicyPeers`
+   is the supported way to scope it (to `logistics`).
+3. **Brokers need egress to the API server and ingress 8443 from the
+   cluster operator (KafkaAgent)** — Hubble showed the restarted broker
+   dropping SYNs to kube-apiserver under the CNP's default-deny, and the
+   operator timing out reading broker configs. The CNP now includes both,
+   self-sufficient instead of leaning on Strimzi's generated policy.
+
+**Fix**: pool-name selectors everywhere, `networkPolicyPeers` on the
+listener, `toEntities: kube-apiserver` + operator 8443 in
+[`cnp-data-kafka.yaml`](../platform/policies/cnp-data-kafka.yaml). Verified
+by the full smoke: RF3 produce/consume from logistics, broker-loss
+tolerance, neutral namespace denied with Hubble drops.

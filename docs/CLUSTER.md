@@ -114,6 +114,13 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   no tráfico; el HTTPRoute + petición HTTPS real llega con la app.
 - **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
   ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
+- **Anti-affinity `required` con 3 workers**: la caída de un worker deja la
+  tercera instancia (PG o Kafka) Pending hasta que el nodo vuelve — esperado
+  y aceptado; no se suaviza a `preferred` (perdería la garantía de
+  distribución que la topología de datos necesita).
+- **Memoria justa en los workers** (t3.medium, 4 GiB): PG + Kafka + monitoring
+  caben por requests, pero los limits sobrecomprometen — riesgo OOM bajo
+  carga sostenida, aceptable en lab.
 - **Ventana sin tokens IAM en cada bootstrap**: entre el arranque del API
   server y el rollout del DaemonSet del authenticator solo funciona el
   break-glass. Asumido (ADR-005) — el authenticator nunca es SPOF de acceso.

@@ -1,0 +1,90 @@
+# Kafka cluster for logistics-lab — Strimzi operator 1.1 (API v1, KRaft-only).
+#
+# - 3 dual-role nodes (controller+broker) via KafkaNodePool.
+# - RF3 / min.insync.replicas 2: producing with acks=all survives the loss
+#   of one broker.
+# - REQUIRED anti-affinity by hostname (one node per worker) — same 3-worker
+#   trade-off as PostgreSQL, documented in CLUSTER.md.
+# - PDB: managed by Strimzi (template default maxUnavailable 1) — no manual PDB.
+# - Single INTERNAL TLS listener (:9093) per the phase-2 brief — encryption
+#   without client authn; phase-3 Go clients will need the cluster CA
+#   (Secret logistics-kafka-cluster-ca-cert).
+# - JVM heap pinned (512Mi) so the JVM never discovers the node's 4GiB and
+#   overshoots its cgroup.
+# - App topics arrive in phase 3 with the services; the smoke creates and
+#   cleans its own RF3 test topic (topicOperator enabled for that).
+# - Kafka JMX metrics/exporter deferred to phase 3 (needs metricsConfig +
+#   its own PodMonitor; no port is opened for an exporter that doesn't exist).
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: dual
+  namespace: data
+  labels:
+    strimzi.io/cluster: logistics-kafka
+    app.kubernetes.io/part-of: k8s-vanilla-lab-data
+spec:
+  replicas: 3
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    size: 10Gi
+    class: gp3
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: 300m
+      memory: 768Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+  jvmOptions:
+    -Xms: 512m
+    -Xmx: 512m
+  template:
+    pod:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  # pool-name: only the broker/controller pods — the entity
+                  # operator also carries strimzi.io/cluster and must NOT be
+                  # repelled off every worker (verified live 2026-08-11)
+                  strimzi.io/pool-name: dual
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: logistics-kafka
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-data
+spec:
+  kafka:
+    listeners:
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        # Strimzi generates its own Kubernetes NetworkPolicy per listener,
+        # OPEN TO ANY by default — and network policies are additive, so an
+        # unscoped generated policy defeats our operand CNP (found live
+        # 2026-08-11: 'Allow Ingress ANY 9093' in the BPF policy map).
+        # networkPolicyPeers makes Strimzi scope its policy to logistics.
+        networkPolicyPeers:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: logistics
+    config:
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      log.retention.hours: 48
+  entityOperator:
+    topicOperator: {}
