@@ -85,6 +85,13 @@ El orden interno importa:
 ## Después del Sprint 2
 Retomar el path donde manda el mapa: Fase 1.5 (Cilium a fondo: L7, Hubble avanzado, mesh, Tetragon) y luego Fase 2 completa (resto de servicios, OTel/tail-sampling, operator con Kubebuilder). El pseudo-gap de IMDS desde pods (mitigado con region/providerID) se investiga en Fase 1.5 — probable interacción con masquerading de Cilium.
 
+## Desviaciones registradas
+
+- **Tag-bump del deploy fuera del MVP** (12 ago 2026): el despliegue de Repo 2
+  usa `helm --set imageTag=<SHA>` con refresh manual de `K8S_SERVER`/`K8S_CA_DATA`
+  tras cada recreate. El GitOps declarativo (ArgoCD, imagen fijada en Git,
+  auto-sync) vuelve en Sprint 3. Deuda consciente documentada en CLUSTER.md §5.
+
 ## Deuda consciente que sobrevive a ambos sprints
 - Subred pública sin NAT (tradeoff lab documentado)
 - Workers spot (fallback on-demand vía variable)

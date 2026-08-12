@@ -75,8 +75,25 @@ app.
 | Acceso diario vía IAM (aws-iam-authenticator, backend DynamicFile) | Credenciales STS efímeras por identidad, revocación = membresía de grupo en Identity Center; el kubeconfig admin queda solo como break-glass | [ADR-005](decisions/ADR-005-iam-access.md) |
 | Registro ECR privado, tags inmutables por SHA, roles CI separados infra/app | Sin pull-secrets (instance role + credential provider), rollbacks reproducibles, separación de deberes | [ADR-006](decisions/ADR-006-ecr-registry.md) |
 | Perfiles de acceso, no personas (`platform/access/profiles.yaml`) | Alta/baja de humanos sin tocar el repo: mappings y RBAC se renderizan del mismo fichero | [ADR-005](decisions/ADR-005-iam-access.md) |
+| KafkaTopics como recurso de plataforma (`auto.create.topics.enable=false`) | Un topic mal escrito falla, no crea silenciosamente uno RF1; plataforma dueña del recurso, Repo 2 del contrato de eventos | brief 3b |
+| Sin `jobs` en el RBAC de developer | Migraciones por auto-migrate (DDL idempotente + advisory lock), no Jobs | brief 3b |
+| SA `default` con `automountServiceAccountToken: false` | Contrato con Repo 2: los charts no montan token de SA | brief 3b |
+| PodMonitor genérico de app en plataforma | Selecciona por `app.kubernetes.io/part-of: logistics-lab`; Repo 2 solo pone el label y el puerto `metrics` | brief 3b |
+| Proyección de secrets a `logistics` (no acceso a `data`) | El developer no lee Secrets en `data`; se proyecta el mínimo (PG app + Kafka `ca.crt`) sin metadata del origen | brief 3b |
 
 ## 4. Operación
+
+**Smoke de contrato de app** (`make smoke-app-contract`, con `GITHUB_SHA`):
+se ejecuta tras el deploy de Repo 2 (la coronación, no el Apply): los 4
+servicios Ready con imagen `<repo>:<SHA>` **traída de ECR por digest** (pull
+real, no existencia) y targets de Prometheus `up==1` con muestras.
+
+**Handoff tras recreate**: cada apply desde cero cambia `K8S_SERVER` y
+`K8S_CA_DATA` (el resto — `K8S_CLUSTER_ID`, `AWS_ROLE_ARN`, `AWS_REGION`,
+`K8S_DEVELOPER_ROLE_ARN` — es estable). Procedimiento: destroy → apply
+(smoke 38+ verde) → el operador actualiza esas 2 variables en el repo
+logistics-lab → `workflow_dispatch` (rebuild→push SHA→deploy→e2e) →
+`make smoke-app-contract`. El refresh es manual (deuda §5).
 
 **Smoke test** (`make smoke-test`, también al final del workflow Apply):
 3/3 nodos Ready · cero pods kube-proxy · `cilium-dbg` reporta
@@ -116,6 +133,17 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   no tráfico; el HTTPRoute + petición HTTPS real llega con la app.
 - **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
   ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
+- **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el
+  tráfico a la LB del Gateway se redirige a Envoy (`to-proxy`) antes de la
+  egress policy, así que una CNP de egress ni la puerta ni hace falta
+  (INCIDENTS #10). Riesgo aceptable hoy: `allowedRoutes` ya limita las rutas
+  al ns `logistics`; el control real (allowedRoutes / L7 en el Gateway) queda
+  para Fase 1.5.
+- **Rotación de credenciales proyectadas = re-ejecutar la proyección**
+  (`make platform`), hasta External Secrets (S3). Nada en Git.
+- **Refresh manual de variables tras recreate**: `K8S_SERVER`/`K8S_CA_DATA`
+  se actualizan a mano en logistics-lab; un canal de publicación de metadatos
+  no sensibles es candidato post-S1.
 - **Anti-affinity `required` con 3 workers**: la caída de un worker deja la
   tercera instancia (PG o Kafka) Pending hasta que el nodo vuelve — esperado
   y aceptado; no se suaviza a `preferred` (perdería la garantía de

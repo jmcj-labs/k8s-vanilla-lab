@@ -118,6 +118,15 @@ The CI apply workflow runs the same chain automatically:
 Full walkthrough, bootstrap monitoring, and day-2 operations:
 [docs/walkthrough.md](docs/walkthrough.md).
 
+## App handoff after a recreate (contract 3b)
+
+The app repo (`jmcj-labs/logistics-lab`) deploys as the `developer` role and
+pulls its images from ECR. After every apply-from-scratch, only two GitHub
+variables in that repo need refreshing — `K8S_SERVER` and `K8S_CA_DATA`
+(everything else is stable). Full procedure in
+[docs/troubleshooting.md](docs/troubleshooting.md) and CLUSTER.md §4. Verify
+the deployed app with `make smoke-app-contract GITHUB_SHA=<sha>`.
+
 ## Access (IAM — ADR-005)
 
 Daily access authenticates against the API server with IAM via

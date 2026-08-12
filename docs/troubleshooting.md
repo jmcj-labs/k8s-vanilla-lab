@@ -306,3 +306,44 @@ push time, so the tag in the manifest may simply never have been pushed);
 the repository name is outside the four managed ones (worker role denies it).
 The credential provider caches tokens 12h — a fresh IAM permission can take
 that long to matter, or restart the kubelet to force a refresh.
+
+## App-contract operations (3b)
+
+### Rotating projected credentials / resync
+
+The app (developer RBAC) cannot read Secrets in `data`; `make platform`
+projects the minimum into `logistics` (`logistics-pg-app`, and Kafka's
+`ca.crt` only). Rotation until External Secrets = re-run the projection:
+
+```bash
+make platform   # re-runs the reentrant projection; values never printed
+kubectl -n logistics get secret logistics-pg-app logistics-kafka-cluster-ca-cert
+```
+
+### Hubble verification of the metrics CNP
+
+Only Prometheus (infra) may scrape app pods on the `metrics` port:
+
+```bash
+# positive: the target is up
+#   up{namespace="logistics", container="app"} == 1  in Prometheus
+# negative: any other source is dropped
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+  hubble observe --verdict DROPPED --to-namespace logistics --last 30
+```
+
+### Handoff after a cluster recreate
+
+Each apply-from-scratch changes only `K8S_SERVER` and `K8S_CA_DATA`
+(everything else is stable, incl. `K8S_CLUSTER_ID =
+LAB_ACCOUNT_ID.REGION.CLUSTER_NAME`). Procedure:
+
+```
+destroy → apply (make smoke-test green)
+→ read the new endpoint + CA:
+    aws ssm get-parameter --name /k8s/<cluster>/kubeconfig --with-decryption \
+      --query Parameter.Value --output text --region <region>   # server: + certificate-authority-data
+→ update K8S_SERVER and K8S_CA_DATA GitHub variables in jmcj-labs/logistics-lab
+→ workflow_dispatch there (rebuild → push SHA → deploy → e2e)
+→ make smoke-app-contract GITHUB_SHA=<sha>
+```
