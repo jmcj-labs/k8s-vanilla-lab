@@ -157,8 +157,14 @@ resource "aws_iam_role_policy" "app_ci_ecr" {
 
 # The app CI's ONLY non-ECR action: assume the developer role to deploy to
 # the cluster. Exactly that role, nothing else.
+#
+# count is gated on a STATIC bool (known at plan), NOT on the ARN value:
+# developer_role_arn comes from module.access and is unknown-after-apply on a
+# fresh (empty-state) plan, and count cannot depend on an unknown — that is
+# INCIDENTS #11. The ARN stays as the policy Resource (Resources may be
+# unknown at plan; only count/for_each may not).
 resource "aws_iam_role_policy" "app_ci_assume_developer" {
-  count = var.developer_role_arn != "" ? 1 : 0
+  count = var.attach_assume_developer ? 1 : 0
 
   name = "${var.ci_role_name}-assume-developer"
   role = aws_iam_role.app_ci.id

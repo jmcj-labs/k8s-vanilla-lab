@@ -12,7 +12,7 @@ SSH_USER        := ubuntu
 .DEFAULT_GOAL := help
 
 .PHONY: help init validate fmt plan apply destroy \
-        kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
+        plan-empty kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
         smoke-app-contract ssh-cp ssh-worker clean bootstrap-aws
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
@@ -36,6 +36,19 @@ validate: ## Check formatting and validate all stacks (no backend required)
 	    TF_DATA_DIR="$$VALIDATE_TMP" tofu validate ) || { rm -rf "$$VALIDATE_TMP"; exit 1; }; \
 	  rm -rf "$$VALIDATE_TMP"; \
 	done
+
+plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each on known-after-apply — INCIDENTS #11)
+	@STACK=tofu/envs/lab; \
+	EMPTY_DATA=$$(mktemp -d); \
+	OVERRIDE="$$STACK/zz_empty_state_override.tf"; \
+	printf 'terraform {\n  backend "local" {}\n}\n' > "$$OVERRIDE"; \
+	trap 'rm -f "$$OVERRIDE"; rm -rf "$$EMPTY_DATA"' EXIT; \
+	( cd "$$STACK" && \
+	  TF_DATA_DIR="$$EMPTY_DATA" tofu init -input=false >/dev/null && \
+	  TF_DATA_DIR="$$EMPTY_DATA" tofu plan -input=false -no-color \
+	    -var="lab_account_id=" -var="my_ip=0.0.0.0/0" \
+	    -var="ssh_key_name=plan-empty" -var="aws_profile=$(AWS_PROFILE)" ) \
+	  || { echo "✗ plan-from-empty failed — a count/for_each likely depends on a known-after-apply value (INCIDENTS #11)"; exit 1; }
 
 fmt: ## Format all .tf files recursively
 	tofu fmt -recursive tofu/
