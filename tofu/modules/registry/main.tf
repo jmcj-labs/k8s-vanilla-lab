@@ -17,8 +17,6 @@ terraform {
   }
 }
 
-data "aws_caller_identity" "current" {}
-
 resource "aws_ecr_repository" "app" {
   for_each = toset(var.repositories)
 
