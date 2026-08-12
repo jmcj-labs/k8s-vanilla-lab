@@ -96,7 +96,7 @@ logistics-lab → `workflow_dispatch` (rebuild→push SHA→deploy→e2e) →
 `make smoke-app-contract`. El refresh es manual (deuda §5).
 
 **Smoke test** (`make smoke-test`, también al final del workflow Apply):
-3/3 nodos Ready · cero pods kube-proxy · `cilium-dbg` reporta
+4/4 nodos Ready · cero pods kube-proxy · `cilium-dbg` reporta
 KubeProxyReplacement True · providerID en los 3 nodos · PVC gp3 dinámico
 Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
 `Programmed` · operators CNPG y Strimzi Ready.
@@ -136,9 +136,12 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 - **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el
   tráfico a la LB del Gateway se redirige a Envoy (`to-proxy`) antes de la
   egress policy, así que una CNP de egress ni la puerta ni hace falta
-  (INCIDENTS #10). Riesgo aceptable hoy: `allowedRoutes` ya limita las rutas
-  al ns `logistics`; el control real (allowedRoutes / L7 en el Gateway) queda
-  para Fase 1.5.
+  (INCIDENTS #10). `allowedRoutes` limita **la propiedad de rutas** (qué ns
+  puede adjuntar HTTPRoutes — aquí `logistics`), no **la autorización de
+  peticiones** (qué pods pueden enviar tráfico por el Gateway); no sustituye
+  al control de egress. Riesgo aceptado en el MVP: no hay requisito de aislar
+  entre sí a los clientes *dentro* de `logistics`. Control futuro: L7/auth en
+  el Gateway + policies por servicio, Fase 1.5.
 - **Rotación de credenciales proyectadas = re-ejecutar la proyección**
   (`make platform`), hasta External Secrets (S3). Nada en Git.
 - **Refresh manual de variables tras recreate**: `K8S_SERVER`/`K8S_CA_DATA`

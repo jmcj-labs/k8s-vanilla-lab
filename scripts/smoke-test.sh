@@ -571,19 +571,31 @@ AC=$(kubectl -n data exec logistics-kafka-dual-0 -- \
 echo "${AC}" | grep -qi 'false' || FAIL "auto.create.topics.enable is not false in the broker config (${AC})"
 OK "KafkaTopics Ready + auto.create.topics.enable=false effective"
 
-# 12b. Projected secrets present — by presence + hash, NEVER printing values
+# 12b. Projected secrets — full canonical hash comparison, NEVER printing
+# values. PG: hash of type + the entire data map (canonical JSON). Kafka:
+# hash of ca.crt AND the data key set must be exactly ["ca.crt"].
 for S in logistics-pg-app logistics-kafka-cluster-ca-cert; do
   kubectl -n logistics get secret "${S}" >/dev/null 2>&1 || FAIL "projected secret ${S} missing in logistics"
 done
-# Kafka projection must carry ca.crt and NOT ca.key
+canon_hash() {  # ns name [key] — hash of type+data, or of a single data key
+  kubectl -n "$1" get secret "$2" -o json | python3 -c '
+import json,sys,hashlib
+s=json.load(sys.stdin); key=sys.argv[1] if len(sys.argv)>1 else None
+if key:
+    payload=s["data"][key]
+else:
+    payload=json.dumps({"type":s["type"],"data":s["data"]},sort_keys=True,separators=(",",":"))
+print(hashlib.sha256(payload.encode()).hexdigest())' "${3:-}"
+}
+[ "$(canon_hash data logistics-pg-app)" = "$(canon_hash logistics logistics-pg-app)" ] \
+  || FAIL "projected PG secret (type+data) differs from source — stale projection"
+# Kafka: exactly {ca.crt}, and its content matches source
 kubectl -n logistics get secret logistics-kafka-cluster-ca-cert -o json \
-  | python3 -c 'import json,sys;d=json.load(sys.stdin)["data"];sys.exit(0 if ("ca.crt" in d and "ca.key" not in d) else 1)' \
-  || FAIL "projected Kafka secret must contain ca.crt and never ca.key"
-# hash equality vs source (proves projection is current) without printing
-PG_SRC=$(kubectl -n data get secret logistics-pg-app -o jsonpath='{.data.password}' | sha256sum)
-PG_DST=$(kubectl -n logistics get secret logistics-pg-app -o jsonpath='{.data.password}' | sha256sum)
-[ "${PG_SRC}" = "${PG_DST}" ] || FAIL "projected PG secret is stale vs source"
-OK "Projected secrets present (pg-app + kafka ca.crt only), hashes match source"
+  | python3 -c 'import json,sys;k=sorted(json.load(sys.stdin)["data"].keys());sys.exit(0 if k==["ca.crt"] else 1)' \
+  || FAIL "projected Kafka secret keys are not exactly [ca.crt] (must never carry ca.key/PKCS12)"
+[ "$(canon_hash data logistics-kafka-cluster-ca-cert ca.crt)" = "$(canon_hash logistics logistics-kafka-cluster-ca-cert ca.crt)" ] \
+  || FAIL "projected Kafka ca.crt differs from source — stale projection"
+OK "Projected secrets: pg-app (type+data hash) + kafka {ca.crt} only, match source"
 
 # 12c. Metrics fixture: temporary app-labeled pod, real /metrics endpoint
 kubectl -n logistics apply -f - >/dev/null <<'FX'
@@ -605,9 +617,11 @@ spec:
 FX
 kubectl -n logistics wait --for=condition=Available deploy/smoke-metrics-fx --timeout=120s >/dev/null \
   || FAIL "metrics fixture not Available"
-prom_expect_nonempty 'up{namespace="logistics",container="app"}==1' "Metrics fixture: scraped up==1"
+FX_POD=$(kubectl -n logistics get pod -l app=smoke-metrics-fx -o jsonpath='{.items[0].metadata.name}')
+FXIP=$(kubectl -n logistics get pod "${FX_POD}" -o jsonpath='{.status.podIP}')
+# up for THIS exact fixture pod (not a namespace-wide match)
+prom_expect_nonempty "up{namespace=\"logistics\",pod=\"${FX_POD}\"}==1" "Metrics fixture: ${FX_POD} scraped up==1"
 # negative: a pod in a neutral namespace cannot scrape it + Hubble drop
-FXIP=$(kubectl -n logistics get pod -l app=smoke-metrics-fx -o jsonpath='{.items[0].status.podIP}')
 kubectl -n default run smoke-scraper2 --image=busybox:1.36 --restart=Never -- sleep 90 >/dev/null
 kubectl -n default wait --for=condition=Ready pod/smoke-scraper2 --timeout=60s >/dev/null || FAIL "scraper pod not Ready"
 set +e
@@ -615,15 +629,21 @@ kubectl -n default exec smoke-scraper2 -- wget -q -T5 -O /dev/null "http://${FXI
 SC_RC=$?
 set -e
 [ "${SC_RC}" -ne 0 ] || FAIL "neutral namespace scraped the fixture — metrics CNP not effective"
+# Drop filtered to exactly this flow (source pod + fixture IP + port); short retry.
 MFX_DROP=""
-for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
-  HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
-    hubble observe --verdict DROPPED --from-pod default/smoke-scraper2 --last 20 2>/dev/null || true)
-  echo "${HUBBLE_OUT}" | grep -q "DROPPED" && { MFX_DROP=yes; break; }
+for _ in $(seq 1 5); do
+  for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+    HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+      hubble observe --verdict DROPPED --from-pod default/smoke-scraper2 \
+      --to-ip "${FXIP}" --port 8080 --last 20 2>/dev/null || true)
+    echo "${HUBBLE_OUT}" | grep -q "DROPPED" && { MFX_DROP=yes; break; }
+  done
+  [ -n "${MFX_DROP}" ] && break
+  sleep 3
 done
 kubectl -n default delete pod smoke-scraper2 --wait=false >/dev/null 2>&1 || true
-[ -n "${MFX_DROP}" ] || FAIL "neutral→fixture denial did not appear as a Hubble DROP"
-OK "Metrics fixture: up==1, neutral scrape denied (Hubble DROP), CNP proven"
+[ -n "${MFX_DROP}" ] || FAIL "neutral→fixture denial did not appear as a Hubble DROP (${FXIP}:8080)"
+OK "Metrics fixture: up==1, neutral scrape denied (Hubble DROP on ${FXIP}:8080), CNP proven"
 
 # 12d. Gateway egress fixture — POSITIVE ONLY (INCIDENTS #10: egress to the
 # Gateway VIP is to-proxy redirected and not gated by a client CNP, so there
@@ -682,28 +702,62 @@ done
 [ "${HTTP_CODE}" = "200" ] || FAIL "logistics pod did not reach the Gateway over HTTPS (got ${HTTP_CODE})"
 OK "Gateway: logistics pod reaches the shared Gateway over HTTPS with SNI (HTTP 200)"
 
-# 12e. IAM by INSPECTION (never assumption): the runner cannot obtain Repo 2's
-# OIDC identity, so verify the policy shapes directly.
-CI_POL=$(aws iam list-role-policies --role-name logistics-lab-ci --query 'PolicyNames' --output text 2>/dev/null || true)
-echo "${CI_POL}" | grep -q "logistics-lab-ci-assume-developer" \
-  || FAIL "logistics-lab-ci missing the assume-developer policy"
-ASSUME_DOC=$(aws iam get-role-policy --role-name logistics-lab-ci \
-  --policy-name logistics-lab-ci-assume-developer --query 'PolicyDocument' --output json 2>/dev/null)
-echo "${ASSUME_DOC}" | python3 -c '
+# 12e. IAM by EXACT inspection (never assumption): the runner cannot obtain
+# Repo 2's OIDC identity, so verify the exact policy shapes.
+# (a) logistics-lab-ci inline policy set is exactly the two expected; no
+#     managed policies attached; ECR actions/resources and the assume are exact.
+CI_INLINE=$(aws iam list-role-policies --role-name logistics-lab-ci \
+  --query 'sort(PolicyNames)' --output json 2>/dev/null || echo '[]')
+echo "${CI_INLINE}" | python3 -c '
 import json,sys
-d=json.load(sys.stdin); st=d["Statement"]
-assert len(st)==1 and st[0]["Action"]=="sts:AssumeRole", "assume policy is not exactly one AssumeRole"
-assert st[0]["Resource"].endswith(":role/k8s-vanilla-lab-developer"), "assume target is not the developer role"
-' || FAIL "logistics-lab-ci assume-developer policy is not exactly AssumeRole on the developer role"
-DEV_TRUST=$(aws iam get-role --role-name k8s-vanilla-lab-developer \
-  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null)
-echo "${DEV_TRUST}" | python3 -c '
+got=json.load(sys.stdin)
+want=["logistics-lab-ci-assume-developer","logistics-lab-ci-ecr-push"]
+assert got==want, f"inline policy set is {got}, expected {want}"' \
+  || FAIL "logistics-lab-ci inline policy set is not exactly the two expected"
+CI_MANAGED=$(aws iam list-attached-role-policies --role-name logistics-lab-ci \
+  --query 'AttachedPolicies' --output json 2>/dev/null || echo '[]')
+[ "$(echo "${CI_MANAGED}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = "0" ] \
+  || FAIL "logistics-lab-ci has unexpected managed policies attached"
+aws iam get-role-policy --role-name logistics-lab-ci --policy-name logistics-lab-ci-ecr-push \
+  --query 'PolicyDocument' --output json 2>/dev/null | python3 -c '
 import json,sys
-d=json.load(sys.stdin)
-princ=[s["Principal"]["AWS"] for s in d["Statement"] if "AWS" in s.get("Principal",{})]
-assert any(p.endswith(":role/logistics-lab-ci") for p in princ), "developer trust missing logistics-lab-ci"
-' || FAIL "developer role trust does not include logistics-lab-ci"
-OK "IAM by inspection: logistics-lab-ci→developer AssumeRole + developer trusts logistics-lab-ci"
+st={s["Sid"]:s for s in json.load(sys.stdin)["Statement"]}
+assert st["ECRAuthToken"]["Action"]=="ecr:GetAuthorizationToken" and st["ECRAuthToken"]["Resource"]=="*"
+push=st["PushPullAppRepositories"]
+want=sorted(["ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"])
+assert sorted(push["Action"])==want, "ECR push actions differ from expected set"
+res=push["Resource"] if isinstance(push["Resource"],list) else [push["Resource"]]
+repos={"shipments-api","routing","tracking-events","traffic-generator"}
+assert all(r.split("/")[-1] in repos for r in res), "ECR resources are not exactly the four repos"
+assert len(res)==4, "ECR push targets not exactly four repositories"
+' || FAIL "logistics-lab-ci ECR policy actions/resources are not exact"
+aws iam get-role-policy --role-name logistics-lab-ci --policy-name logistics-lab-ci-assume-developer \
+  --query 'PolicyDocument' --output json 2>/dev/null | python3 -c '
+import json,sys
+st=json.load(sys.stdin)["Statement"]
+assert len(st)==1 and st[0]["Action"]=="sts:AssumeRole" and st[0]["Resource"].endswith(":role/k8s-vanilla-lab-developer")
+' || FAIL "assume-developer policy is not exactly AssumeRole on the developer role"
+# (b) developer trust: the app-CI statement is root + ArnEquals on exactly
+#     logistics-lab-ci; the Identity Center and infra-CI principals are kept.
+aws iam get-role --role-name k8s-vanilla-lab-developer \
+  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c '
+import json,sys
+st=json.load(sys.stdin)["Statement"]
+sids={s["Sid"]:s for s in st if "Sid" in s}
+appci=sids["AppCIAssumesDeveloper"]
+assert appci["Principal"]["AWS"].endswith(":root"), "app-CI principal is not account root"
+cond=appci["Condition"]["ArnEquals"]["aws:PrincipalArn"]
+assert cond.endswith(":role/logistics-lab-ci"), f"ArnEquals is {cond}"
+assert "IdentityCenterBridge" in sids and "CISmokeTest" in sids, "existing principals not preserved"
+' || FAIL "developer trust: app-CI statement not root+ArnEquals, or existing principals dropped"
+# (c) app CI must be ABSENT from the platform-admin trust.
+aws iam get-role --role-name k8s-vanilla-lab-platform-admin \
+  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c '
+import json,sys
+doc=json.dumps(json.load(sys.stdin))
+assert "logistics-lab-ci" not in doc, "logistics-lab-ci leaked into platform-admin trust"
+' || FAIL "logistics-lab-ci must NOT appear in platform-admin trust"
+OK "IAM exact: logistics-lab-ci policies/ECR exact, developer trust root+ArnEquals, platform-admin clean"
 
 echo ""
 echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry and app contract are healthy"

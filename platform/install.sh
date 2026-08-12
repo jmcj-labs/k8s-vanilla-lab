@@ -283,28 +283,36 @@ log "Step 10c/11: Projecting data credentials into logistics (reentrant)"
 # it needs into logistics, stripping all source-object metadata. Rotation
 # until External Secrets (S3) = re-run this. Values never printed / no temp
 # files (apply by pipe).
-kubectl -n data wait secret/logistics-pg-app --for=jsonpath='{.metadata.name}' --timeout=300s >/dev/null 2>&1 \
-  || kubectl -n data get secret logistics-pg-app >/dev/null 2>&1 \
-  || { echo "✗ source secret logistics-pg-app absent" >&2; exit 1; }
+wait_secret() {  # ns name — poll up to 300s, clear error on timeout
+  local ns="$1" name="$2" elapsed=0
+  until kubectl -n "${ns}" get secret "${name}" >/dev/null 2>&1; do
+    if [ "${elapsed}" -ge 300 ]; then
+      echo "✗ source secret ${ns}/${name} not present after 300s" >&2
+      exit 1
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+}
+wait_secret data logistics-pg-app
+# PG: type + full data, no source-object metadata.
 kubectl -n data get secret logistics-pg-app -o json \
   | python3 -c '
 import json,sys
 s=json.load(sys.stdin)
-out={"apiVersion":"v1","kind":"Secret",
+json.dump({"apiVersion":"v1","kind":"Secret",
      "metadata":{"name":"logistics-pg-app","namespace":"logistics"},
-     "type":s["type"],"data":s["data"]}
-json.dump(out,sys.stdout)' \
+     "type":s["type"],"data":s["data"]},sys.stdout)' \
   | kubectl apply -f - >/dev/null
+wait_secret data logistics-kafka-cluster-ca-cert
 # Kafka: ONLY the CA cert — never ca.key, PKCS12 or passwords.
-until kubectl -n data get secret logistics-kafka-cluster-ca-cert >/dev/null 2>&1; do sleep 3; done
 kubectl -n data get secret logistics-kafka-cluster-ca-cert -o json \
   | python3 -c '
 import json,sys
 s=json.load(sys.stdin)
-out={"apiVersion":"v1","kind":"Secret",
+json.dump({"apiVersion":"v1","kind":"Secret",
      "metadata":{"name":"logistics-kafka-cluster-ca-cert","namespace":"logistics"},
-     "type":"Opaque","data":{"ca.crt":s["data"]["ca.crt"]}}
-json.dump(out,sys.stdout)' \
+     "type":"Opaque","data":{"ca.crt":s["data"]["ca.crt"]}},sys.stdout)' \
   | kubectl apply -f - >/dev/null
 log "✓ Projected logistics/logistics-pg-app and logistics/logistics-kafka-cluster-ca-cert (ca.crt only)"
 

@@ -208,7 +208,13 @@ works: the same pod to another `world` IP (1.1.1.1:443) times out.
 
 **Fix**: remove the client-side egress CNP (it is a no-op) and keep the
 smoke fixture positive-only — "a `logistics` pod reaches the Gateway over
-HTTPS with SNI". Egress to the Gateway VIP is simply not restrictable by a
-client CNP in this Cilium setup; the real control is `allowedRoutes` /
-Gateway-level L7, noted for Phase 1.5 (CLUSTER.md §5). No `world`/`host`/
-`cluster` shortcut was taken, per the brief's tripwire.
+HTTPS with SNI". No `world`/`host`/`cluster` shortcut was taken, per the
+brief's tripwire.
+
+Note on `allowedRoutes`: it controls **route ownership** (which namespaces
+may attach HTTPRoutes to the Gateway — scoped to `logistics` here), NOT
+**request authorization** (which client pods may send requests through the
+Gateway). So it does not substitute for the missing egress control. Risk
+accepted for the MVP: there is no requirement to isolate clients *within*
+`logistics` from each other. The real future control is L7/auth at the
+Gateway plus per-service network policies — Phase 1.5 (CLUSTER.md §5).

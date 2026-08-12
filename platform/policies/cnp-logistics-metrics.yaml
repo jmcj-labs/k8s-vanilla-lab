@@ -1,7 +1,10 @@
-# Prometheus (infra) → app pods in logistics, port `metrics`, and nothing
-# else. Additive to the logistics default-deny (policies compose by union of
-# allows). The app pods are the default-deny's endpointSelector {} target, so
-# this opening is what lets Prometheus scrape them at all.
+# Prometheus (infra) is the only ADDITIONAL cross-namespace source allowed to
+# reach the app pods on the `metrics` port. Honest semantics: the logistics
+# default-deny already permits intra-namespace traffic (fromEndpoints in
+# logistics), so app→app within logistics also reaches `metrics` — this policy
+# does NOT isolate metrics per service. Its job is solely to let Prometheus
+# (a different namespace) scrape. Per-service / per-port isolation inside
+# logistics is Phase 1.5 (L7/auth + policies per service).
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:

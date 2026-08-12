@@ -76,6 +76,10 @@ resource "aws_iam_role" "access" {
       ],
       # The app repo's CI role (logistics-lab-ci) assumes ONLY the developer
       # role — its deploy pipeline authenticates to the cluster as developer.
+      # Fresh-safe pattern (same as the Identity Center bridge): trust the
+      # account root and restrict with ArnEquals on aws:PrincipalArn. A bare
+      # role ARN in Principal becomes an unresolvable principal if the role is
+      # ever recreated, breaking the trust; root + condition never does.
       # Constructed as a string (not a module ref) to avoid an access<->registry
       # cycle; the registry module grants the reciprocal sts:AssumeRole.
       each.key == "developer" ? [
@@ -83,9 +87,14 @@ resource "aws_iam_role" "access" {
           Sid    = "AppCIAssumesDeveloper"
           Effect = "Allow"
           Principal = {
-            AWS = "arn:aws:iam::${local.account_id}:role/${var.app_ci_role_name}"
+            AWS = "arn:aws:iam::${local.account_id}:root"
           }
           Action = "sts:AssumeRole"
+          Condition = {
+            ArnEquals = {
+              "aws:PrincipalArn" = "arn:aws:iam::${local.account_id}:role/${var.app_ci_role_name}"
+            }
+          }
         }
       ] : []
     )

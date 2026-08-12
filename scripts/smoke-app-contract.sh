@@ -33,8 +33,17 @@ except Exception: print(0)' 2>/dev/null || echo 0
 
 echo "== App-contract smoke (tag ${GITHUB_SHA}) =="
 
+prom_up_for_pod() {  # exact pod name, up==1 with retries
+  local pod="$1" n
+  for _ in $(seq 1 20); do
+    n=$(prom_count "up{namespace=\"logistics\",pod=\"${pod}\"}==1")
+    [ "${n:-0}" -gt 0 ] && return 0
+    sleep 6
+  done
+  return 1
+}
+
 for SVC in ${SERVICES}; do
-  # Pods present and Ready
   PODS=$(kubectl -n logistics get pods -l "app.kubernetes.io/name=${SVC}" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
   [ -n "${PODS}" ] || FAIL "${SVC}: no pods in logistics"
@@ -46,28 +55,21 @@ for SVC in ${SERVICES}; do
     # image reference: expected ECR repo + exactly the SHA tag
     IMG=$(kubectl -n logistics get pod "${POD}" \
       -o jsonpath="{.spec.containers[?(@.name=='${SVC}')].image}")
-    [ -n "${IMG}" ] || IMG=$(kubectl -n logistics get pod "${POD}" -o jsonpath='{.spec.containers[0].image}')
     [ "${IMG}" = "${ECR_HOST}/${SVC}:${GITHUB_SHA}" ] \
-      || FAIL "${SVC}: image is '${IMG}', expected '${ECR_HOST}/${SVC}:${GITHUB_SHA}'"
-    # imageID must be a digest resolved from ECR (real pull, not name only)
+      || FAIL "${SVC}/${POD}: image is '${IMG}', expected '${ECR_HOST}/${SVC}:${GITHUB_SHA}'"
+    # imageID BY CONTAINER NAME (not index): a digest resolved from ECR
     IMGID=$(kubectl -n logistics get pod "${POD}" \
-      -o jsonpath='{.status.containerStatuses[0].imageID}')
+      -o jsonpath="{.status.containerStatuses[?(@.name=='${SVC}')].imageID}")
     echo "${IMGID}" | grep -q "${ECR_HOST}/${SVC}@sha256:" \
-      || FAIL "${SVC}: imageID '${IMGID}' is not an ECR digest (image not really pulled from ECR)"
+      || FAIL "${SVC}/${POD}: imageID '${IMGID}' is not an ECR digest (not really pulled from ECR)"
+    # a healthy scrape target for THIS exact Ready replica
+    prom_up_for_pod "${POD}" || FAIL "${SVC}/${POD}: no Prometheus target up==1 after ~2min"
   done <<< "${PODS}"
-  OK "${SVC}: pods Ready, image ${SVC}:${GITHUB_SHA}, pulled from ECR by digest"
-done
-
-# Prometheus scrapes each service (up==1) with samples
-for SVC in ${SERVICES}; do
-  N=0
-  for _ in $(seq 1 20); do
-    N=$(prom_count "up{namespace=\"logistics\",pod=~\"${SVC}.*\"}==1")
-    [ "${N:-0}" -gt 0 ] && break
-    sleep 6
-  done
-  [ "${N:-0}" -gt 0 ] || FAIL "${SVC}: no Prometheus target up==1 after ~2min"
-  OK "${SVC}: Prometheus target up==1"
+  # the contract metric the app must expose, labelled by service
+  SVC_INFO=$(prom_count "logistics_service_info{service=\"${SVC}\"}")
+  [ "${SVC_INFO:-0}" -gt 0 ] \
+    || FAIL "${SVC}: no logistics_service_info{service=\"${SVC}\"} sample (contract metric)"
+  OK "${SVC}: pods Ready, image :${GITHUB_SHA} pulled from ECR by digest, up==1, service_info present"
 done
 
 echo ""
