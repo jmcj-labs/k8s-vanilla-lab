@@ -1,0 +1,17 @@
+# Generic PodMonitor for the app services (Repo 2). Contract: the four
+# services carry app.kubernetes.io/part-of: logistics-lab and expose a
+# container port named `metrics`. Platform owns the monitor; Repo 2 owns
+# the label + port on its pods.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: logistics-app
+  namespace: logistics
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-policies
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: logistics-lab
+  podMetricsEndpoints:
+    - port: metrics
