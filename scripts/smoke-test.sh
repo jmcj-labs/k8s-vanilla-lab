@@ -212,6 +212,16 @@ fi
 echo "${DENIED_OUT}" | grep -q "Forbidden" \
   || FAIL "developer denial was not an RBAC Forbidden (got: ${DENIED_OUT})"
 OK "IAM developer: infra is Forbidden (RBAC denial, not an error)"
+
+# RBAC surface (contract 3b): the developer can create the app's routing
+# objects, but not jobs (migrations are auto-migrate) nor anything in data.
+[ "$(KUBECONFIG="${DEV_KC}" kubectl auth can-i create grpcroutes -n logistics 2>/dev/null)" = "yes" ] \
+  || FAIL "developer cannot create grpcroutes in logistics (contract 3b)"
+[ "$(KUBECONFIG="${DEV_KC}" kubectl auth can-i create jobs -n logistics 2>/dev/null)" = "no" ] \
+  || FAIL "developer CAN create jobs in logistics — not in the contract"
+[ "$(KUBECONFIG="${DEV_KC}" kubectl auth can-i get pods -n data 2>/dev/null)" = "no" ] \
+  || FAIL "developer CAN read pods in data — segregation broken"
+OK "IAM developer RBAC: grpcroutes yes · jobs no · data no"
 fi
 
 # ── 9. Network policies (IMDS deny + logistics default-deny) ─────────────────
@@ -544,5 +554,156 @@ prom_expect_nonempty 'up{namespace="data",endpoint="tcp-prometheus"}==1' "Promet
 prom_expect_nonempty 'cnpg_collector_up' "Metric cnpg_collector_up has samples"
 prom_expect_nonempty 'kafka_server_replicamanager_leadercount' "Metric kafka_server_* has samples"
 
+# ── 12. App contract (3b): topics, projected secrets, fixtures, IAM shape ────
+cleanup_contract() {
+  kubectl -n logistics delete deploy smoke-metrics-fx smoke-gw-be --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n logistics delete svc smoke-gw-be --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n logistics delete httproute smoke-gw-rt --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n logistics delete pod smoke-tg smoke-scraper2 --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_pvc; cleanup_iam; cleanup_netpol; cleanup_data; cleanup_contract' EXIT
+
+# 12a. Topics Ready + auto.create disabled effective in the broker config
+kubectl -n data wait --for=condition=Ready kafkatopic/shipment.created kafkatopic/route.calculated \
+  --timeout=60s >/dev/null || FAIL "KafkaTopics not Ready"
+AC=$(kubectl -n data exec logistics-kafka-dual-0 -- \
+  cat /tmp/strimzi.properties 2>/dev/null | grep -i '^auto.create.topics.enable=' || true)
+echo "${AC}" | grep -qi 'false' || FAIL "auto.create.topics.enable is not false in the broker config (${AC})"
+OK "KafkaTopics Ready + auto.create.topics.enable=false effective"
+
+# 12b. Projected secrets present — by presence + hash, NEVER printing values
+for S in logistics-pg-app logistics-kafka-cluster-ca-cert; do
+  kubectl -n logistics get secret "${S}" >/dev/null 2>&1 || FAIL "projected secret ${S} missing in logistics"
+done
+# Kafka projection must carry ca.crt and NOT ca.key
+kubectl -n logistics get secret logistics-kafka-cluster-ca-cert -o json \
+  | python3 -c 'import json,sys;d=json.load(sys.stdin)["data"];sys.exit(0 if ("ca.crt" in d and "ca.key" not in d) else 1)' \
+  || FAIL "projected Kafka secret must contain ca.crt and never ca.key"
+# hash equality vs source (proves projection is current) without printing
+PG_SRC=$(kubectl -n data get secret logistics-pg-app -o jsonpath='{.data.password}' | sha256sum)
+PG_DST=$(kubectl -n logistics get secret logistics-pg-app -o jsonpath='{.data.password}' | sha256sum)
+[ "${PG_SRC}" = "${PG_DST}" ] || FAIL "projected PG secret is stale vs source"
+OK "Projected secrets present (pg-app + kafka ca.crt only), hashes match source"
+
+# 12c. Metrics fixture: temporary app-labeled pod, real /metrics endpoint
+kubectl -n logistics apply -f - >/dev/null <<'FX'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: smoke-metrics-fx, namespace: logistics, labels: {app.kubernetes.io/part-of: logistics-lab}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: smoke-metrics-fx}}
+  template:
+    metadata: {labels: {app: smoke-metrics-fx, app.kubernetes.io/part-of: logistics-lab}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: app
+          image: quay.io/brancz/prometheus-example-app:v0.5.0
+          ports: [{name: metrics, containerPort: 8080}]
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 65534, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+FX
+kubectl -n logistics wait --for=condition=Available deploy/smoke-metrics-fx --timeout=120s >/dev/null \
+  || FAIL "metrics fixture not Available"
+prom_expect_nonempty 'up{namespace="logistics",container="app"}==1' "Metrics fixture: scraped up==1"
+# negative: a pod in a neutral namespace cannot scrape it + Hubble drop
+FXIP=$(kubectl -n logistics get pod -l app=smoke-metrics-fx -o jsonpath='{.items[0].status.podIP}')
+kubectl -n default run smoke-scraper2 --image=busybox:1.36 --restart=Never -- sleep 90 >/dev/null
+kubectl -n default wait --for=condition=Ready pod/smoke-scraper2 --timeout=60s >/dev/null || FAIL "scraper pod not Ready"
+set +e
+kubectl -n default exec smoke-scraper2 -- wget -q -T5 -O /dev/null "http://${FXIP}:8080/metrics" >/dev/null 2>&1
+SC_RC=$?
+set -e
+[ "${SC_RC}" -ne 0 ] || FAIL "neutral namespace scraped the fixture — metrics CNP not effective"
+MFX_DROP=""
+for CILIUM_POD in $(kubectl -n kube-system get pods -l k8s-app=cilium -o name); do
+  HUBBLE_OUT=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+    hubble observe --verdict DROPPED --from-pod default/smoke-scraper2 --last 20 2>/dev/null || true)
+  echo "${HUBBLE_OUT}" | grep -q "DROPPED" && { MFX_DROP=yes; break; }
+done
+kubectl -n default delete pod smoke-scraper2 --wait=false >/dev/null 2>&1 || true
+[ -n "${MFX_DROP}" ] || FAIL "neutral→fixture denial did not appear as a Hubble DROP"
+OK "Metrics fixture: up==1, neutral scrape denied (Hubble DROP), CNP proven"
+
+# 12d. Gateway egress fixture — POSITIVE ONLY (INCIDENTS #10: egress to the
+# Gateway VIP is to-proxy redirected and not gated by a client CNP, so there
+# is no meaningful network-policy negative to assert). Proves a logistics pod
+# reaches the shared Gateway over HTTPS with SNI end to end.
+GW_IP=$(kubectl -n infra get svc -l gateway.networking.k8s.io/gateway-name=shared-gw \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+[ -n "${GW_IP}" ] || FAIL "shared Gateway has no LoadBalancer IP"
+kubectl -n logistics apply -f - >/dev/null <<'FX'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: smoke-gw-be, namespace: logistics, labels: {app: smoke-gw-be}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: smoke-gw-be}}
+  template:
+    metadata: {labels: {app: smoke-gw-be}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: web
+          image: registry.k8s.io/e2e-test-images/agnhost:2.47
+          args: ["netexec","--http-port=8080"]
+          ports: [{containerPort: 8080}]
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, runAsUser: 1000, capabilities: {drop: [ALL]}, seccompProfile: {type: RuntimeDefault}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: smoke-gw-be, namespace: logistics}
+spec:
+  selector: {app: smoke-gw-be}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: smoke-gw-rt, namespace: logistics}
+spec:
+  parentRefs: [{name: shared-gw, namespace: infra}]
+  hostnames: ["smoke.logistics.lab"]
+  rules: [{backendRefs: [{name: smoke-gw-be, port: 80}]}]
+FX
+kubectl -n logistics wait --for=condition=Available deploy/smoke-gw-be --timeout=120s >/dev/null \
+  || FAIL "gateway fixture backend not Available"
+kubectl -n logistics run smoke-tg --image=curlimages/curl:8.10.1 \
+  --labels="app.kubernetes.io/name=traffic-generator" --restart=Never \
+  --overrides='{"spec":{"automountServiceAccountToken":false,"containers":[{"name":"c","image":"curlimages/curl:8.10.1","command":["sleep","120"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"runAsUser":1000,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}' >/dev/null
+kubectl -n logistics wait --for=condition=Ready pod/smoke-tg --timeout=90s >/dev/null || FAIL "gateway fixture client not Ready"
+HTTP_CODE=""
+for _ in $(seq 1 10); do
+  HTTP_CODE=$(kubectl -n logistics exec smoke-tg -- curl -sk \
+    --resolve "smoke.logistics.lab:443:${GW_IP}" https://smoke.logistics.lab/hostname \
+    -m 8 -o /dev/null -w "%{http_code}" 2>/dev/null || true)
+  [ "${HTTP_CODE}" = "200" ] && break
+  sleep 3
+done
+[ "${HTTP_CODE}" = "200" ] || FAIL "logistics pod did not reach the Gateway over HTTPS (got ${HTTP_CODE})"
+OK "Gateway: logistics pod reaches the shared Gateway over HTTPS with SNI (HTTP 200)"
+
+# 12e. IAM by INSPECTION (never assumption): the runner cannot obtain Repo 2's
+# OIDC identity, so verify the policy shapes directly.
+CI_POL=$(aws iam list-role-policies --role-name logistics-lab-ci --query 'PolicyNames' --output text 2>/dev/null || true)
+echo "${CI_POL}" | grep -q "logistics-lab-ci-assume-developer" \
+  || FAIL "logistics-lab-ci missing the assume-developer policy"
+ASSUME_DOC=$(aws iam get-role-policy --role-name logistics-lab-ci \
+  --policy-name logistics-lab-ci-assume-developer --query 'PolicyDocument' --output json 2>/dev/null)
+echo "${ASSUME_DOC}" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); st=d["Statement"]
+assert len(st)==1 and st[0]["Action"]=="sts:AssumeRole", "assume policy is not exactly one AssumeRole"
+assert st[0]["Resource"].endswith(":role/k8s-vanilla-lab-developer"), "assume target is not the developer role"
+' || FAIL "logistics-lab-ci assume-developer policy is not exactly AssumeRole on the developer role"
+DEV_TRUST=$(aws iam get-role --role-name k8s-vanilla-lab-developer \
+  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null)
+echo "${DEV_TRUST}" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+princ=[s["Principal"]["AWS"] for s in d["Statement"] if "AWS" in s.get("Principal",{})]
+assert any(p.endswith(":role/logistics-lab-ci") for p in princ), "developer trust missing logistics-lab-ci"
+' || FAIL "developer role trust does not include logistics-lab-ci"
+OK "IAM by inspection: logistics-lab-ci→developer AssumeRole + developer trusts logistics-lab-ci"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM access, network policies, data layer and registry are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry and app contract are healthy"

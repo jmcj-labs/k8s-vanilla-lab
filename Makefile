@@ -13,7 +13,7 @@ SSH_USER        := ubuntu
 
 .PHONY: help init validate fmt plan apply destroy \
         kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
-        ssh-cp ssh-worker clean bootstrap-aws
+        smoke-app-contract ssh-cp ssh-worker clean bootstrap-aws
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
 
@@ -104,7 +104,18 @@ smoke-test: ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, 
 	fi; \
 	chmod 600 "$$KUBECONFIG_FILE"; \
 	KUBECONFIG="$$KUBECONFIG_FILE" EXPECTED_NODES=$(EXPECTED_NODES) \
+	  CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/smoke-test.sh
+
+smoke-app-contract: ## Verify the deployed app against the platform contract (run AFTER Repo 2 deploys; needs GITHUB_SHA)
+	@KUBECONFIG_FILE=$$(mktemp); \
+	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
+	aws ssm get-parameter --name "/k8s/$(CLUSTER_NAME)/kubeconfig" --with-decryption \
+	  --query Parameter.Value --output text --region $(AWS_REGION) > "$$KUBECONFIG_FILE" \
+	  || { echo "✗ Failed to fetch kubeconfig from SSM"; exit 1; }; \
+	chmod 600 "$$KUBECONFIG_FILE"; \
+	KUBECONFIG="$$KUBECONFIG_FILE" CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
+	  bash scripts/smoke-app-contract.sh
 
 ssh-cp: ## SSH into the control plane node
 	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \
