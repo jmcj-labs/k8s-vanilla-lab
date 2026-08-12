@@ -10,8 +10,9 @@
 # - bootstrap.initdb creates database `logistics`, owner `logistics` and an
 #   auto-generated credentials Secret (logistics-pg-app) — never in Git.
 #   External Secrets arrives in Sprint 3; native Secret until then.
-# - monitoring.enablePodMonitor: metrics on :9187, scraped by
-#   kube-prometheus-stack (its podMonitorSelector is relaxed in install.sh).
+# - Metrics on :9187 scraped via the EXPLICIT PodMonitor
+#   (podmonitor-postgres.yaml): monitoring.enablePodMonitor is deprecated
+#   by CNPG and no longer used here.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -46,6 +47,3 @@ spec:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
     podAntiAffinityType: required
-
-  monitoring:
-    enablePodMonitor: true

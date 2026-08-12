@@ -59,6 +59,16 @@ spec:
         - ports:
             - port: "9091"
               protocol: TCP
+    # Prometheus scrape → JMX exporter metrics (phase 3a — the only CNP
+    # change authorized in that phase)
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: infra
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9404"
+              protocol: TCP
   egress:
     # DNS pinned to kube-dns
     - toEndpoints:

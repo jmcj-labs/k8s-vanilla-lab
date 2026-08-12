@@ -79,6 +79,14 @@ spec:
           - namespaceSelector:
               matchLabels:
                 kubernetes.io/metadata.name: logistics
+    # JMX Prometheus Exporter on :9404 (rules in the versioned ConfigMap);
+    # scraped by the explicit PodMonitor (podmonitor-kafka.yaml)
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: kafka-metrics
+          key: kafka-metrics-config.yml
     config:
       default.replication.factor: 3
       min.insync.replicas: 2

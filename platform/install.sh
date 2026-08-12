@@ -256,8 +256,12 @@ log "✓ Network policies applied (deny IMDS except EBS CSI; logistics default-d
 
 log "Step 10/11: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
 DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"
-kubectl apply -f "${DATA}/cnpg-cluster.yaml"
-kubectl apply -f "${DATA}/kafka-cluster.yaml"
+# Whole directory: clusters, metrics ConfigMap and the explicit PodMonitors
+kubectl apply -f "${DATA}/"
+# CNPG's enablePodMonitor is deprecated and no longer set: remove any
+# operator-generated PodMonitor left behind so it never coexists (and
+# double-scrapes) with the explicit one (cnpg-logistics-pg).
+kubectl -n data delete podmonitor logistics-pg --ignore-not-found >/dev/null 2>&1 || true
 # Wait for BOTH clusters to be healthy BEFORE their network policies land
 # (phase-2 brief: never debug bootstrap and policy at the same time).
 kubectl -n data wait cluster/logistics-pg \
