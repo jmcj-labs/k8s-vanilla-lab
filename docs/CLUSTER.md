@@ -148,6 +148,12 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 - **Refresh manual de variables tras recreate**: `K8S_SERVER`/`K8S_CA_DATA`
   se actualizan a mano en logistics-lab; un canal de publicación de metadatos
   no sensibles es candidato post-S1.
+- **`tofu destroy` no elimina los volúmenes EBS dinámicos del CSI** (PVCs de
+  PG/Kafka): los provisiona el driver en runtime, Tofu no los rastrea, así que
+  quedan **huérfanos (`available`) facturando** tras el destroy. Verificación
+  y borrado manual en el runbook de destroy (`docs/troubleshooting.md`).
+  Automatizar el cleanup por tag `kubernetes.io/created-for/pvc/*` (como ya se
+  hace con las ENIs huérfanas) es candidato S2.
 - **Anti-affinity `required` con 3 workers**: la caída de un worker deja la
   tercera instancia (PG o Kafka) Pending hasta que el nodo vuelve — esperado
   y aceptado; no se suaviza a `preferred` (perdería la garantía de

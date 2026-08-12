@@ -251,6 +251,35 @@ aws s3 rm s3://YOUR-BUCKET/k8s-vanilla-lab/terraform.tfstate
 After manual cleanup, `make destroy` will error on already-deleted resources. Use
 `tofu state rm` to remove each orphaned resource from state before re-deploying.
 
+## After `destroy`: delete the orphaned CSI EBS volumes
+
+`tofu destroy` removes everything Tofu tracks, but the PG/Kafka PVCs are EBS
+volumes provisioned by the EBS CSI driver at runtime — Tofu never sees them.
+Destroying the nodes without first deleting the PVCs leaves those volumes
+`available` (unattached) and **still billing** (~45 GiB gp3 ≈ $0.12/day).
+Always verify and clean them after a destroy:
+
+```bash
+# 1. List orphaned volumes (unattached), with the PVC they came from
+aws ec2 describe-volumes --filters "Name=status,Values=available" \
+  --query 'Volumes[].{id:VolumeId,size:Size,pvc:Tags[?Key==`kubernetes.io/created-for/pvc/name`]|[0].Value}' \
+  --output table --region eu-west-1
+
+# 2. Delete them (only when the cluster is gone and the data is disposable —
+#    real data must be covered by CNPG/etcd backups, S2 piece 1, not by these)
+for VOL in <vol-id> ...; do
+  aws ec2 delete-volume --volume-id "$VOL" --region eu-west-1
+done
+
+# 3. Confirm zero remain
+aws ec2 describe-volumes --filters "Name=status,Values=available" \
+  --query 'length(Volumes)' --output text --region eu-west-1
+```
+
+Automating this in the destroy path (a destroy-time provisioner filtering on
+the `kubernetes.io/created-for/pvc/*` tag, mirroring the orphaned-ENI cleanup)
+is a candidate for Sprint 2.
+
 ## Network policy drops — inspecting with Hubble
 
 Default-deny (`logistics`) and the clusterwide IMDS deny are the #1 suspects
