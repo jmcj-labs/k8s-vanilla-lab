@@ -16,6 +16,12 @@ variable "ci_role_name" {
   default     = "logistics-lab-ci"
 }
 
+variable "developer_role_arn" {
+  description = "ARN of the k8s-vanilla-lab-developer role the app CI may assume (its only non-ECR action)"
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Tags applied to all resources"
   type        = map(string)

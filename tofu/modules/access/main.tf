@@ -50,29 +50,45 @@ resource "aws_iam_role" "access" {
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "IdentityCenterBridge"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${local.account_id}:root"
-        }
-        Action = "sts:AssumeRole"
-        Condition = {
-          ArnLike = {
-            "aws:PrincipalArn" = "arn:aws:iam::${local.account_id}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${each.value.permission_set}_*"
+    Statement = concat(
+      [
+        {
+          Sid    = "IdentityCenterBridge"
+          Effect = "Allow"
+          Principal = {
+            AWS = "arn:aws:iam::${local.account_id}:root"
           }
+          Action = "sts:AssumeRole"
+          Condition = {
+            ArnLike = {
+              "aws:PrincipalArn" = "arn:aws:iam::${local.account_id}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${each.value.permission_set}_*"
+            }
+          }
+        },
+        {
+          Sid    = "CISmokeTest"
+          Effect = "Allow"
+          Principal = {
+            AWS = local.ci_role
+          }
+          Action = "sts:AssumeRole"
         }
-      },
-      {
-        Sid    = "CISmokeTest"
-        Effect = "Allow"
-        Principal = {
-          AWS = local.ci_role
+      ],
+      # The app repo's CI role (logistics-lab-ci) assumes ONLY the developer
+      # role — its deploy pipeline authenticates to the cluster as developer.
+      # Constructed as a string (not a module ref) to avoid an access<->registry
+      # cycle; the registry module grants the reciprocal sts:AssumeRole.
+      each.key == "developer" ? [
+        {
+          Sid    = "AppCIAssumesDeveloper"
+          Effect = "Allow"
+          Principal = {
+            AWS = "arn:aws:iam::${local.account_id}:role/${var.app_ci_role_name}"
+          }
+          Action = "sts:AssumeRole"
         }
-        Action = "sts:AssumeRole"
-      }
-    ]
+      ] : []
+    )
   })
 
   tags = merge(

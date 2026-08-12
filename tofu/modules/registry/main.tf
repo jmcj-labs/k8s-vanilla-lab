@@ -154,3 +154,24 @@ resource "aws_iam_role_policy" "app_ci_ecr" {
     ]
   })
 }
+
+# The app CI's ONLY non-ECR action: assume the developer role to deploy to
+# the cluster. Exactly that role, nothing else.
+resource "aws_iam_role_policy" "app_ci_assume_developer" {
+  count = var.developer_role_arn != "" ? 1 : 0
+
+  name = "${var.ci_role_name}-assume-developer"
+  role = aws_iam_role.app_ci.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AssumeDeveloperRole"
+        Effect   = "Allow"
+        Action   = "sts:AssumeRole"
+        Resource = var.developer_role_arn
+      }
+    ]
+  })
+}
