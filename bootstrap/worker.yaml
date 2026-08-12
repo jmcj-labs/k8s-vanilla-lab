@@ -110,6 +110,51 @@ log "Join command: $${JOIN_COMMAND}"
 # --provider-id, set in common.yaml (Step 7b) before kubeadm join — same
 # mechanism on all nodes, no post-join patch and no RBAC involved.
 
+# Step 3b: ECR credential provider — BEFORE kubeadm join so the kubelet
+# starts with the flags already in place. Private image pulls for the app
+# repositories (Repo 2). Live workers get the same result via
+# scripts/rollout-ecr-credential-provider.sh (cloud-init is first-boot only).
+log "Step 3b/5: Installing ECR credential provider"
+
+# v1.36.1 (protocol credentialprovider.kubelet.k8s.io/v1, stable — valid for
+# K8s 1.35). NOTE: artifacts.k8s.io stopped publishing cloud-provider-aws
+# binaries at v1.30+ (kubernetes/cloud-provider-aws#1324); the staging GCS
+# bucket is the working official source. Its .sha256 lives in the SAME
+# bucket, so THIS pinned checksum (verified against a real download at pin
+# time) is the provenance anchor.
+ECR_CP_VERSION="v1.36.1"
+ECR_CP_SHA256="59a6fc141dc08cd0661d885d2cf8993df42f62cc2bd7a08902dde63f47e0b384"
+ECR_CP_DIR="/etc/kubernetes/image-credential-provider"
+
+mkdir -p "$${ECR_CP_DIR}"
+curl -fsSL -o /tmp/ecr-credential-provider \
+  "https://storage.googleapis.com/k8s-staging-provider-aws/releases/$${ECR_CP_VERSION}/linux/amd64/ecr-credential-provider-linux-amd64"
+if ! echo "$${ECR_CP_SHA256}  /tmp/ecr-credential-provider" | sha256sum -c -; then
+  log "✗ ERROR: ecr-credential-provider checksum mismatch — aborting bootstrap"
+  exit 1
+fi
+install -m 0755 /tmp/ecr-credential-provider "$${ECR_CP_DIR}/ecr-credential-provider"
+rm -f /tmp/ecr-credential-provider
+
+cat > "$${ECR_CP_DIR}/config.yaml" <<'ECRCP_EOF'
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: ecr-credential-provider
+    matchImages:
+      - "*.dkr.ecr.*.amazonaws.com"
+    defaultCacheDuration: "12h"
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+ECRCP_EOF
+
+# Extend KUBELET_EXTRA_ARGS written by common.yaml (Step 7b) — PRESERVING
+# --provider-id. Idempotent: skip if the flag is already present.
+if ! grep -q "image-credential-provider-config" /etc/default/kubelet; then
+  sed -i "s|^KUBELET_EXTRA_ARGS=\(.*\)$|KUBELET_EXTRA_ARGS=\1 --image-credential-provider-config=$${ECR_CP_DIR}/config.yaml --image-credential-provider-bin-dir=$${ECR_CP_DIR}|" /etc/default/kubelet
+fi
+grep -q "provider-id" /etc/default/kubelet || { log "✗ ERROR: --provider-id lost from kubelet args"; exit 1; }
+log "✓ ECR credential provider installed ($${ECR_CP_VERSION})"
+
 # Step 4: Join the cluster
 log "Step 4/5: Joining Kubernetes cluster"
 
