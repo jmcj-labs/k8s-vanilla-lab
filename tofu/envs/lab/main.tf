@@ -171,7 +171,8 @@ module "access" {
 module "registry" {
   source = "../../modules/registry"
 
-  tags = local.common_tags
+  developer_role_arn = module.access.developer_role_arn
+  tags               = local.common_tags
 }
 
 # Worker Module

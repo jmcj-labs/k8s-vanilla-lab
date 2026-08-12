@@ -266,14 +266,67 @@ kubectl -n data delete podmonitor logistics-pg --ignore-not-found >/dev/null 2>&
 # (phase-2 brief: never debug bootstrap and policy at the same time).
 kubectl -n data wait cluster/logistics-pg \
   --for=jsonpath='{.status.phase}'='Cluster in healthy state' --timeout=600s
+# auto.create.topics.enable=false rolls the brokers — wait Ready, then verify
+# the cluster still serves (the smoke's produce/consume is the deeper check).
 kubectl -n data wait kafka/logistics-kafka --for=condition=Ready --timeout=600s
 log "✓ Data layer healthy (PG primary+2 sync replicas; Kafka 3 KRaft nodes)"
 
-log "Step 11/11: Data-namespace network policies (operand-scoped)"
+log "Step 10b/11: KafkaTopics (platform owns the resource; Repo 2 the contract)"
+# apply -f DATA/ is NON-recursive, so topics/ is applied explicitly here.
+kubectl apply -f "${DATA}/topics/"
+kubectl -n data wait --for=condition=Ready kafkatopic \
+  -l app.kubernetes.io/part-of=k8s-vanilla-lab-data --timeout=180s
+log "✓ KafkaTopics Ready (shipment.created, route.calculated — RF3, minISR2)"
+
+log "Step 10c/11: Projecting data credentials into logistics (reentrant)"
+# The app (developer RBAC) cannot read Secrets in data. Project the minimum
+# it needs into logistics, stripping all source-object metadata. Rotation
+# until External Secrets (S3) = re-run this. Values never printed / no temp
+# files (apply by pipe).
+wait_secret() {  # ns name — poll up to 300s, clear error on timeout
+  local ns="$1" name="$2" elapsed=0
+  until kubectl -n "${ns}" get secret "${name}" >/dev/null 2>&1; do
+    if [ "${elapsed}" -ge 300 ]; then
+      echo "✗ source secret ${ns}/${name} not present after 300s" >&2
+      exit 1
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+}
+wait_secret data logistics-pg-app
+# PG: type + full data, no source-object metadata.
+kubectl -n data get secret logistics-pg-app -o json \
+  | python3 -c '
+import json,sys
+s=json.load(sys.stdin)
+json.dump({"apiVersion":"v1","kind":"Secret",
+     "metadata":{"name":"logistics-pg-app","namespace":"logistics"},
+     "type":s["type"],"data":s["data"]},sys.stdout)' \
+  | kubectl apply -f - >/dev/null
+wait_secret data logistics-kafka-cluster-ca-cert
+# Kafka: ONLY the CA cert — never ca.key, PKCS12 or passwords.
+kubectl -n data get secret logistics-kafka-cluster-ca-cert -o json \
+  | python3 -c '
+import json,sys
+s=json.load(sys.stdin)
+json.dump({"apiVersion":"v1","kind":"Secret",
+     "metadata":{"name":"logistics-kafka-cluster-ca-cert","namespace":"logistics"},
+     "type":"Opaque","data":{"ca.crt":s["data"]["ca.crt"]}},sys.stdout)' \
+  | kubectl apply -f - >/dev/null
+log "✓ Projected logistics/logistics-pg-app and logistics/logistics-kafka-cluster-ca-cert (ca.crt only)"
+
+log "Step 11/11: Network policies — data operands + logistics app contract"
 # By operand labels, not the whole namespace: the operators stay free.
 kubectl apply -f "${POLICIES}/cnp-data-postgres.yaml"
 kubectl apply -f "${POLICIES}/cnp-data-kafka.yaml"
-log "✓ Data network policies applied (PG + Kafka operands, default-deny with openings)"
+# App contract (Repo 2): Prometheus scrape of app pods. No egress-to-Gateway
+# policy: traffic to the Cilium Gateway VIP is to-proxy redirected before
+# egress policy is evaluated, so a client-side CNP neither gates nor is
+# needed for it (INCIDENTS #10). allowedRoutes already scopes routes to
+# logistics.
+kubectl apply -f "${POLICIES}/cnp-logistics-metrics.yaml"
+log "✓ Network policies applied (data operands + logistics metrics contract)"
 
 log "=== Platform layer installed successfully ==="
 log "Grafana NodePort: kubectl -n infra get svc kube-prometheus-stack-grafana"

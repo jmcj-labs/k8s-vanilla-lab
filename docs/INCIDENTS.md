@@ -186,3 +186,35 @@ listener, `toEntities: kube-apiserver` + operator 8443 in
 [`cnp-data-kafka.yaml`](../platform/policies/cnp-data-kafka.yaml). Verified
 by the full smoke: RF3 produce/consume from logistics, broker-loss
 tolerance, neutral namespace denied with Hubble drops.
+
+## 10. Egress to the Gateway VIP is not gated by a client-side network policy
+
+**Symptom**: building the app contract (brief 3b entregable 5b), a
+CiliumNetworkPolicy meant to allow ONLY `traffic-generator` pods egress to
+the shared Gateway (`toEntities: [ingress]`, TCP/443) neither restricted nor
+was needed. Live fixture proof: a `logistics` pod WITH the label reached the
+Gateway (HTTP 200) — and so did a pod WITHOUT it (HTTP 200). The intended
+negative assertion could never pass.
+
+**Root cause**: traffic to the Cilium Gateway LoadBalancer VIP is
+`to-proxy` redirected to the built-in Envoy at the datapath BEFORE the pod's
+L3/L4 egress policy toward the destination is evaluated. Hubble shows the
+destination as `reserved:world` with verdict `to-proxy FORWARDED`, and the
+endpoint's realized BPF policy carries no matching egress allow. The
+`reserved:ingress` identity governs INGRESS from Envoy to the backend (which
+is why the `logistics` default-deny opens `fromEntities: [ingress]`), not the
+client's egress to the Gateway. Control confirmed the default-deny itself
+works: the same pod to another `world` IP (1.1.1.1:443) times out.
+
+**Fix**: remove the client-side egress CNP (it is a no-op) and keep the
+smoke fixture positive-only — "a `logistics` pod reaches the Gateway over
+HTTPS with SNI". No `world`/`host`/`cluster` shortcut was taken, per the
+brief's tripwire.
+
+Note on `allowedRoutes`: it controls **route ownership** (which namespaces
+may attach HTTPRoutes to the Gateway — scoped to `logistics` here), NOT
+**request authorization** (which client pods may send requests through the
+Gateway). So it does not substitute for the missing egress control. Risk
+accepted for the MVP: there is no requirement to isolate clients *within*
+`logistics` from each other. The real future control is L7/auth at the
+Gateway plus per-service network policies — Phase 1.5 (CLUSTER.md §5).
