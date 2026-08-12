@@ -17,9 +17,15 @@ variable "ci_role_name" {
 }
 
 variable "developer_role_arn" {
-  description = "ARN of the k8s-vanilla-lab-developer role the app CI may assume (its only non-ECR action)"
+  description = "ARN of the k8s-vanilla-lab-developer role the app CI may assume (its only non-ECR action). Used as the policy Resource; may be unknown at plan."
   type        = string
   default     = ""
+}
+
+variable "attach_assume_developer" {
+  description = "Whether to attach the assume-developer policy to the app CI role. Static bool (known at plan) so count never depends on an unknown ARN — INCIDENTS #11."
+  type        = bool
+  default     = false
 }
 
 variable "tags" {

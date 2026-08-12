@@ -70,6 +70,15 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Plan the lab stack against an EMPTY state (local backend, everything
+      # to create). This is the coronation scenario and the ONLY place a
+      # count/for_each depending on a known-after-apply value surfaces —
+      # INCIDENTS #11. Runs before the stateful plan so the invariant is
+      # checked even if the real state hides the bug.
+      - name: Plan from empty state (INCIDENTS #11 guardrail)
+        run: make plan-empty
+        working-directory: .
+
       - name: Generate backend.hcl
         env:
           TF_BACKEND_BUCKET: ${{ vars.TF_BACKEND_BUCKET }}

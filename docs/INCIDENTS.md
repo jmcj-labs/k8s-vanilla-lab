@@ -218,3 +218,34 @@ Gateway). So it does not substitute for the missing egress control. Risk
 accepted for the MVP: there is no requirement to isolate clients *within*
 `logistics` from each other. The real future control is L7/auth at the
 Gateway plus per-service network policies — Phase 1.5 (CLUSTER.md §5).
+
+## 11. `count`/`for_each` on unknown values — latent until a plan from empty state
+
+**Symptom**: after the cluster was destroyed, the first `tofu plan` against the
+now-empty state failed:
+`Error: Invalid count argument … count value depends on resource attributes
+that cannot be determined until apply` at
+`modules/registry/main.tf:161`. Every prior PR's Validate had passed —
+because the resources already existed in state, so the values the `count`
+read were known. Nothing in the code had changed; only the state emptied.
+
+**Root cause**: `count = var.developer_role_arn != "" ? 1 : 0`, where
+`developer_role_arn` comes from `module.access` and is **unknown-after-apply**
+on a create-from-scratch plan. OpenTofu forbids `count`/`for_each` depending
+on a value not known until apply — it cannot expand the resource. Same family
+as the fresh-safe trust of PR #36 and INCIDENTS' recurring theme: **the graph
+does not plan from zero**. Bugs that only touch known-after-apply values stay
+invisible as long as the state is populated, and surface the moment you plan
+against an empty state — i.e. exactly at the coronation apply.
+
+**Fix**: gate the `count` on a STATIC boolean (`attach_assume_developer`,
+known at plan), keeping `developer_role_arn` only as the policy **Resource**
+(Resources may be unknown at plan; `count`/`for_each` may not). Swept the
+whole graph for the family — the only other candidate,
+`worker` `count = length(var.ecr_repository_arns) > 0`, is safe because the
+list length is fixed by a static `for_each` even when the ARNs are unknown.
+
+**Guardrail (so the family can never hide again)**: a permanent Validate job
+runs `tofu plan` against an **empty local-backend state** (`make plan-empty`),
+turning "plans from zero" into a CI invariant. Verified: `47 to add, 0 change,
+0 destroy`.
