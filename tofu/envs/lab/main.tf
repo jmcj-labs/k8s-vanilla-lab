@@ -167,6 +167,13 @@ module "access" {
   tags         = local.common_tags
 }
 
+# Private ECR registry + dedicated CI role for the app repository (Repo 2)
+module "registry" {
+  source = "../../modules/registry"
+
+  tags = local.common_tags
+}
+
 # Worker Module
 module "worker" {
   source = "../../modules/worker"
@@ -180,6 +187,7 @@ module "worker" {
   my_ip                           = var.my_ip
   control_plane_security_group_id = module.control_plane.security_group_id
   user_data_base64                = data.cloudinit_config.worker.rendered
+  ecr_repository_arns             = module.registry.repository_arns
   cluster_name                    = var.cluster_name
   worker_count                    = var.worker_count
   capacity_type                   = var.worker_capacity_type

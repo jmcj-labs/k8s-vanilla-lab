@@ -169,6 +169,37 @@ resource "aws_iam_role_policy" "worker_ssm" {
   })
 }
 
+# ECR pull for the app images (Repo 2): auth token is account-wide by AWS
+# design; layer/image reads are scoped to exactly the app repositories.
+resource "aws_iam_role_policy" "worker_ecr_pull" {
+  count = length(var.ecr_repository_arns) > 0 ? 1 : 0
+
+  name = "${var.name}-worker-ecr-pull"
+  role = aws_iam_role.worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ECRAuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PullAppRepositories"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ]
+        Resource = var.ecr_repository_arns
+      }
+    ]
+  })
+}
+
 # EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
 resource "aws_iam_role_policy_attachment" "worker_ebs_csi" {
   role       = aws_iam_role.worker.name
