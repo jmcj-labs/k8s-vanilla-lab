@@ -65,7 +65,7 @@ app.
 | `skipPhases: addon/kube-proxy` + Cilium KPR=true | kube-proxy nunca existe; eBPF hace su trabajo — requiere `k8sServiceHost/Port` cableados para evitar el deadlock de bootstrap | [ADR-003](decisions/ADR-003-cilium-ebpf.md) |
 | Kubeconfig y join data en SSM | CI opera el cluster sin abrir SSH al runner | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) |
 | IMDS hop limit **3** (no 1, no 2) | El tunnel de Cilium añade un salto al camino de vuelta pod←IMDS; con 2 el EBS CSI muere sin credenciales | [INCIDENTS #4](INCIDENTS.md) |
-| `--provider-id` en el kubelet (los 3 nodos, pre-init/join) | kubeadm vanilla deja `providerID` vacío y el EBS CSI lo exige; un solo mecanismo, sin RBAC ni patches | [INCIDENTS #3](INCIDENTS.md) |
+| `--provider-id` en el kubelet (los 4 nodos, pre-init/join) | kubeadm vanilla deja `providerID` vacío y el EBS CSI lo exige; un solo mecanismo, sin RBAC ni patches | [INCIDENTS #3](INCIDENTS.md) |
 | `controller.region` explícito en el EBS CSI | Defensa en profundidad: no depender de IMDS para descubrir la región | [INCIDENTS #4](INCIDENTS.md) |
 | Gateway API CRDs **antes** del helm install de Cilium | El operator solo habilita su controller de Gateway API si las CRDs ya existen | `bootstrap/control-plane.yaml` |
 | Pool LB-IPAM (`172.20.255.0/24`, solo ns `infra`) | Sin cloud-controller nadie asigna IP al Service del Gateway y `Programmed` nunca llega; la IP es virtual, no anunciada | [INCIDENTS #7](INCIDENTS.md) |
@@ -79,6 +79,7 @@ app.
 | Sin `jobs` en el RBAC de developer | Migraciones por auto-migrate (DDL idempotente + advisory lock), no Jobs | brief 3b |
 | SA `default` con `automountServiceAccountToken: false` | Contrato con Repo 2: los charts no montan token de SA | brief 3b |
 | PodMonitor genérico de app en plataforma | Selecciona por `app.kubernetes.io/part-of: logistics-lab`; Repo 2 solo pone el label y el puerto `metrics` | brief 3b |
+| **Contrato de pods de Repo 2** (lo exige `make smoke-app-contract`) | Cada Deployment lleva `app.kubernetes.io/name=<servicio>`; el container principal se llama **exactamente** `<servicio>`; cada servicio expone en el puerto `metrics` la métrica `logistics_service_info{service="<servicio>"} 1` | brief 3b |
 | Proyección de secrets a `logistics` (no acceso a `data`) | El developer no lee Secrets en `data`; se proyecta el mínimo (PG app + Kafka `ca.crt`) sin metadata del origen | brief 3b |
 
 ## 4. Operación
@@ -97,7 +98,7 @@ logistics-lab → `workflow_dispatch` (rebuild→push SHA→deploy→e2e) →
 
 **Smoke test** (`make smoke-test`, también al final del workflow Apply):
 4/4 nodos Ready · cero pods kube-proxy · `cilium-dbg` reporta
-KubeProxyReplacement True · providerID en los 3 nodos · PVC gp3 dinámico
+KubeProxyReplacement True · providerID en los 4 nodos · PVC gp3 dinámico
 Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
 `Programmed` · operators CNPG y Strimzi Ready.
 

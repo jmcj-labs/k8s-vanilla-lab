@@ -322,7 +322,11 @@ kubectl -n logistics get secret logistics-pg-app logistics-kafka-cluster-ca-cert
 
 ### Hubble verification of the metrics CNP
 
-Only Prometheus (infra) may scrape app pods on the `metrics` port:
+Prometheus (infra) is the only ADDITIONAL cross-namespace source allowed to
+scrape app pods on the `metrics` port. Pods within `logistics` can also reach
+`metrics` via the existing intra-namespace allow — the CNP does not isolate
+metrics per service (that is Phase 1.5). To confirm the cross-namespace
+denial:
 
 ```bash
 # positive: the target is up

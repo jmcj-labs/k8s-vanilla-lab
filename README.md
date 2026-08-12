@@ -127,6 +127,11 @@ variables in that repo need refreshing — `K8S_SERVER` and `K8S_CA_DATA`
 [docs/troubleshooting.md](docs/troubleshooting.md) and CLUSTER.md §4. Verify
 the deployed app with `make smoke-app-contract GITHUB_SHA=<sha>`.
 
+**Pod contract** (asserted by `make smoke-app-contract`): each Deployment
+carries `app.kubernetes.io/name=<service>`, its main container is named
+**exactly** `<service>`, and each service exposes on the `metrics` port the
+metric `logistics_service_info{service="<service>"} 1`.
+
 ## Access (IAM — ADR-005)
 
 Daily access authenticates against the API server with IAM via

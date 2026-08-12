@@ -703,61 +703,60 @@ done
 OK "Gateway: logistics pod reaches the shared Gateway over HTTPS with SNI (HTTP 200)"
 
 # 12e. IAM by EXACT inspection (never assumption): the runner cannot obtain
-# Repo 2's OIDC identity, so verify the exact policy shapes.
-# (a) logistics-lab-ci inline policy set is exactly the two expected; no
-#     managed policies attached; ECR actions/resources and the assume are exact.
-CI_INLINE=$(aws iam list-role-policies --role-name logistics-lab-ci \
-  --query 'sort(PolicyNames)' --output json 2>/dev/null || echo '[]')
-echo "${CI_INLINE}" | python3 -c '
-import json,sys
-got=json.load(sys.stdin)
-want=["logistics-lab-ci-assume-developer","logistics-lab-ci-ecr-push"]
-assert got==want, f"inline policy set is {got}, expected {want}"' \
+# Repo 2's OIDC identity, so verify the exact policy shapes with FULL ARNs
+# anchored to this account/region (endswith would accept another account).
+ACC="${ACCOUNT_ID}"
+export ACC AWS_REGION
+DEV_ARN="arn:aws:iam::${ACC}:role/k8s-vanilla-lab-developer"
+CI_ARN="arn:aws:iam::${ACC}:role/logistics-lab-ci"
+ECR_ARNS=$(python3 -c 'import os;acc=os.environ["ACC"];r=os.environ["AWS_REGION"];print(",".join(f"arn:aws:ecr:{r}:{acc}:repository/{n}" for n in ["shipments-api","routing","tracking-events","traffic-generator"]))')
+
+# (a) logistics-lab-ci: inline set EXACTLY the two; zero managed; ECR actions
+#     + FULL resource ARN set (set equality); assume = exactly one AssumeRole
+#     on the full developer ARN.
+CI_INLINE=$(aws iam list-role-policies --role-name logistics-lab-ci --query 'sort(PolicyNames)' --output json 2>/dev/null || echo '[]')
+echo "${CI_INLINE}" | python3 -c 'import json,sys;assert json.load(sys.stdin)==["logistics-lab-ci-assume-developer","logistics-lab-ci-ecr-push"]' \
   || FAIL "logistics-lab-ci inline policy set is not exactly the two expected"
-CI_MANAGED=$(aws iam list-attached-role-policies --role-name logistics-lab-ci \
-  --query 'AttachedPolicies' --output json 2>/dev/null || echo '[]')
-[ "$(echo "${CI_MANAGED}" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = "0" ] \
+aws iam list-attached-role-policies --role-name logistics-lab-ci --query 'AttachedPolicies' --output json 2>/dev/null \
+  | python3 -c 'import json,sys;assert json.load(sys.stdin)==[]' \
   || FAIL "logistics-lab-ci has unexpected managed policies attached"
 aws iam get-role-policy --role-name logistics-lab-ci --policy-name logistics-lab-ci-ecr-push \
-  --query 'PolicyDocument' --output json 2>/dev/null | python3 -c '
-import json,sys
+  --query 'PolicyDocument' --output json 2>/dev/null | ECR_ARNS="${ECR_ARNS}" python3 -c '
+import json,sys,os
 st={s["Sid"]:s for s in json.load(sys.stdin)["Statement"]}
-assert st["ECRAuthToken"]["Action"]=="ecr:GetAuthorizationToken" and st["ECRAuthToken"]["Resource"]=="*"
-push=st["PushPullAppRepositories"]
-want=sorted(["ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"])
-assert sorted(push["Action"])==want, "ECR push actions differ from expected set"
-res=push["Resource"] if isinstance(push["Resource"],list) else [push["Resource"]]
-repos={"shipments-api","routing","tracking-events","traffic-generator"}
-assert all(r.split("/")[-1] in repos for r in res), "ECR resources are not exactly the four repos"
-assert len(res)==4, "ECR push targets not exactly four repositories"
-' || FAIL "logistics-lab-ci ECR policy actions/resources are not exact"
+assert set(st)=={"ECRAuthToken","PushPullAppRepositories"}, "unexpected ECR policy Sids"
+a=st["ECRAuthToken"]; assert a["Effect"]=="Allow" and a["Action"]=="ecr:GetAuthorizationToken" and a["Resource"]=="*"
+p=st["PushPullAppRepositories"]; assert p["Effect"]=="Allow"
+assert set(p["Action"])=={"ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"}, "ECR push action set differs"
+res=p["Resource"] if isinstance(p["Resource"],list) else [p["Resource"]]
+assert set(res)==set(os.environ["ECR_ARNS"].split(",")), "ECR resource ARN set is not exactly the four repos"
+' || FAIL "logistics-lab-ci ECR policy is not exact (actions/resources/Sids)"
 aws iam get-role-policy --role-name logistics-lab-ci --policy-name logistics-lab-ci-assume-developer \
-  --query 'PolicyDocument' --output json 2>/dev/null | python3 -c '
-import json,sys
+  --query 'PolicyDocument' --output json 2>/dev/null | DEV_ARN="${DEV_ARN}" python3 -c '
+import json,sys,os
 st=json.load(sys.stdin)["Statement"]
-assert len(st)==1 and st[0]["Action"]=="sts:AssumeRole" and st[0]["Resource"].endswith(":role/k8s-vanilla-lab-developer")
-' || FAIL "assume-developer policy is not exactly AssumeRole on the developer role"
-# (b) developer trust: the app-CI statement is root + ArnEquals on exactly
-#     logistics-lab-ci; the Identity Center and infra-CI principals are kept.
-aws iam get-role --role-name k8s-vanilla-lab-developer \
-  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c '
-import json,sys
-st=json.load(sys.stdin)["Statement"]
-sids={s["Sid"]:s for s in st if "Sid" in s}
-appci=sids["AppCIAssumesDeveloper"]
-assert appci["Principal"]["AWS"].endswith(":root"), "app-CI principal is not account root"
-cond=appci["Condition"]["ArnEquals"]["aws:PrincipalArn"]
-assert cond.endswith(":role/logistics-lab-ci"), f"ArnEquals is {cond}"
-assert "IdentityCenterBridge" in sids and "CISmokeTest" in sids, "existing principals not preserved"
-' || FAIL "developer trust: app-CI statement not root+ArnEquals, or existing principals dropped"
-# (c) app CI must be ABSENT from the platform-admin trust.
-aws iam get-role --role-name k8s-vanilla-lab-platform-admin \
-  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c '
-import json,sys
-doc=json.dumps(json.load(sys.stdin))
-assert "logistics-lab-ci" not in doc, "logistics-lab-ci leaked into platform-admin trust"
-' || FAIL "logistics-lab-ci must NOT appear in platform-admin trust"
-OK "IAM exact: logistics-lab-ci policies/ECR exact, developer trust root+ArnEquals, platform-admin clean"
+assert len(st)==1
+s=st[0]; assert s["Effect"]=="Allow" and s["Action"]=="sts:AssumeRole" and s["Resource"]==os.environ["DEV_ARN"]
+' || FAIL "assume-developer policy is not exactly AssumeRole on the full developer ARN"
+
+# (b) developer trust: EXACT Sid set; app-CI = root of THIS account + ArnEquals
+#     on the FULL ci ARN; Identity Center + infra-CI statements preserved.
+aws iam get-role --role-name k8s-vanilla-lab-developer --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null \
+  | ACC="${ACC}" CI_ARN="${CI_ARN}" python3 -c '
+import json,sys,os
+st={s["Sid"]:s for s in json.load(sys.stdin)["Statement"]}
+assert set(st)=={"IdentityCenterBridge","CISmokeTest","AppCIAssumesDeveloper"}, f"developer trust Sid set differs: {set(st)}"
+a=st["AppCIAssumesDeveloper"]
+assert a["Effect"]=="Allow" and a["Action"]=="sts:AssumeRole"
+assert a["Principal"]["AWS"]=="arn:aws:iam::"+os.environ["ACC"]+":root", "app-CI principal is not this account root"
+assert a["Condition"]["ArnEquals"]["aws:PrincipalArn"]==os.environ["CI_ARN"], "ArnEquals is not the full ci ARN"
+' || FAIL "developer trust is not exactly the expected three statements / full ARNs"
+
+# (c) app CI ABSENT from the platform-admin trust.
+aws iam get-role --role-name k8s-vanilla-lab-platform-admin --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null \
+  | python3 -c 'import json,sys;assert "logistics-lab-ci" not in json.dumps(json.load(sys.stdin))' \
+  || FAIL "logistics-lab-ci must NOT appear in platform-admin trust"
+OK "IAM exact: full-ARN set equality on logistics-lab-ci policies + developer trust; platform-admin clean"
 
 echo ""
 echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry and app contract are healthy"
