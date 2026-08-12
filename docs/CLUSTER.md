@@ -15,7 +15,7 @@ este documento no lo duplica, lo referencia.
 | Repo | `jmcj-labs/k8s-vanilla-lab` (GitHub) |
 | Región / cuenta | `eu-west-1` · cuenta del lab (rol OIDC en la Variable `AWS_ROLE_ARN`) |
 | Levantar | Actions → **Apply** → confirm `apply` (o `make apply` + `make platform` + `make smoke-test` en local) |
-| Destruir | Actions → **Destroy** → confirm `destroy` (cron nocturno pausado durante el sprint) |
+| Destruir | Actions → **Destroy** → confirm `destroy` (borra también los repos ECR y sus imágenes: `force_delete`) (cron nocturno pausado durante el sprint) |
 | Estado | Efímero por diseño: se destruye y recrea sin ceremonia; nada en el cluster es fuente de verdad |
 
 ## 2. Arquitectura
@@ -43,6 +43,7 @@ tunnel, masquerade iptables).
 | CloudNativePG operator | chart 0.29.0 | chart |
 | Strimzi operator | chart 1.1.0 | chart |
 | kube-prometheus-stack | chart 88.2.0 | chart |
+| ecr-credential-provider | v1.36.1 (binario por SHA-256; staging bucket oficial, artifacts.k8s.io roto para >=1.30) | binario |
 | aws-iam-authenticator | v0.7.18 (binario con SHA-256; imagen EKS Distro `v0.7.18-cvefix-eks-1-35-12` por digest — upstream no publica imagen) | binario + digest |
 | OpenTofu | 1.8.0 | CI |
 
@@ -72,6 +73,7 @@ app.
 | `user_data_base64` (nunca `user_data`) | cloud-init va gzip+base64; el contrato del provider lo exige y su violación rompe updates in-place | [INCIDENTS #5](INCIDENTS.md) |
 | SG del CP sin reglas inline (todo standalone) | Mezclar inline + standalone borra reglas ajenas en cada apply | [INCIDENTS #6](INCIDENTS.md) |
 | Acceso diario vía IAM (aws-iam-authenticator, backend DynamicFile) | Credenciales STS efímeras por identidad, revocación = membresía de grupo en Identity Center; el kubeconfig admin queda solo como break-glass | [ADR-005](decisions/ADR-005-iam-access.md) |
+| Registro ECR privado, tags inmutables por SHA, roles CI separados infra/app | Sin pull-secrets (instance role + credential provider), rollbacks reproducibles, separación de deberes | [ADR-006](decisions/ADR-006-ecr-registry.md) |
 | Perfiles de acceso, no personas (`platform/access/profiles.yaml`) | Alta/baja de humanos sin tocar el repo: mappings y RBAC se renderizan del mismo fichero | [ADR-005](decisions/ADR-005-iam-access.md) |
 
 ## 4. Operación

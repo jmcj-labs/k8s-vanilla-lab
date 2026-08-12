@@ -25,7 +25,9 @@ Evolución de `k8s-vanilla-lab` en main, sin ramas. Cambios (todos validados en 
 1. Exposición del Gateway: NodePort vs NLB manual vs hostPort (sin cloud-controller no hay LB automático)
 2. Sizing cluster PG (CNPG) y Kafka KRaft 1 broker (Strimzi)
 3. Topología de namespaces definitiva + NetworkPolicies base
-4. Registry de imágenes: ECR vs GHCR
+4. Registry de imágenes: ECR vs GHCR → **CERRADA (2026-08-12): ECR** (tags
+   inmutables por SHA, pull por instance role sin pull-secrets, roles CI
+   separados infra/app; ver [ADR-006](decisions/ADR-006-ecr-registry.md))
 5. Servicios del MVP (propuesta: shipments-api, routing, tracking-events + traffic-generator)
 
 ### Día 3-5 — logistics-lab MVP (Cursor/Claude Code)

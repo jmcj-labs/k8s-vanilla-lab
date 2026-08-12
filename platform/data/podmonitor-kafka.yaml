@@ -1,0 +1,16 @@
+# Explicit PodMonitor for the Kafka brokers (:9404, JMX Prometheus Exporter
+# injected by Strimzi via metricsConfig). Port name verified against the
+# deployed pod spec (Strimzi names it tcp-prometheus).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: kafka-logistics
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-data
+spec:
+  selector:
+    matchLabels:
+      strimzi.io/pool-name: dual
+  podMetricsEndpoints:
+    - port: tcp-prometheus

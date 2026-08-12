@@ -156,6 +156,22 @@ jobs:
           make platform CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
 
+      - name: Roll out ECR credential provider to live workers
+        working-directory: .
+        env:
+          CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          # Reentrant, one worker at a time with health gates and rollback.
+          # No SSH (the runner cannot reach port 22) — Kubernetes-native Jobs.
+          KUBECONFIG_FILE=$(mktemp)
+          trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
+          aws ssm get-parameter \
+            --name "/k8s/${CLUSTER_NAME}/kubeconfig" --with-decryption \
+            --query Parameter.Value --output text --region "${AWS_REGION}" > "${KUBECONFIG_FILE}"
+          chmod 600 "${KUBECONFIG_FILE}"
+          KUBECONFIG="${KUBECONFIG_FILE}" bash scripts/rollout-ecr-credential-provider.sh
+
       - name: Install aws-iam-authenticator client (pinned)
         working-directory: .
         run: |

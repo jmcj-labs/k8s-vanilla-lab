@@ -272,6 +272,57 @@ PERMISSIONS_POLICY=$(cat <<JSON
       ]
     },
     {
+      "Sid": "ECRManageAppRepositories",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DeleteRepository",
+        "ecr:DeleteLifecyclePolicy",
+        "ecr:DescribeRepositories",
+        "ecr:GetLifecyclePolicy",
+        "ecr:ListTagsForResource",
+        "ecr:PutImageScanningConfiguration",
+        "ecr:PutImageTagMutability",
+        "ecr:PutLifecyclePolicy",
+        "ecr:TagResource",
+        "ecr:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:ecr:*:${ACCOUNT_ID}:repository/shipments-api",
+        "arn:aws:ecr:*:${ACCOUNT_ID}:repository/routing",
+        "arn:aws:ecr:*:${ACCOUNT_ID}:repository/tracking-events",
+        "arn:aws:ecr:*:${ACCOUNT_ID}:repository/traffic-generator"
+      ]
+    },
+    {
+      "Sid": "ReadOIDCProviderForTrust",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetOpenIDConnectProvider",
+        "iam:ListOpenIDConnectProviders"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMManageAppCIRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:ListRolePolicies",
+        "iam:PutRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${ACCOUNT_ID}:role/logistics-lab-ci"
+    },
+    {
       "Sid": "AssumeAccessRolesForRBACSmoke",
       "Effect": "Allow",
       "Action": "sts:AssumeRole",

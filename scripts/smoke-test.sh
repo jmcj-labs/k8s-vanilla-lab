@@ -480,5 +480,69 @@ done
 [ -n "${DATA_DROP}" ] || FAIL "neutral→data denial did not appear as a Hubble DROP"
 OK "Data policies: neutral namespace denied to PG and Kafka (Hubble DROP confirmed)"
 
+# ── 11. Registry (ECR) + app CI role + platform metrics ──────────────────────
+APP_REPOS="shipments-api routing tracking-events traffic-generator"
+CI_ROLE="logistics-lab-ci"
+
+# 11a. Four ECR repositories with the required config (via API, not state)
+for REPO in ${APP_REPOS}; do
+  REPO_JSON=$(aws ecr describe-repositories --repository-names "${REPO}" \
+    --region "${AWS_REGION}" --output json 2>/dev/null) \
+    || FAIL "ECR repository ${REPO} not found"
+  MUT=$(echo "${REPO_JSON}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["repositories"][0]["imageTagMutability"])')
+  SCAN=$(echo "${REPO_JSON}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["repositories"][0]["imageScanningConfiguration"]["scanOnPush"])')
+  ENC=$(echo "${REPO_JSON}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["repositories"][0]["encryptionConfiguration"]["encryptionType"])')
+  [ "${MUT}" = "IMMUTABLE" ] || FAIL "${REPO}: tag mutability ${MUT}, expected IMMUTABLE"
+  [ "${SCAN}" = "True" ]     || FAIL "${REPO}: scan on push is ${SCAN}"
+  [ "${ENC}" = "AES256" ]    || FAIL "${REPO}: encryption ${ENC}, expected AES256"
+  aws ecr get-lifecycle-policy --repository-name "${REPO}" --region "${AWS_REGION}" >/dev/null 2>&1 \
+    || FAIL "${REPO}: no lifecycle policy"
+done
+OK "ECR: 4 repositories IMMUTABLE + scan-on-push + AES256 + lifecycle"
+
+# 11b. App CI role trust scoped to the app repo's main/tags — never a wildcard
+CI_TRUST=$(aws iam get-role --role-name "${CI_ROLE}" \
+  --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null) \
+  || FAIL "CI role ${CI_ROLE} not found"
+echo "${CI_TRUST}" | python3 -c '
+import json,sys
+doc=json.load(sys.stdin)
+subs=doc["Statement"][0]["Condition"]["StringLike"]["token.actions.githubusercontent.com:sub"]
+subs=subs if isinstance(subs,list) else [subs]
+assert all(s.startswith("repo:jmcj-labs/logistics-lab:") for s in subs), f"trust not scoped to the app repo: {subs}"
+assert not any(s=="repo:*" or ":*:" in s or s.endswith(":*") and "logistics-lab" not in s for s in subs), f"wildcard too broad: {subs}"
+' || FAIL "CI role trust policy is not correctly scoped to jmcj-labs/logistics-lab"
+OK "logistics-lab-ci trust scoped to jmcj-labs/logistics-lab (main + tags)"
+
+# 11c. Prometheus scrapes PostgreSQL and Kafka: up==1 and real samples.
+# Bounded retries cover the scrape interval (~30s) after a fresh apply.
+# The prometheus container has no shell, so query from a throwaway busybox
+# pod; `grep -o '{.*}'` isolates the JSON from kubectl's "pod deleted" line.
+PROM="http://kube-prometheus-stack-prometheus.infra.svc.cluster.local:9090"
+prom_result_count() {
+  local q="$1"
+  kubectl -n infra run "smoke-promq-$$" --rm -i --restart=Never --image=busybox:1.36 -- \
+    sh -c "wget -qO- '${PROM}/api/v1/query?query=$1'" 2>/dev/null \
+    | grep -o '{.*}' \
+    | python3 -c 'import json,sys
+try: print(len(json.load(sys.stdin)["data"]["result"]))
+except Exception: print(0)' 2>/dev/null || echo 0
+}
+prom_expect_nonempty() {
+  local q="$1" label="$2" count
+  for _ in $(seq 1 20); do
+    count=$(prom_result_count "$q")
+    [ "${count:-0}" -gt 0 ] && { OK "${label}"; return 0; }
+    sleep 6
+  done
+  FAIL "${label}: no samples after ~2min"
+}
+# up==1 for both PodMonitor jobs (cnpg on 9187, kafka on 9404)
+prom_expect_nonempty 'up{container="postgres"}==1' "Prometheus: PostgreSQL targets up==1"
+prom_expect_nonempty 'up{namespace="data",endpoint="tcp-prometheus"}==1' "Prometheus: Kafka targets up==1"
+# at least one concrete cnpg_* and one concrete kafka_* metric has samples
+prom_expect_nonempty 'cnpg_collector_up' "Metric cnpg_collector_up has samples"
+prom_expect_nonempty 'kafka_server_replicamanager_leadercount' "Metric kafka_server_* has samples"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM access, network policies and data layer are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM access, network policies, data layer and registry are healthy"

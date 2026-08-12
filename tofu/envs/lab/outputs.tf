@@ -62,3 +62,13 @@ output "developer_role_arn" {
   description = "Stable IAM role for namespace-scoped developer access (aws-iam-authenticator)"
   value       = module.access.developer_role_arn
 }
+
+output "ecr_repository_urls" {
+  description = "ECR repository URLs for logistics-lab images (tagged by commit SHA)"
+  value       = module.registry.repository_urls
+}
+
+output "logistics_lab_ci_role_arn" {
+  description = "OIDC CI role for jmcj-labs/logistics-lab (set as AWS_ROLE_ARN in Repo 2)"
+  value       = module.registry.app_ci_role_arn
+}

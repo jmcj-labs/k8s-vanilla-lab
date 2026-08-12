@@ -1,0 +1,19 @@
+# Explicit PodMonitor for the PostgreSQL instances (:9187).
+#
+# CNPG's monitoring.enablePodMonitor is deprecated — this replaces the
+# operator-generated one (named `logistics-pg`; install.sh removes any
+# leftover so both never coexist and double-scrape). Distinct name on
+# purpose to avoid fighting the operator's GC over the same object.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cnpg-logistics-pg
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-data
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: logistics-pg
+  podMetricsEndpoints:
+    - port: metrics
