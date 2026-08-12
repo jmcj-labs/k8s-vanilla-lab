@@ -242,9 +242,12 @@ resource "aws_instance" "worker" {
     dynamic "spot_options" {
       for_each = var.capacity_type == "spot" ? [1] : []
       content {
-        # Note: 'stop' interruption behavior works for manual stops.
-        # AWS spot reclamations always terminate regardless of this setting.
-        # Acceptable for lab use. Use on-demand for critical workloads.
+        # persistent + interruption_behavior "stop": on a Spot capacity
+        # reclaim AWS STOPS the instance (it is NOT terminated) and keeps its
+        # root + data EBS volumes; the persistent request stays open and AWS
+        # reactivates the instance when compatible capacity returns. The same
+        # setting also permits manual stop/start with EBS preserved. Use
+        # on-demand for critical workloads.
         spot_instance_type             = "persistent"
         instance_interruption_behavior = "stop"
       }
