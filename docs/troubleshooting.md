@@ -277,3 +277,32 @@ policy that matched is on the SOURCE (egress) or DESTINATION (ingress)
 endpoint. `kubectl get cnp -n <ns>` / `kubectl get ccnp` lists the policies;
 the smoke's positive-first checks (DNS from logistics, control-pod egress)
 tell you whether the openings themselves are broken.
+
+## ImagePullBackOff on app images (ECR credential provider)
+
+App images live in private ECR; the kubelet authenticates via the
+`ecr-credential-provider` (no imagePullSecret). If a pod is
+`ImagePullBackOff` / `ErrImagePull` on a `*.dkr.ecr.*.amazonaws.com` image:
+
+```bash
+# 1. Is the provider configured on the node the pod landed on?
+kubectl get node <node> -o jsonpath='{.metadata.labels.k8s-vanilla-lab/ecr-cp}'
+#    empty → the rollout never reached this node. Re-run:
+#    KUBECONFIG=… bash scripts/rollout-ecr-credential-provider.sh
+
+# 2. kubelet logs on the node show the provider being invoked / its error
+#    (via a debug pod with nsenter, or make ssh-worker if you have the key):
+journalctl -u kubelet | grep -i credential
+
+# 3. Does the worker role actually allow the pull?
+aws ecr get-repository-policy --repository-name <repo> --region eu-west-1
+#    The four repos are in the worker role's ecr-pull policy; a NEW repo name
+#    not in tofu/modules/registry (var.repositories) is NOT pullable.
+```
+
+Common causes, in order: the node missed the rollout (label absent); the
+image tag does not exist (immutable tags — a re-pushed SHA is rejected at
+push time, so the tag in the manifest may simply never have been pushed);
+the repository name is outside the four managed ones (worker role denies it).
+The credential provider caches tokens 12h — a fresh IAM permission can take
+that long to matter, or restart the kubelet to force a refresh.
