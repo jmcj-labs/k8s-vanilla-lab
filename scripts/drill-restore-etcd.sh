@@ -83,10 +83,13 @@ spec:
               echo "=== restore start \$(date -u +%H:%M:%SZ) ==="
               curl -fsSL -o /tmp/restore.db "\$SNAP_URL"
               ETCD_VER=v3.6.4   # keep aligned with the cluster's etcd minor
-              curl -fsSL -o /tmp/etcd.tgz "https://github.com/etcd-io/etcd/releases/download/\${ETCD_VER}/etcd-\${ETCD_VER}-linux-amd64.tar.gz"
+              TARBALL="etcd-\${ETCD_VER}-linux-amd64.tar.gz"
+              # Download under its RELEASE name: SHA256SUMS lines reference it
+              # verbatim and sha256sum -c resolves the path literally.
+              curl -fsSL -o "/tmp/\${TARBALL}" "https://github.com/etcd-io/etcd/releases/download/\${ETCD_VER}/\${TARBALL}"
               curl -fsSL -o /tmp/etcd-SHA256SUMS "https://github.com/etcd-io/etcd/releases/download/\${ETCD_VER}/SHA256SUMS"
-              (cd /tmp && grep "etcd-\${ETCD_VER}-linux-amd64.tar.gz\$" etcd-SHA256SUMS | sha256sum -c -)
-              tar -xzf /tmp/etcd.tgz -C /tmp --strip-components=1 "etcd-\${ETCD_VER}-linux-amd64/etcdutl"
+              (cd /tmp && grep "\${TARBALL}\$" etcd-SHA256SUMS | sha256sum -c -)
+              tar -xzf "/tmp/\${TARBALL}" -C /tmp --strip-components=1 "etcd-\${ETCD_VER}-linux-amd64/etcdutl"
               TDOWN=\$(date -u +%s)
               echo "=== stopping control plane \$(date -u +%H:%M:%SZ) ==="
               mv /etc/kubernetes/manifests/etcd.yaml /tmp/
@@ -100,7 +103,7 @@ spec:
               until curl -ks https://127.0.0.1:6443/healthz | grep -q ok; do sleep 5; done
               TUP=\$(date -u +%s)
               echo "=== API healthy \$(date -u +%H:%M:%SZ) — API DOWNTIME: \$((TUP-TDOWN))s ==="
-              rm -rf /var/lib/etcd.pre-drill /tmp/restore.db /tmp/etcd.tgz /tmp/etcdutl /tmp/etcd-SHA256SUMS
+              rm -rf /var/lib/etcd.pre-drill /tmp/restore.db "/tmp/\${TARBALL}" /tmp/etcdutl /tmp/etcd-SHA256SUMS
               echo "RESTORE DONE"
 JOB
 log "restore Job launched — the API WILL go down for ~30-60s now"
