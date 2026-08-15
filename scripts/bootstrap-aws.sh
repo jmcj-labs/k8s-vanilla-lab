@@ -361,6 +361,18 @@ PERMISSIONS_POLICY=$(cat <<JSON
       ]
     },
     {
+      "Sid": "BackupsBucketReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}",
+        "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}/*"
+      ]
+    },
+    {
       "Sid": "TofuStateDynamoDB",
       "Effect": "Allow",
       "Action": [

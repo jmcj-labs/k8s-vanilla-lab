@@ -184,6 +184,29 @@ resource "aws_iam_role_policy" "control_plane_ssm" {
   })
 }
 
+# etcd backups (S2 piece 1): the backup CronJob runs hostNetwork on this
+# node, so the instance role IS its identity — IMDS works without touching
+# the IMDS CCNP or its exception. Write-only to the etcd/ prefix: a
+# compromised CP must not be able to read or delete existing snapshots.
+resource "aws_iam_role_policy" "control_plane_etcd_backup" {
+  count = var.enable_etcd_backup_policy ? 1 : 0
+
+  name = "${var.name}-cp-etcd-backup"
+  role = aws_iam_role.control_plane.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EtcdSnapshotPut"
+        Effect   = "Allow"
+        Action   = "s3:PutObject"
+        Resource = "arn:aws:s3:::${var.backup_bucket_name}/etcd/*"
+      }
+    ]
+  })
+}
+
 # EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
 resource "aws_iam_role_policy_attachment" "control_plane_ebs_csi" {
   role       = aws_iam_role.control_plane.name

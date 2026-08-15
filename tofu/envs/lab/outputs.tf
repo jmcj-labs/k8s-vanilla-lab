@@ -72,3 +72,8 @@ output "logistics_lab_ci_role_arn" {
   description = "OIDC CI role for jmcj-labs/logistics-lab (set as AWS_ROLE_ARN in Repo 2)"
   value       = module.registry.app_ci_role_arn
 }
+
+output "backup_bucket_name" {
+  description = "Backups bucket this cluster writes to (persistent stack — survives destroy)"
+  value       = local.backup_bucket_name
+}

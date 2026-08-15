@@ -761,5 +761,55 @@ aws iam get-role --role-name k8s-vanilla-lab-platform-admin --query 'Role.Assume
   || FAIL "logistics-lab-ci must NOT appear in platform-admin trust"
 OK "IAM exact: full-ARN set equality on logistics-lab-ci policies + developer trust; platform-admin clean"
 
+# ── 12. Backups flowing to S3 (S2 piece 1) ───────────────────────────────────
+# Verifies the backup PATH on every apply. Restore is NOT checked here — that
+# is the drills' job (docs/RUNBOOK-restore-*.md), a documented ceremony, not
+# a per-apply gate.
+BACKUP_BUCKET="${BACKUP_BUCKET:-${CLUSTER_NAME}-backups-${ACCOUNT_ID}}"
+
+# 12a. etcd: CronJob present, then a triggered run proves the whole path
+# (scheduling on the CP, host PKI, snapshot, instance-role S3 write).
+kubectl -n kube-system get cronjob etcd-backup >/dev/null 2>&1 \
+  || FAIL "etcd-backup CronJob not found in kube-system"
+SMOKE_JOB="etcd-backup-smoke-$$"
+cleanup_backup_job() {
+  kubectl -n kube-system delete job "${SMOKE_JOB}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_pvc; cleanup_iam; cleanup_netpol; cleanup_data; cleanup_contract; cleanup_backup_job' EXIT
+SNAP_SINCE=$(date -u +%s)
+kubectl -n kube-system create job --from=cronjob/etcd-backup "${SMOKE_JOB}" >/dev/null
+kubectl -n kube-system wait --for=condition=complete "job/${SMOKE_JOB}" --timeout=300s \
+  || FAIL "triggered etcd backup job did not complete in 300s"
+LAST_SNAP=$(aws s3api list-objects-v2 --bucket "${BACKUP_BUCKET}" --prefix etcd/ \
+  --query 'sort_by(Contents,&LastModified)[-1].[Key,LastModified]' --output text 2>/dev/null)
+[ -n "${LAST_SNAP}" ] && [ "${LAST_SNAP}" != "None" ] \
+  || FAIL "no object under etcd/ in ${BACKUP_BUCKET} after the triggered backup"
+LAST_SNAP_EPOCH=$(python3 -c 'import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].replace("Z","+00:00")).timestamp()))' "$(echo "${LAST_SNAP}" | awk '{print $2}')")
+[ "${LAST_SNAP_EPOCH}" -ge "$((SNAP_SINCE - 60))" ] \
+  || FAIL "newest etcd/ object predates the triggered backup (${LAST_SNAP})"
+cleanup_backup_job
+OK "etcd backup: CronJob present + triggered snapshot landed in s3://${BACKUP_BUCKET}/etcd/"
+
+# 12b. CNPG: credentials Secret present (hash only — never the values).
+CREDS_HASH=$(kubectl -n data get secret cnpg-backup-creds -o json 2>/dev/null \
+  | python3 -c 'import json,sys,hashlib;d=json.load(sys.stdin)["data"];print(hashlib.sha256(json.dumps(d,sort_keys=True).encode()).hexdigest()[:12])') \
+  || FAIL "data/cnpg-backup-creds Secret not present"
+OK "cnpg-backup-creds present in data (sha256 ${CREDS_HASH})"
+
+# 12c. CNPG: first base backup completed (the ScheduledBackup is immediate,
+# so a fresh apply converges within minutes) + WAL archiving green.
+ELAPSED=0
+until kubectl -n data get backup -o jsonpath='{.items[*].status.phase}' 2>/dev/null | grep -q completed; do
+  if [ "${ELAPSED}" -ge 420 ]; then
+    FAIL "no CNPG base backup reached phase=completed within 420s"
+  fi
+  sleep 15
+  ELAPSED=$((ELAPSED + 15))
+done
+ARCHIVING=$(kubectl -n data get cluster logistics-pg \
+  -o jsonpath='{.status.conditions[?(@.type=="ContinuousArchiving")].status}')
+[ "${ARCHIVING}" = "True" ] || FAIL "ContinuousArchiving condition is '${ARCHIVING}', expected True"
+OK "CNPG: first base backup completed + WAL archiving (ContinuousArchiving=True) → s3://${BACKUP_BUCKET}/cnpg/"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry and app contract are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract and backups are healthy"

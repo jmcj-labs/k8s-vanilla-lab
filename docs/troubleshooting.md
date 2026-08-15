@@ -287,8 +287,9 @@ aws ec2 describe-volumes --filters "Name=status,Values=available" \
   --query 'Volumes[].{id:VolumeId,size:Size,pvc:Tags[?Key==`kubernetes.io/created-for/pvc/name`]|[0].Value}' \
   --output table --region eu-west-1
 
-# 2. Delete them (only when the cluster is gone and the data is disposable —
-#    real data must be covered by CNPG/etcd backups, S2 piece 1, not by these)
+# 2. Delete them freely: since S2 piece 1 the conservation path is S3
+#    (CNPG base+WAL and etcd snapshots in the persistent bucket, restore
+#    proven by drill) — these orphaned volumes hold nothing unique anymore
 for VOL in <vol-id> ...; do
   aws ec2 delete-volume --volume-id "$VOL" --region eu-west-1
 done

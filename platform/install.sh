@@ -26,6 +26,15 @@ KUBE_PROM_STACK_CHART_VERSION="88.2.0"  # prometheus-operator v0.93.0
 
 command -v kubectl >/dev/null 2>&1 || { echo "✗ kubectl not found" >&2; exit 1; }
 command -v helm >/dev/null 2>&1 || { echo "✗ helm not found" >&2; exit 1; }
+command -v aws >/dev/null 2>&1 || { echo "✗ aws CLI not found (needed for backup credentials)" >&2; exit 1; }
+
+# Persistent backups bucket (tofu/envs/persistent). Same derivation as both
+# tofu stacks so nobody has to pass it explicitly.
+BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/backup" && pwd)"
+if [ -z "${BACKUP_BUCKET:-}" ]; then
+  ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+  BACKUP_BUCKET="${CLUSTER_NAME}-backups-${ACCOUNT_ID}"
+fi
 # Retry briefly: right after bootstrap the API can take a few seconds to
 # accept external connections (EIP path, SG propagation).
 ELAPSED=0
@@ -63,7 +72,7 @@ ensure_clean_release() {
 
 log "=== Installing platform layer (region: ${AWS_REGION}) ==="
 
-log "Step 1/11: Adding Helm repositories"
+log "Step 1/12: Adding Helm repositories"
 helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver >/dev/null
 helm repo add jetstack https://charts.jetstack.io >/dev/null
 helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null
@@ -72,12 +81,12 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update >/dev/null
 log "✓ Helm repositories ready"
 
-log "Step 2/11: Namespaces (infra, data, logistics) + StorageClass gp3"
+log "Step 2/12: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
 kubectl apply -f "${MANIFESTS}/storageclass-gp3.yaml"
 log "✓ Namespaces and default gp3 StorageClass applied"
 
-log "Step 2b/11: IAM access — authenticator mappings, RBAC and DaemonSet"
+log "Step 2b/12: IAM access — authenticator mappings, RBAC and DaemonSet"
 # Rendered from the single source of truth (profiles.yaml, ADR-005 decision 4).
 # The bootstrap already placed the webhook material on the CP; everything
 # reentrant lives here: mappings ConfigMap (DynamicFile), RBAC, DaemonSet.
@@ -179,7 +188,7 @@ kubectl apply -f "${ACCESS}/daemonset.yaml"
 kubectl -n kube-system rollout status ds/aws-iam-authenticator --timeout=180s
 log "✓ IAM access ready (DynamicFile mappings, RBAC, authenticator DaemonSet)"
 
-log "Step 3/11: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
+log "Step 3/12: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
 ensure_clean_release kube-system aws-ebs-csi-driver
 # controller.region is set explicitly: IMDS is not reachable from the pod
 # network even with hop limit 2 (see docs/INCIDENTS.md #4), so the controller
@@ -191,7 +200,7 @@ helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver 
   --wait --timeout 5m
 log "✓ EBS CSI driver installed"
 
-log "Step 4/11: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
+log "Step 4/12: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
 ensure_clean_release infra cert-manager
 # --enable-gateway-api activates the gateway-shim controller that resolves
 # the cert-manager.io/cluster-issuer annotation on Gateway resources.
@@ -204,7 +213,7 @@ helm upgrade --install cert-manager jetstack/cert-manager \
 kubectl apply -f "${MANIFESTS}/clusterissuer-selfsigned.yaml"
 log "✓ cert-manager installed, ClusterIssuer 'selfsigned' applied"
 
-log "Step 5/11: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
+log "Step 5/12: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
 # The 'cilium' GatewayClass is created by the cilium-operator at startup
 # (gatewayAPI.enabled=true in the bootstrap Helm install).
 kubectl wait --for=condition=Accepted gatewayclass/cilium --timeout=180s
@@ -214,7 +223,7 @@ kubectl apply -f "${MANIFESTS}/lb-ipam-pool.yaml"
 kubectl apply -f "${MANIFESTS}/gateway-shared.yaml"
 log "✓ Gateway infra/shared-gw applied (LB IP from Cilium LB-IPAM; external access via NodePort)"
 
-log "Step 6/11: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
+log "Step 6/12: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg
 # Operator only — PostgreSQL clusters are application-owned, not platform-owned.
 helm upgrade --install cnpg cnpg/cloudnative-pg \
@@ -223,7 +232,7 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
   --wait --timeout 5m
 log "✓ CloudNativePG operator installed"
 
-log "Step 7/11: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
+log "Step 7/12: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
 ensure_clean_release data strimzi
 # Operator only — Kafka clusters are application-owned, not platform-owned.
 helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
@@ -232,7 +241,7 @@ helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
   --wait --timeout 5m
 log "✓ Strimzi operator installed"
 
-log "Step 8/11: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
+log "Step 8/12: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
 ensure_clean_release infra kube-prometheus-stack
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace infra \
@@ -243,7 +252,7 @@ helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheu
   --wait --timeout 10m
 log "✓ kube-prometheus-stack installed"
 
-log "Step 9/11: Cilium network policies (IMDS deny + logistics default-deny)"
+log "Step 9/12: Cilium network policies (IMDS deny + logistics default-deny)"
 # Applied last: everything above must be able to install without them, and
 # the deny-IMDS exception (EBS CSI) is verified by the smoke right after.
 # The data-namespace policy is deliberately DEFERRED to phase 2: today it
@@ -254,10 +263,75 @@ kubectl apply -f "${POLICIES}/ccnp-deny-imds.yaml"
 kubectl apply -f "${POLICIES}/cnp-logistics-default-deny.yaml"
 log "✓ Network policies applied (deny IMDS except EBS CSI; logistics default-deny)"
 
-log "Step 10/11: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
+log "Step 9b/12: CNPG backup credentials (SSM → data/cnpg-backup-creds, reentrant)"
+# Deposited ONCE by the operator under /k8s/persistent/ — a prefix the
+# cluster's destroy-time SSM cleanup (which wipes /k8s/<cluster_name>) never
+# touches, while staying inside the parameter/k8s/* scope the CI role has.
+# See tofu/envs/persistent/README.md. Values never printed / no temp files.
+SSM_KEYS_PARAM="/k8s/persistent/${CLUSTER_NAME}/cnpg-backup-keys"
+if ! aws ssm get-parameter --name "${SSM_KEYS_PARAM}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+  echo "✗ ${SSM_KEYS_PARAM} not found in SSM — deposit the barman access keys" >&2
+  echo "  once (manual, local): see tofu/envs/persistent/README.md" >&2
+  exit 1
+fi
+aws ssm get-parameter --name "${SSM_KEYS_PARAM}" --with-decryption \
+  --query Parameter.Value --output text --region "${AWS_REGION}" \
+  | python3 -c '
+import json,sys
+keys=json.load(sys.stdin)
+json.dump({"apiVersion":"v1","kind":"Secret",
+     "metadata":{"name":"cnpg-backup-creds","namespace":"data",
+                 "labels":{"cnpg.io/reload":"true"}},
+     "type":"Opaque",
+     "stringData":{"ACCESS_KEY_ID":keys["ACCESS_KEY_ID"],
+                   "SECRET_ACCESS_KEY":keys["SECRET_ACCESS_KEY"]}},sys.stdout)' \
+  | kubectl apply -f - >/dev/null
+log "✓ cnpg-backup-creds present in data (cnpg.io/reload on; values never printed)"
+
+# Backup GENERATION — one per cluster incarnation. barman will not archive
+# into a prefix written by a previous cluster, so serverName must change on
+# every apply-from-scratch while staying STABLE across re-runs on the same
+# cluster: the in-cluster ConfigMap is the source of truth (survives
+# re-runs, dies with the cluster), and SSM under the persistent prefix
+# records the latest generation so the restore drill can select its origin
+# after a destroy.
+GEN=$(kubectl -n data get configmap cnpg-backup-generation \
+  -o jsonpath='{.data.generation}' 2>/dev/null || true)
+if [ -z "${GEN}" ]; then
+  GEN="$(date -u +%Y%m%dt%H%M%Sz)"
+  kubectl -n data create configmap cnpg-backup-generation \
+    --from-literal=generation="${GEN}"
+  log "✓ New backup generation minted: logistics-pg-${GEN}"
+else
+  log "✓ Existing backup generation reused: logistics-pg-${GEN}"
+fi
+CNPG_SERVER_NAME="logistics-pg-${GEN}"
+# The SSM record runs on EVERY pass (idempotent --overwrite), outside the
+# mint block: if the put failed on the first run, the next re-run repairs
+# it instead of leaving the drill without its origin pointer forever.
+aws ssm put-parameter \
+  --name "/k8s/persistent/${CLUSTER_NAME}/cnpg-server-name" \
+  --type String --overwrite \
+  --value "${CNPG_SERVER_NAME}" \
+  --region "${AWS_REGION}" >/dev/null
+log "✓ SSM cnpg-server-name = ${CNPG_SERVER_NAME}"
+
+log "Step 10/12: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
 DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"
-# Whole directory: clusters, metrics ConfigMap and the explicit PodMonitors
-kubectl apply -f "${DATA}/"
+# Whole directory EXCEPT cnpg-cluster.yaml, which carries __BACKUP_BUCKET__
+# and is templated — never applied raw (a literal placeholder would poison
+# the barman destinationPath).
+for f in "${DATA}"/*.yaml; do
+  case "$(basename "${f}")" in
+    cnpg-cluster.yaml)
+      sed -e "s|__BACKUP_BUCKET__|${BACKUP_BUCKET}|g" \
+          -e "s|__SERVER_NAME__|${CNPG_SERVER_NAME}|g" "${f}" | kubectl apply -f -
+      ;;
+    *)
+      kubectl apply -f "${f}"
+      ;;
+  esac
+done
 # CNPG's enablePodMonitor is deprecated and no longer set: remove any
 # operator-generated PodMonitor left behind so it never coexists (and
 # double-scrapes) with the explicit one (cnpg-logistics-pg).
@@ -271,14 +345,14 @@ kubectl -n data wait cluster/logistics-pg \
 kubectl -n data wait kafka/logistics-kafka --for=condition=Ready --timeout=600s
 log "✓ Data layer healthy (PG primary+2 sync replicas; Kafka 3 KRaft nodes)"
 
-log "Step 10b/11: KafkaTopics (platform owns the resource; Repo 2 the contract)"
+log "Step 10b/12: KafkaTopics (platform owns the resource; Repo 2 the contract)"
 # apply -f DATA/ is NON-recursive, so topics/ is applied explicitly here.
 kubectl apply -f "${DATA}/topics/"
 kubectl -n data wait --for=condition=Ready kafkatopic \
   -l app.kubernetes.io/part-of=k8s-vanilla-lab-data --timeout=180s
 log "✓ KafkaTopics Ready (shipment.created, route.calculated — RF3, minISR2)"
 
-log "Step 10c/11: Projecting data credentials into logistics (reentrant)"
+log "Step 10c/12: Projecting data credentials into logistics (reentrant)"
 # The app (developer RBAC) cannot read Secrets in data. Project the minimum
 # it needs into logistics, stripping all source-object metadata. Rotation
 # until External Secrets (S3) = re-run this. Values never printed / no temp
@@ -316,7 +390,7 @@ json.dump({"apiVersion":"v1","kind":"Secret",
   | kubectl apply -f - >/dev/null
 log "✓ Projected logistics/logistics-pg-app and logistics/logistics-kafka-cluster-ca-cert (ca.crt only)"
 
-log "Step 11/11: Network policies — data operands + logistics app contract"
+log "Step 11/12: Network policies — data operands + logistics app contract"
 # By operand labels, not the whole namespace: the operators stay free.
 kubectl apply -f "${POLICIES}/cnp-data-postgres.yaml"
 kubectl apply -f "${POLICIES}/cnp-data-kafka.yaml"
@@ -327,6 +401,13 @@ kubectl apply -f "${POLICIES}/cnp-data-kafka.yaml"
 # logistics.
 kubectl apply -f "${POLICIES}/cnp-logistics-metrics.yaml"
 log "✓ Network policies applied (data operands + logistics metrics contract)"
+
+log "Step 12/12: Backups — etcd CronJob (6h) + CNPG ScheduledBackup (daily, immediate)"
+sed -e "s|__BACKUP_BUCKET__|${BACKUP_BUCKET}|g" \
+    -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+    "${BACKUP_DIR}/etcd-backup-cronjob.yaml" | kubectl apply -f -
+kubectl apply -f "${BACKUP_DIR}/cnpg-scheduled-backup.yaml"
+log "✓ Backups configured → s3://${BACKUP_BUCKET} (etcd/ every 6h · cnpg/ base+WAL continuous)"
 
 log "=== Platform layer installed successfully ==="
 log "Grafana NodePort: kubectl -n infra get svc kube-prometheus-stack-grafana"

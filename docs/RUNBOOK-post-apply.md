@@ -20,6 +20,12 @@ Para el ciclo post-apply basta el primero:
 aws sso login --profile k8s-vanilla-lab
 ```
 
+> **Precondición de S2-1 (una sola vez, no por ciclo)**: las access keys de
+> barman deben estar depositadas en SSM
+> (`/k8s/persistent/<cluster>/cnpg-backup-keys`) — `make platform` falla
+> con instrucciones si faltan. Alta y rotación en
+> `tofu/envs/persistent/README.md`.
+
 ## 1. Kubeconfig — exporta el perfil o el login no te sirve
 
 Los targets de CLI (`kubeconfig`, `platform`, `smoke-test`,

@@ -1,0 +1,21 @@
+# Daily CNPG base backup — WAL archiving (continuous) is configured in the
+# Cluster CR (platform/data/cnpg-cluster.yaml, backup.barmanObjectStore).
+#
+# immediate: the first base backup runs on creation, so a fresh apply has a
+# restorable chain (base + WAL) within minutes — and the smoke can assert
+# "first base backup completed" deterministically instead of waiting for the
+# 03:00 window.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: logistics-pg-daily
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-backup
+spec:
+  # CNPG cron has SIX fields (seconds first): daily at 03:00 UTC.
+  schedule: "0 0 3 * * *"
+  cluster:
+    name: logistics-pg
+  immediate: true
+  backupOwnerReference: self

@@ -15,6 +15,7 @@ Installed in one ordered, idempotent pass by [`install.sh`](install.sh).
 | 5 | CloudNativePG | `data` | `cloudnative-pg` 0.29.0 | operator only — PG clusters are app-owned |
 | 6 | Strimzi | `data` | `strimzi-kafka-operator` 1.1.0 | operator only — Kafka clusters are app-owned |
 | 7 | kube-prometheus-stack | `infra` | `kube-prometheus-stack` 88.2.0 | `grafana.service.type=NodePort`, `alertmanager.enabled=false` |
+| 8 | Backups (S2-1) | `kube-system` / `data` | `backup/` manifests | `etcd-backup` CronJob (6h, hostNetwork on the CP, instance-role identity, write-only `etcd/*`) · `cnpg-backup-creds` Secret projected from the persistent SSM prefix · CNPG `barmanObjectStore` (WAL + daily base, `immediate`) + `ScheduledBackup`. Bucket from `tofu/envs/persistent`; restore drills in `docs/RUNBOOK-restore-*.md` |
 
 Prerequisites provided by the bootstrap layer (cloud-init):
 

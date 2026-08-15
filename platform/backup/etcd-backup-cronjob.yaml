@@ -1,0 +1,107 @@
+# etcd snapshot to S3 every 6h — S2 piece 1 ("sin restore probado no es backup").
+#
+# Runs on the control plane with hostNetwork (same probed pattern as the
+# authenticator DaemonSet): the pod's AWS identity is the CP INSTANCE ROLE
+# (write-only grant on etcd/* — tofu/modules/control-plane), and IMDS works
+# without touching the IMDS CCNP or widening its exception.
+#
+# In kube-system on purpose: this is a host-level control-plane concern
+# (host PKI mount, hostNetwork, instance-role identity), not a platform
+# workload — infra is for cluster services with pod-network identities.
+#
+# Images (both from first-party registries, pinned):
+# - registry.k8s.io/etcd: the SAME image kubeadm runs — etcdctl guaranteed
+#   compatible with the server. Keep the minor aligned with the cluster's
+#   etcd (kubeadm 1.35 ships etcd 3.6.x).
+# - public.ecr.aws/aws-cli: official AWS CLI image for the S3 upload.
+#
+# __BACKUP_BUCKET__ / __AWS_REGION__ are substituted by platform/install.sh.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: k8s-vanilla-lab-backup
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: etcd-backup
+        spec:
+          restartPolicy: Never
+          hostNetwork: true
+          automountServiceAccountToken: false
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          initContainers:
+            - name: snapshot
+              image: registry.k8s.io/etcd:3.6.4-0
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  SNAP="/backup/etcd-$(date -u +%Y%m%dT%H%M%SZ).db"
+                  ETCDCTL_API=3 etcdctl \
+                    --endpoints=https://127.0.0.1:2379 \
+                    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+                    --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
+                    --key=/etc/kubernetes/pki/etcd/healthcheck-client.key \
+                    snapshot save "${SNAP}"
+                  etcdutl snapshot status "${SNAP}" -w table
+              volumeMounts:
+                - name: etcd-pki
+                  mountPath: /etc/kubernetes/pki/etcd
+                  readOnly: true
+                - name: backup
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          containers:
+            - name: upload
+              image: public.ecr.aws/aws-cli/aws-cli:2.22.35
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  aws s3 cp /backup/ "s3://__BACKUP_BUCKET__/etcd/" \
+                    --recursive --exclude "*" --include "etcd-*.db" \
+                    --region "__AWS_REGION__"
+                  echo "etcd snapshot uploaded"
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: etcd-pki
+              hostPath:
+                path: /etc/kubernetes/pki/etcd
+                type: Directory
+            - name: backup
+              emptyDir:
+                sizeLimit: 1Gi
