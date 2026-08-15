@@ -355,6 +355,28 @@ kubectl -n data delete podmonitor logistics-pg --ignore-not-found >/dev/null 2>&
 # (phase-2 brief: never debug bootstrap and policy at the same time).
 kubectl -n data wait cluster/logistics-pg \
   --for=jsonpath='{.status.phase}'='Cluster in healthy state' --timeout=600s
+# Barman env CONVERGENCE (INCIDENTS #14): adding barmanObjectStore to a live
+# Cluster injects the S3 credential envs via a ROLLING RESTART of the
+# instance pods. 'healthy state' can be observed before that rollout runs,
+# leaving env-less pods whose barman processes hang inside the IMDS
+# blackhole (the CCNP denies 169.254.169.254 without RST) instead of
+# failing fast. Do not proceed until every instance pod carries the envs.
+ENV_ELAPSED=0
+until [ "$(kubectl -n data get pods -l cnpg.io/cluster=logistics-pg \
+    -o jsonpath='{range .items[*]}{.spec.containers[0].env[?(@.name=="AWS_ACCESS_KEY_ID")].name}{"\n"}{end}' \
+    | grep -c AWS_ACCESS_KEY_ID)" -eq \
+  "$(kubectl -n data get pods -l cnpg.io/cluster=logistics-pg --no-headers | wc -l | tr -d ' ')" ]; do
+  if [ "${ENV_ELAPSED}" -ge 900 ]; then
+    echo "✗ CNPG instance pods still missing barman credential envs after 900s — rollout did not converge" >&2
+    exit 1
+  fi
+  log "  waiting for the barman env rollout to reach every PG pod (${ENV_ELAPSED}s)"
+  sleep 15
+  ENV_ELAPSED=$((ENV_ELAPSED + 15))
+  kubectl -n data wait cluster/logistics-pg \
+    --for=jsonpath='{.status.phase}'='Cluster in healthy state' --timeout=600s >/dev/null
+done
+log "✓ Barman credential envs present on every PG instance pod"
 # auto.create.topics.enable=false rolls the brokers — wait Ready, then verify
 # the cluster still serves (the smoke's produce/consume is the deeper check).
 kubectl -n data wait kafka/logistics-kafka --for=condition=Ready --timeout=600s
