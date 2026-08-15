@@ -22,3 +22,12 @@ AVD-AWS-0104
 # keys provide the real access control. Production setup would restrict to a
 # known CIDR or use AWS SSM Session Manager instead of direct SSH.
 AVD-AWS-0107
+
+# AVD-AWS-0132 — S3 bucket not encrypted with a customer managed key
+# Ratified in brief #S2-1: the backups bucket uses SSE-S3, matching the
+# tfstate bucket (bootstrap-aws.sh). A CMK adds KMS cost and key-policy
+# complexity with no threat-model gain here: the key would live in the SAME
+# lab account as the data, so it does not change the blast radius of an
+# account compromise. Revisit if backups ever hold data with compliance
+# requirements (real go-live, not a lab).
+AVD-AWS-0132
