@@ -307,38 +307,54 @@ finally went away. The drill's clock lost to the shutdown's clock.
   recovery; `immediate: true` stays (a fresh apply still converges fast —
   on a standby now).
 
-## 14. Env-less barman pods: a pending rollout plus the IMDS blackhole
+## 14. Barman vs the bucket: a wrong theory, then the real 403
 
-**Symptom**: after killing the wedged wal-restore of INCIDENTS #13, the
-promotion re-wedged identically: every `barman-cloud-wal-restore` (and the
-long-"running" `barman-cloud-backup`) hung for tens of minutes instead of
-finishing or failing.
+> **Correction record**: the first version of this entry blamed "env-less
+> pods pending a credential rollout". That mechanism is FALSE for CNPG's
+> in-tree barman — the instance manager reads the credentials Secret via
+> the Kubernetes API at exec time, and NO AWS envs ever appear in the pod
+> spec (verified on a fresh, correctly-configured cluster: zero AWS envs,
+> archiving attempted with the right credentials anyway). The env-based
+> gate shipped on that theory waited for a signal that cannot exist and
+> failed every install. Kept here because the correction IS the lesson.
 
-**Root cause (two layers)**:
-1. Adding `barmanObjectStore` to a LIVE Cluster injects the S3 credential
-   envs into the instance pods via a rolling restart. The pods predated the
-   change and the rollout never converged before the smoke's failover drill
-   killed the primary — leaving instances whose pod spec has NO
-   `AWS_ACCESS_KEY_ID`/`SECRET`. `kubectl get pod -o jsonpath` on the
-   failover target showed zero AWS envs.
-2. Without env credentials, boto3 walks its provider chain down to IMDS —
-   and the clusterwide IMDS deny (a Cilium DROP, no RST) turns that lookup
-   into a silent connect hang. "No credentials" should fail in seconds; the
-   CCNP converts it into an indefinite wedge. The archive-side condition
-   (`ContinuousArchiving=True`) had been set before the config landed on
-   the pods and never re-evaluated against an env-less instance.
+**Symptom (fresh cluster, everything born configured)**:
+`ContinuousArchiving=False (ContinuousArchivingFailing)`; the primary's
+logs show the deterministic culprit:
+`barman-cloud-check-wal-archive … (403) when calling the HeadBucket
+operation: Forbidden`.
 
-**Fix**: `install.sh` step 10 now refuses to proceed until EVERY PG
-instance pod carries the barman credential envs (bounded 900s wait,
-re-asserting cluster health between polls) — "healthy state" alone is not
-convergence. Recovery of the live incident: kill the zombie barman
-processes, delete the env-less target pod so the operator recreates it
-from the CURRENT spec, promotion completes.
+**Root cause**: barman-cloud runs `HeadBucket` as its connectivity check,
+and HeadBucket maps to `s3:ListBucket` with **no prefix in the request**.
+The `cnpg-backup` IAM user's ListBucket was conditioned on
+`s3:prefix = cnpg/*` — so the very first check 403s and archiving never
+starts. A too-clever prefix condition, not a network mystery.
 
-**Lesson**: the IMDS CCNP is working as designed — but any process that
-MIGHT fall through to IMDS must be guaranteed its explicit credentials
-first. Config that arrives via pod-spec changes is not "applied" until the
-rollout converges; gates must check the pods, not the CR.
+**Fixes**:
+- IAM (tofu/envs/persistent): ListBucket on the bucket without the prefix
+  condition — documented trade-off: barman can list KEY NAMES bucket-wide,
+  object content stays scoped to `cnpg/*`.
+- install.sh gate rewritten to check FUNCTION, not plumbing: wait for
+  `ContinuousArchiving=True` (the condition only turns True after a real
+  successful check against the real bucket), bounded, with the reason
+  printed on timeout.
+
+**On the older cluster's 30-minute hangs (#13's second act)**: with the
+env theory dead, the honest status is *cause not fully proven* — the old
+pods predated the barman config entirely, and their wal-restore processes
+hung rather than 403ing. Plausible candidates (stale instance-manager
+state; a blocked metadata path under the old pod identity) died with the
+cluster. What survives: the wedge presentation, the surgical exits, and
+the fact that a fresh cluster with this IAM fix archives cleanly.
+
+**Lessons**:
+- Gate on the system's own health signals (conditions that require a real
+  round-trip), never on inferred plumbing details of an operator's
+  internals.
+- When a check fails, read the failing component's OWN error before
+  theorizing: the 403 was in the logs all along.
+- IAM prefix conditions and client-side connectivity probes (HeadBucket)
+  are a known-bad pairing.
 
 ### Adenda a #13/#14: el interbloqueo del operador — y la salida quirúrgica que no usamos
 
