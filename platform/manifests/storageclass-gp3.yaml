@@ -10,3 +10,10 @@ reclaimPolicy: Delete
 parameters:
   type: gp3
   encrypted: "true"
+  # Every dynamically-provisioned volume carries the cluster's OWN tag: the
+  # destroy-time cleanup (tofu/envs/lab) filters on it, and the CI role's
+  # ec2:DeleteVolume is IAM-conditioned on it (S2-1 review point 1) — the
+  # permission cannot touch any volume this StorageClass did not create.
+  # kubernetes.io/* keys are reserved by the CSI driver, hence a custom key.
+  # __CLUSTER_NAME__ is substituted by platform/install.sh.
+  tagSpecification_1: "k8s-cluster=__CLUSTER_NAME__"

@@ -83,8 +83,16 @@ log "✓ Helm repositories ready"
 
 log "Step 2/12: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
-kubectl apply -f "${MANIFESTS}/storageclass-gp3.yaml"
-log "✓ Namespaces and default gp3 StorageClass applied"
+# The SC carries the cluster tag (__CLUSTER_NAME__) in tagSpecification_1.
+# SC parameters are immutable: if a pre-tag gp3 SC exists (upgrade on a live
+# cluster), recreate it — deleting an SC never touches bound PVs/PVCs.
+SC_RENDERED=$(sed -e "s|__CLUSTER_NAME__|${CLUSTER_NAME}|g" "${MANIFESTS}/storageclass-gp3.yaml")
+echo "${SC_RENDERED}" | kubectl apply -f - || {
+  log "⚠ gp3 StorageClass parameters differ (immutable) — recreating"
+  kubectl delete storageclass gp3 --ignore-not-found
+  echo "${SC_RENDERED}" | kubectl apply -f -
+}
+log "✓ Namespaces and default gp3 StorageClass applied (cluster tag on dynamic volumes)"
 
 log "Step 2b/12: IAM access — authenticator mappings, RBAC and DaemonSet"
 # Rendered from the single source of truth (profiles.yaml, ADR-005 decision 4).

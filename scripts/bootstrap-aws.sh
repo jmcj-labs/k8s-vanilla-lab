@@ -241,6 +241,17 @@ PERMISSIONS_POLICY=$(cat <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "DeleteDynamicCSIVolumesOnly",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteVolume",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/k8s-cluster": "${CLUSTER_NAME}"
+        }
+      }
+    },
+    {
       "Sid": "IAMForNodeRoles",
       "Effect": "Allow",
       "Action": [
