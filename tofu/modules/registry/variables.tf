@@ -10,6 +10,12 @@ variable "app_repo" {
   default     = "jmcj-labs/logistics-lab"
 }
 
+variable "app_repo_ids" {
+  description = "ID-qualified owner/repo (owner@ownerID/repo@repoID) as GitHub emits it in the OIDC sub claim for repos with immutable subject claims — same repo as app_repo, rename-proof naming scheme. Empty string disables the ID-qualified pair."
+  type        = string
+  default     = "jmcj-labs@284581373/logistics-lab@1331865297"
+}
+
 variable "ci_role_name" {
   description = "Name of the app repo's dedicated OIDC CI role (managed here, exact-scoped in bootstrap-aws.sh)"
   type        = string

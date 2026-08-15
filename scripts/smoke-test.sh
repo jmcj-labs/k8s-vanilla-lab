@@ -515,14 +515,17 @@ CI_TRUST=$(aws iam get-role --role-name "${CI_ROLE}" \
   --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null) \
   || FAIL "CI role ${CI_ROLE} not found"
 echo "${CI_TRUST}" | python3 -c '
-import json,sys
+import json,sys,re
 doc=json.load(sys.stdin)
 subs=doc["Statement"][0]["Condition"]["StringLike"]["token.actions.githubusercontent.com:sub"]
 subs=subs if isinstance(subs,list) else [subs]
-assert all(s.startswith("repo:jmcj-labs/logistics-lab:") for s in subs), f"trust not scoped to the app repo: {subs}"
+# Same repo in either naming scheme: classic org/name, or the ID-qualified
+# owner@id/repo@id that immutable subject claims emit (INCIDENTS #12).
+pat=re.compile(r"^repo:jmcj-labs(@[0-9]+)?/logistics-lab(@[0-9]+)?:")
+assert all(pat.match(s) for s in subs), f"trust not scoped to the app repo: {subs}"
 assert not any(s=="repo:*" or ":*:" in s or s.endswith(":*") and "logistics-lab" not in s for s in subs), f"wildcard too broad: {subs}"
 ' || FAIL "CI role trust policy is not correctly scoped to jmcj-labs/logistics-lab"
-OK "logistics-lab-ci trust scoped to jmcj-labs/logistics-lab (main + tags)"
+OK "logistics-lab-ci trust scoped to jmcj-labs/logistics-lab (main + tags, classic + ID-qualified sub)"
 
 # 11c. Prometheus scrapes PostgreSQL and Kafka: up==1 and real samples.
 # Bounded retries cover the scrape interval (~30s) after a fresh apply.
