@@ -56,6 +56,18 @@ desde ns `logistics`) → CNPG → Strimzi → kube-prometheus-stack (Grafana
 NodePort, Alertmanager off). Solo operators: los clusters PG/Kafka son de la
 app.
 
+**Backups** (S2 pieza 1 — "sin restore probado no es backup"): bucket S3
+persistente único (`tofu/envs/persistent`, ciclo de vida propio, aplicado a
+mano, **nunca** en apply/destroy del cluster) con prefijos `etcd/` (7 días)
+y `cnpg/` (14 días), versionado + SSE-S3 + public access bloqueado.
+CronJob `etcd-backup` cada 6h en `kube-system` (hostNetwork en el CP,
+identidad = instance role, write-only a `etcd/*`) · CNPG con
+`barmanObjectStore` (WAL continuo + base diario `immediate`, credenciales
+del usuario IAM `cnpg-backup` proyectadas desde SSM
+`/k8s/persistent/<cluster>/…`, prefijo que sobrevive al destroy). Drills de
+restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
+[RUNBOOK-restore-cnpg.md](RUNBOOK-restore-cnpg.md).
+
 ## 3. Decisiones no-default y por qué
 
 | Decisión | Por qué (una línea) | Detalle |
@@ -81,6 +93,9 @@ app.
 | PodMonitor genérico de app en plataforma | Selecciona por `app.kubernetes.io/part-of: logistics-lab`; Repo 2 solo pone el label y el puerto `metrics` | brief 3b |
 | **Contrato de pods de Repo 2** (lo exige `make smoke-app-contract`) | Cada Deployment lleva `app.kubernetes.io/name=<servicio>`; el container principal se llama **exactamente** `<servicio>`; cada servicio expone en el puerto `metrics` la métrica `logistics_service_info{service="<servicio>"} 1` | brief 3b |
 | Proyección de secrets a `logistics` (no acceso a `data`) | El developer no lee Secrets en `data`; se proyecta el mínimo (PG app + Kafka `ca.crt`) sin metadata del origen | brief 3b |
+| Bucket de backups único y **persistente** (stack propio, manual) | Los backups deben sobrevivir a cualquier destroy del cluster; consumo por variable, no remote state — grafos desacoplados | brief S2-1, `tofu/envs/persistent` |
+| etcd backup con **instance role** vs barman con **usuario IAM** | El CronJob es hostNetwork en el CP (IMDS le funciona sin tocar la CCNP); los pods CNPG están tras el deny de IMDS que NO se agujerea — credencial estática mínima, acotada a `cnpg/*` | brief S2-1 |
+| Snapshots etcd write-only desde el CP (`s3:PutObject` a `etcd/*`, nada más) | Un CP comprometido no puede leer ni borrar los backups existentes | brief S2-1 |
 
 ## 4. Operación
 
@@ -160,6 +175,12 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   al control de egress. Riesgo aceptado en el MVP: no hay requisito de aislar
   entre sí a los clientes *dentro* de `logistics`. Control futuro: L7/auth en
   el Gateway + policies por servicio, Fase 1.5.
+- **Rotación manual de las access keys de barman** (usuario `cnpg-backup`)
+  hasta External Secrets (S3): crear segunda key → sobrescribir el parámetro
+  SSM persistente → `make platform` → verificar WAL → borrar la vieja
+  (`tofu/envs/persistent/README.md`). La migración del in-tree
+  `barmanObjectStore` (deprecado por CNPG) al plugin Barman Cloud va al
+  mismo sprint.
 - **Rotación de credenciales proyectadas = re-ejecutar la proyección**
   (`make platform`), hasta External Secrets (S3). Nada en Git.
 - **Refresh manual de variables tras recreate**: `K8S_SERVER`/`K8S_CA_DATA`
@@ -173,7 +194,9 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   quedan **huérfanos (`available`) facturando** tras el destroy. Verificación
   y borrado manual en el runbook de destroy (`docs/troubleshooting.md`).
   Automatizar el cleanup por tag `kubernetes.io/created-for/pvc/*` (como ya se
-  hace con las ENIs huérfanas) es candidato S2.
+  hace con las ENIs huérfanas) es candidato S2. Con los backups de S2-1
+  (base+WAL en S3, restore con drill) esos volúmenes **ya no son la vía de
+  conservación**: borrarlos tras un destroy no pierde nada.
 - **Anti-affinity `required` con 3 workers**: la caída de un worker deja la
   tercera instancia (PG o Kafka) Pending hasta que el nodo vuelve — esperado
   y aceptado; no se suaviza a `preferred` (perdería la garantía de

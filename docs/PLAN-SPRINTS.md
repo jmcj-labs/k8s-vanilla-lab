@@ -72,10 +72,17 @@ El orden interno importa:
   justifica por mínima superficie y separación de responsabilidades, no por una
   fuga activa.
 
-### 1. Backups con restore probado (primero — nunca tocar etcd sin backup)
+### 1. Backups con restore probado (primero — nunca tocar etcd sin backup) — 🔨 IaC lista (15-ago), drills pendientes del próximo apply
 - etcd: CronJob → snapshot a S3 (patrón BP-005 del Review EPO) + **restore ejecutado y documentado**
 - Postgres: CNPG backups a S3 (barman) + restore probado
 - Regla: sin restore probado, no es un backup — es una esperanza
+- Implementación (brief #S2-1): stack `tofu/envs/persistent` (bucket +
+  usuario IAM barman), CronJob etcd 6h (instance role, write-only `etcd/*`),
+  CNPG `barmanObjectStore` (WAL continuo + base diario, keys desde SSM
+  persistente), smoke ampliado (backup path en cada apply), drills en
+  `docs/RUNBOOK-restore-etcd.md` / `docs/RUNBOOK-restore-cnpg.md` — se
+  ejecutan y cronometran con el cluster levantado; la pieza corona cuando
+  ambos testigos vuelven (ConfigMap + `CORONATION-001`).
 
 ### 2. LB de entrada real
 - NLB delante del Gateway (target group a los workers)
