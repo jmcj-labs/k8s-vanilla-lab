@@ -49,19 +49,24 @@ spec:
               effect: NoSchedule
           initContainers:
             - name: snapshot
+              # The etcd image ships sh + etcdctl and NOTHING else — no
+              # coreutils (`date` → 127) and no etcdutl either (both found
+              # the hard way, INCIDENTS #15 follow-up). The snapshot gets a
+              # FIXED name here, integrity comes from `snapshot save`
+              # itself (full fetch + hash), and the upload container (full
+              # distro) stamps the timestamped S3 key.
               image: registry.k8s.io/etcd:3.6.4-0
               command:
                 - /bin/sh
                 - -ec
                 - |
-                  SNAP="/backup/etcd-$(date -u +%Y%m%dT%H%M%SZ).db"
                   ETCDCTL_API=3 etcdctl \
                     --endpoints=https://127.0.0.1:2379 \
                     --cacert=/etc/kubernetes/pki/etcd/ca.crt \
                     --cert=/etc/kubernetes/pki/etcd/healthcheck-client.crt \
                     --key=/etc/kubernetes/pki/etcd/healthcheck-client.key \
-                    snapshot save "${SNAP}"
-                  etcdutl snapshot status "${SNAP}" -w table
+                    snapshot save /backup/snapshot.db
+                  [ -s /backup/snapshot.db ] || { echo "snapshot file empty" >&2; exit 1; }
               volumeMounts:
                 - name: etcd-pki
                   mountPath: /etc/kubernetes/pki/etcd
@@ -82,8 +87,8 @@ spec:
                 - /bin/sh
                 - -ec
                 - |
-                  aws s3 cp /backup/ "s3://__BACKUP_BUCKET__/etcd/" \
-                    --recursive --exclude "*" --include "etcd-*.db" \
+                  aws s3 cp /backup/snapshot.db \
+                    "s3://__BACKUP_BUCKET__/etcd/etcd-$(date -u +%Y%m%dT%H%M%SZ).db" \
                     --region "__AWS_REGION__"
                   echo "etcd snapshot uploaded"
               volumeMounts:
