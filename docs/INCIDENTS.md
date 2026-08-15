@@ -306,3 +306,36 @@ finally went away. The drill's clock lost to the shutdown's clock.
 - The failed first Backup object is superseded by an on-demand Backup after
   recovery; `immediate: true` stays (a fresh apply still converges fast —
   on a standby now).
+
+## 14. Env-less barman pods: a pending rollout plus the IMDS blackhole
+
+**Symptom**: after killing the wedged wal-restore of INCIDENTS #13, the
+promotion re-wedged identically: every `barman-cloud-wal-restore` (and the
+long-"running" `barman-cloud-backup`) hung for tens of minutes instead of
+finishing or failing.
+
+**Root cause (two layers)**:
+1. Adding `barmanObjectStore` to a LIVE Cluster injects the S3 credential
+   envs into the instance pods via a rolling restart. The pods predated the
+   change and the rollout never converged before the smoke's failover drill
+   killed the primary — leaving instances whose pod spec has NO
+   `AWS_ACCESS_KEY_ID`/`SECRET`. `kubectl get pod -o jsonpath` on the
+   failover target showed zero AWS envs.
+2. Without env credentials, boto3 walks its provider chain down to IMDS —
+   and the clusterwide IMDS deny (a Cilium DROP, no RST) turns that lookup
+   into a silent connect hang. "No credentials" should fail in seconds; the
+   CCNP converts it into an indefinite wedge. The archive-side condition
+   (`ContinuousArchiving=True`) had been set before the config landed on
+   the pods and never re-evaluated against an env-less instance.
+
+**Fix**: `install.sh` step 10 now refuses to proceed until EVERY PG
+instance pod carries the barman credential envs (bounded 900s wait,
+re-asserting cluster health between polls) — "healthy state" alone is not
+convergence. Recovery of the live incident: kill the zombie barman
+processes, delete the env-less target pod so the operator recreates it
+from the CURRENT spec, promotion completes.
+
+**Lesson**: the IMDS CCNP is working as designed — but any process that
+MIGHT fall through to IMDS must be guaranteed its explicit credentials
+first. Config that arrives via pod-spec changes is not "applied" until the
+rollout converges; gates must check the pods, not the CR.
