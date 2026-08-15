@@ -54,8 +54,9 @@ spec:
   # SSM by install.sh) — the IMDS CCNP denies the instance profile to these
   # pods and is not to be widened. In-tree barmanObjectStore on purpose:
   # supported through CNPG 1.x; the Barman Cloud plugin migration is noted
-  # for the External Secrets sprint. Retention matches the bucket lifecycle
-  # (14d). __BACKUP_BUCKET__ is substituted by platform/install.sh.
+  # for the External Secrets sprint. Retention: barman prunes at 14d; the
+  # bucket lifecycle sits ABOVE it at 18d as safety net, never executioner.
+  # __BACKUP_BUCKET__ is substituted by platform/install.sh.
   # serverName is PER INCARNATION (__SERVER_NAME__ = logistics-pg-<gen>):
   # barman refuses to archive into a prefix already written by a previous
   # cluster, so each apply-from-scratch gets its own generation. install.sh

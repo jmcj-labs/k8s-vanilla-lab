@@ -181,8 +181,9 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   el Gateway + policies por servicio, Fase 1.5.
 - **Rotación manual de las access keys de barman** (usuario `cnpg-backup`)
   hasta External Secrets (S3): crear segunda key → sobrescribir el parámetro
-  SSM persistente → `make platform` (el Secret lleva `cnpg.io/reload:
-  "true"`, CNPG lo recarga sin rollout) → verificar WAL → borrar la vieja
+  SSM persistente → `make platform` (el Secret lleva el label
+  `cnpg.io/reload: "true"` — label, no annotation —, CNPG lo recarga sin
+  rollout) → verificar WAL → borrar la vieja
   (flujo completo en `tofu/envs/persistent/README.md`). La migración del
   in-tree `barmanObjectStore` (deprecado por CNPG) al plugin Barman Cloud
   va al mismo sprint.

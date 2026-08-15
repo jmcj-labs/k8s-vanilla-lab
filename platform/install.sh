@@ -281,7 +281,7 @@ import json,sys
 keys=json.load(sys.stdin)
 json.dump({"apiVersion":"v1","kind":"Secret",
      "metadata":{"name":"cnpg-backup-creds","namespace":"data",
-                 "annotations":{"cnpg.io/reload":"true"}},
+                 "labels":{"cnpg.io/reload":"true"}},
      "type":"Opaque",
      "stringData":{"ACCESS_KEY_ID":keys["ACCESS_KEY_ID"],
                    "SECRET_ACCESS_KEY":keys["SECRET_ACCESS_KEY"]}},sys.stdout)' \
@@ -301,16 +301,20 @@ if [ -z "${GEN}" ]; then
   GEN="$(date -u +%Y%m%dt%H%M%Sz)"
   kubectl -n data create configmap cnpg-backup-generation \
     --from-literal=generation="${GEN}"
-  aws ssm put-parameter \
-    --name "/k8s/persistent/${CLUSTER_NAME}/cnpg-server-name" \
-    --type String --overwrite \
-    --value "logistics-pg-${GEN}" \
-    --region "${AWS_REGION}" >/dev/null
-  log "✓ New backup generation minted: logistics-pg-${GEN} (recorded in SSM)"
+  log "✓ New backup generation minted: logistics-pg-${GEN}"
 else
   log "✓ Existing backup generation reused: logistics-pg-${GEN}"
 fi
 CNPG_SERVER_NAME="logistics-pg-${GEN}"
+# The SSM record runs on EVERY pass (idempotent --overwrite), outside the
+# mint block: if the put failed on the first run, the next re-run repairs
+# it instead of leaving the drill without its origin pointer forever.
+aws ssm put-parameter \
+  --name "/k8s/persistent/${CLUSTER_NAME}/cnpg-server-name" \
+  --type String --overwrite \
+  --value "${CNPG_SERVER_NAME}" \
+  --region "${AWS_REGION}" >/dev/null
+log "✓ SSM cnpg-server-name = ${CNPG_SERVER_NAME}"
 
 log "Step 10/12: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
 DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"

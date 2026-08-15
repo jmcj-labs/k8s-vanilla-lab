@@ -7,7 +7,7 @@ backups. Second persistent piece of the lab, after `tofu/envs/identity`.
 
 | Piece | Purpose |
 |---|---|
-| S3 bucket `<cluster>-backups-<account>` | One bucket, two prefixes: `etcd/` (snapshots, 7-day lifecycle) and `cnpg/` (base backups + WAL, 14-day lifecycle). Versioned, SSE-S3, public access fully blocked |
+| S3 bucket `<cluster>-backups-<account>` | One bucket, two prefixes: `etcd/` (snapshots, 7-day lifecycle) and `cnpg/` (base backups + WAL, **18-day lifecycle** — barman's 14d retention prunes first; the lifecycle is the safety net). Versioned, SSE-S3, public access fully blocked |
 | IAM user `k8s-vanilla-lab-cnpg-backup` | barman's identity — Put/Get/Delete/List scoped to `cnpg/*` only. Static user because the IMDS CCNP denies the instance profile to CNPG pods and is not to be widened |
 
 The etcd CronJob does NOT use this user: it runs `hostNetwork` on the CP,
@@ -50,8 +50,8 @@ aws iam create-access-key --user-name k8s-vanilla-lab-cnpg-backup \
    user supports two concurrent keys — no gap).
 2. Overwrite the SSM parameter with the new pair (same command as above).
 3. `make platform` — re-projects `data/cnpg-backup-creds`; the Secret
-   carries `cnpg.io/reload: "true"`, so CNPG reloads it into the pods
-   without a rollout.
+   carries the `cnpg.io/reload: "true"` LABEL (CNPG requires a label, not
+   an annotation), so CNPG reloads it into the pods without a rollout.
 4. Verify archiving stayed green: `kubectl -n data get cluster logistics-pg
    -o jsonpath='{.status.conditions[?(@.type=="ContinuousArchiving")].status}'`
    → `True`, and a fresh WAL lands under `cnpg/<serverName>/wals/`.
