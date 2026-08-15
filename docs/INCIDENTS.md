@@ -339,3 +339,34 @@ from the CURRENT spec, promotion completes.
 MIGHT fall through to IMDS must be guaranteed its explicit credentials
 first. Config that arrives via pod-spec changes is not "applied" until the
 rollout converges; gates must check the pods, not the CR.
+
+### Adenda a #13/#14: el interbloqueo del operador — y la salida quirúrgica que no usamos
+
+Estado alcanzado durante la recuperación: `currentPrimary=logistics-pg-1`
+(pod ya inexistente), `targetPrimary=logistics-pg-2` (pod borrado durante el
+desatasco, PVC intacta). La máquina de estados del operador entra en bucle:
+"There is a switchover or a failover in progress, waiting for the operation
+to complete" — **no recrea el pod del target mientras el failover esté en
+curso, y el failover no puede completar sin ese pod**. Reiniciar el
+operador no ayuda: el bucle es status-driven, no de caché.
+
+Promocionar la única instancia viva (`kubectl cnpg promote … logistics-pg-3`)
+habría arriesgado el mismo cuelgue de wal-restore que atascó a pg-2 (la
+causa exacta de esos cuelgues quedó sin probar — ver la corrección de #14).
+
+**La salida quirúrgica existe y es esta** (para el día en que esto ocurra
+con datos que importen): editar el **status subresource** del Cluster para
+desbloquear la máquina de estados — vaciar/realinear `targetPrimary` (p. ej.
+apuntándolo a una instancia viva y con envs, o igualándolo a
+`currentPrimary` para cancelar el failover) vía
+`kubectl -n data patch cluster logistics-pg --subresource=status --type=merge -p '…'`,
+y dejar que el reconcile continúe desde un estado consistente. Es cirugía de
+riesgo (el status es propiedad del operador; hacerlo con un backup base +
+WAL verificados en S3, nunca sin ellos).
+
+**Aquí no la usamos a propósito**: cluster de laboratorio efímero, datos
+sintéticos, incidente ya convertido en tres fixes de código (#49 prefer-standby
++ guard, #50 gate de convergencia de envs) — el ciclo limpio destroy→apply
+ejercita además el propio S2-1 (cleanup de EBS, supervivencia del bucket,
+pods nacidos con envs). La cirugía queda documentada; la decisión de usarla
+es del operador y depende del valor de los datos.
