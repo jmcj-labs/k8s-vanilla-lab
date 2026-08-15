@@ -133,19 +133,18 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
   `http://<ip-worker>:<nodeport>` (password en el secret
   `kube-prometheus-stack-grafana`)
 
-**Qué login necesita cada target de make** — la trampa: `aws sso login`
-renueva el token del perfil, pero los targets que llaman a `aws` a pelo no
-llevan `--profile`, así que usan lo que haya en el ambiente (`AWS_PROFILE`
-o el perfil `default`):
+**Qué login necesita cada target de make** — el Makefile defaultea
+`AWS_PROFILE=k8s-vanilla-lab` en local (override respetado; en CI no
+aplica) y todo target de CLI pasa por el preflight `check-aws`, que falla
+nombrando el perfil y el login exacto:
 
 | Target | Credencial que usa |
 |--------|--------------------|
-| `make apply` / `plan` / `destroy` | el provider lee `aws_profile` de `terraform.tfvars` → basta `aws sso login --profile k8s-vanilla-lab`, sin exportar nada |
-| `make kubeconfig` / `platform` / `smoke-test` / `smoke-app-contract` | CLI ambiente → **exportar `AWS_PROFILE=k8s-vanilla-lab`** (`.envrc` + direnv, o prefijo en el comando) además del login |
+| `make apply` / `plan` / `destroy` | el provider lee `aws_profile` de `terraform.tfvars` → basta `aws sso login --profile k8s-vanilla-lab` |
+| `make kubeconfig` / `platform` / `smoke-test` / `smoke-app-contract` | `AWS_PROFILE` del entorno, con default local `k8s-vanilla-lab` → el mismo login basta, sin exportar nada |
 | `make kubeconfig-admin` / `kubeconfig-dev` | sesiones SSO `k8s-platform` / `k8s-dev` (ADR-005) — perfiles distintos del de tofu |
 
-Síntoma típico de mezclarlos: `Token has expired` en `make kubeconfig` con
-los SSO recién logueados — ver `docs/troubleshooting.md`.
+Historia del cepo (`Token has expired` sin dueño): `docs/troubleshooting.md`.
 
 **FinOps**: ~$0.055/h (CP $0.038 + 3×spot $0.0055) ≈ **$1.3/día** si se deja
 encendido. El cron de destroy nocturno está **pausado** durante el sprint —
