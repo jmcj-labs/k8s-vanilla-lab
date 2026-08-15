@@ -23,6 +23,8 @@ jobs:
     name: Apply Infrastructure
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'apply'
+    outputs:
+      cp_eip: ${{ steps.apply_outputs.outputs.cp_eip }}
     defaults:
       run:
         working-directory: tofu/envs/lab
@@ -130,6 +132,13 @@ jobs:
           TF_VAR_aws_profile: ""
           TF_VAR_lab_account_id: ${{ vars.LAB_ACCOUNT_ID }}
         run: tofu apply -auto-approve -no-color
+
+      # The EIP is public data already in the tofu state — publishing it as a
+      # job output lets notify-slack report the endpoint without decrypting
+      # the admin kubeconfig SecureString (PLAN-SPRINTS S2 hygiene microcommit).
+      - name: Publish apply outputs (non-sensitive)
+        id: apply_outputs
+        run: echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
 
       - name: Install platform layer
         env:
@@ -297,17 +306,12 @@ jobs:
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
+          CP_EIP: ${{ needs.apply.outputs.cp_eip }}
         run: |
-          # /api-endpoint in SSM is the CP *private* IP by design (workers join
-          # through it). The reachable endpoint is the server: URL of the
-          # EIP-rewritten kubeconfig (ADR-004), so extract it from there.
-          API_ENDPOINT=$(aws ssm get-parameter \
-            --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
-            --with-decryption \
-            --query Parameter.Value \
-            --output text \
-            --region "${AWS_REGION}" 2>/dev/null \
-            | awk '$1 == "server:" {sub(/^https:\/\//, "", $2); print $2; exit}')
+          # The EIP arrives as a non-sensitive job output from the apply job
+          # (tofu output -raw) — this job no longer decrypts the admin
+          # kubeconfig SecureString to learn a public datum.
+          API_ENDPOINT="${CP_EIP:+${CP_EIP}:6443}"
           API_ENDPOINT="${API_ENDPOINT:-unknown}"
 
           WORKER_COUNT=$(aws ec2 describe-instances \
