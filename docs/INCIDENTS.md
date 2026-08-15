@@ -276,3 +276,33 @@ which scheme a token carries, so the trust covers both; nothing is widened
 (the IDs are strictly narrower than the name — they survive renames).
 Smoke check 11b updated to accept either scheme while still failing on any
 foreign repo or broad wildcard.
+
+## 13. First live run of S2-1: base backup vs failover drill — a 1800s shutdown inside a 300s wait
+
+**Symptom**: the first Apply after merging S2-1 (incremental, onto the live
+cluster) failed at the smoke's failover drill:
+`CNPG failover did not complete in 300s (phase: Failing over, primary:
+logistics-pg-1)`. The old primary sat in `Terminating` for far longer than
+any failover should take; `targetPrimary` was already `logistics-pg-2`.
+
+**Root cause**: a race between two features shipped in the same piece. The
+`immediate: true` ScheduledBackup started the FIRST base backup on the
+primary (CNPG's default backup target) right after `make platform`; minutes
+later the smoke killed that primary for the failover drill. CNPG pods carry
+`terminationGracePeriodSeconds: 1800` — the smart shutdown deliberately
+holds a terminating instance while its backup/checkpoint drains — so the
+old primary would not die for up to 30 minutes, and the smoke only waits
+300s. Nothing was broken: archiving stayed green
+(`ContinuousArchiving=True`) and the promotion completed once the pod
+finally went away. The drill's clock lost to the shutdown's clock.
+
+**Fix (both sides, defense in depth)**:
+- `spec.backup.target: prefer-standby` on the Cluster: base backups run on
+  a REPLICA, so losing the primary never collides with a backup. With 3
+  instances a standby is always available; CNPG only falls back to the
+  primary in degraded states.
+- Smoke guard before the failover drill: wait (up to 600s) until no Backup
+  is `running` — covers exactly that degraded fallback.
+- The failed first Backup object is superseded by an on-demand Backup after
+  recovery; `immediate: true` stays (a fresh apply still converges fast —
+  on a standby now).
