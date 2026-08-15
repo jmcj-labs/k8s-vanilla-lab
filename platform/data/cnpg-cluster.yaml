@@ -47,3 +47,27 @@ spec:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
     podAntiAffinityType: required
+
+  # S2 piece 1: continuous WAL archiving + base backups to the persistent
+  # bucket (tofu/envs/persistent, survives cluster destroy). Credentials are
+  # the dedicated IAM user's keys (cnpg-backup-creds Secret, projected from
+  # SSM by install.sh) — the IMDS CCNP denies the instance profile to these
+  # pods and is not to be widened. In-tree barmanObjectStore on purpose:
+  # supported through CNPG 1.x; the Barman Cloud plugin migration is noted
+  # for the External Secrets sprint. Retention matches the bucket lifecycle
+  # (14d). __BACKUP_BUCKET__ is substituted by platform/install.sh.
+  backup:
+    retentionPolicy: "14d"
+    barmanObjectStore:
+      destinationPath: s3://__BACKUP_BUCKET__/cnpg
+      s3Credentials:
+        accessKeyId:
+          name: cnpg-backup-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: cnpg-backup-creds
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+      data:
+        compression: gzip
