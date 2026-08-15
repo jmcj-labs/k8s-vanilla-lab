@@ -77,3 +77,15 @@ spec:
     # The CNPG instance manager patches its own status against the API server
     - toEntities:
         - kube-apiserver
+    # barman → S3 (S2-1 backups, INCIDENTS #15): base backups + WAL archiving
+    # + the restore drills all speak HTTPS to the backups bucket. This policy
+    # predates backups and its default-deny silently blackholed every barman
+    # S3 call (hangs, not errors — TCP connects die without RST). `world` on
+    # 443 is the pragmatic opening: S3 has no stable CIDR and toFQDNs needs
+    # the DNS-proxy L7 path — tightening to toFQDNs is a Sprint 3 candidate.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
