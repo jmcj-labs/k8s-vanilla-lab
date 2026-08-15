@@ -144,15 +144,16 @@ resource "aws_iam_user_policy" "cnpg_backup" {
         Resource = "${aws_s3_bucket.backups.arn}/cnpg/*"
       },
       {
-        Sid      = "CnpgPrefixList"
+        # No prefix condition ON PURPOSE (INCIDENTS #14): barman-cloud runs
+        # HeadBucket as its connectivity check, and HeadBucket maps to
+        # s3:ListBucket with NO prefix in the request — a prefix condition
+        # 403s the check and archiving never starts. Cost of the widening:
+        # this user can list KEY NAMES bucket-wide (etcd/ included); object
+        # CONTENT stays scoped to cnpg/* above.
+        Sid      = "CnpgBucketList"
         Effect   = "Allow"
         Action   = "s3:ListBucket"
         Resource = aws_s3_bucket.backups.arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = "cnpg/*"
-          }
-        }
       }
     ]
   })
