@@ -9,11 +9,32 @@ KUBECONFIG_PATH ?= $(HOME)/.kube/k8s-vanilla-lab.conf
 SSH_KEY_PATH    ?= $(HOME)/.ssh/k8s-vanilla-lab.pem
 SSH_USER        := ubuntu
 
+# The CLI-based targets call plain `aws` — resolved from the environment.
+# Locally that silently fell through to the stale `default` profile when
+# AWS_PROFILE was not exported ("Token has expired" with no owner, twice in
+# one day — troubleshooting.md). Default it to the documented lab profile
+# LOCALLY ONLY: in CI (GITHUB_ACTIONS set) credentials come from OIDC env
+# vars and no named profile exists, so the default must not apply there.
+ifndef GITHUB_ACTIONS
+AWS_PROFILE ?= k8s-vanilla-lab
+export AWS_PROFILE
+endif
+
 .DEFAULT_GOAL := help
 
-.PHONY: help init validate fmt plan apply destroy \
+.PHONY: help check-aws init validate fmt plan apply destroy \
         plan-empty kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
         smoke-app-contract ssh-cp ssh-worker clean bootstrap-aws
+
+# Preflight for every target that talks to AWS via the CLI: fail fast and
+# NAME the credential chain in use instead of leaking a bare
+# "Token has expired" from three commands deep.
+check-aws:
+	@aws sts get-caller-identity >/dev/null 2>&1 || { \
+	  echo "✗ AWS credentials unusable (profile: $${AWS_PROFILE:-<default>})"; \
+	  echo "  fix: aws sso login --profile $${AWS_PROFILE:-k8s-vanilla-lab}"; \
+	  echo "  (per-target credential table: docs/CLUSTER.md §4)"; \
+	  exit 1; }
 
 # ── Meta ─────────────────────────────────────────────────────────────────────
 
@@ -64,15 +85,15 @@ destroy: ## Destroy all infrastructure (auto-approve)
 
 # ── Cluster access ────────────────────────────────────────────────────────────
 
-kubeconfig-admin: ## IAM-auth kubeconfig (platform-admin role) → ~/.kube/k8s-vanilla-lab-admin.conf
+kubeconfig-admin: check-aws ## IAM-auth kubeconfig (platform-admin role) → ~/.kube/k8s-vanilla-lab-admin.conf
 	@CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/iam-kubeconfig.sh admin $(HOME)/.kube/k8s-vanilla-lab-admin.conf
 
-kubeconfig-dev: ## IAM-auth kubeconfig (developer role, ns logistics) → ~/.kube/k8s-vanilla-lab-dev.conf
+kubeconfig-dev: check-aws ## IAM-auth kubeconfig (developer role, ns logistics) → ~/.kube/k8s-vanilla-lab-dev.conf
 	@CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/iam-kubeconfig.sh dev $(HOME)/.kube/k8s-vanilla-lab-dev.conf
 
-kubeconfig: ## BREAK-GLASS admin kubeconfig from SSM (static cert — daily use is kubeconfig-admin)
+kubeconfig: check-aws ## BREAK-GLASS admin kubeconfig from SSM (static cert — daily use is kubeconfig-admin)
 	@aws ssm get-parameter \
 	  --name "/k8s/$(CLUSTER_NAME)/kubeconfig" \
 	  --with-decryption \
@@ -84,7 +105,7 @@ kubeconfig: ## BREAK-GLASS admin kubeconfig from SSM (static cert — daily use 
 	@echo ""
 	@echo "  export KUBECONFIG=$(KUBECONFIG_PATH)"
 
-platform: ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, monitoring)
+platform: check-aws ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, monitoring)
 	@KUBECONFIG_FILE=$$(mktemp); \
 	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
 	if ! aws ssm get-parameter \
@@ -99,7 +120,7 @@ platform: ## Install platform layer (EBS CSI, cert-manager, Gateway, operators, 
 	chmod 600 "$$KUBECONFIG_FILE"; \
 	KUBECONFIG="$$KUBECONFIG_FILE" AWS_REGION=$(AWS_REGION) CLUSTER_NAME=$(CLUSTER_NAME) bash platform/install.sh
 
-smoke-test: ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, operators)
+smoke-test: check-aws ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, operators)
 	@KUBECONFIG_FILE=$$(mktemp); \
 	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
 	if ! aws ssm get-parameter \
@@ -120,7 +141,7 @@ smoke-test: ## Verify cluster + platform (nodes, KPR, providerID, PVC, Gateway, 
 	  CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/smoke-test.sh
 
-smoke-app-contract: ## Verify the deployed app against the platform contract (run AFTER Repo 2 deploys; needs GITHUB_SHA)
+smoke-app-contract: check-aws ## Verify the deployed app against the platform contract (run AFTER Repo 2 deploys; needs GITHUB_SHA)
 	@KUBECONFIG_FILE=$$(mktemp); \
 	trap 'rm -f "$$KUBECONFIG_FILE"' EXIT; \
 	aws ssm get-parameter --name "/k8s/$(CLUSTER_NAME)/kubeconfig" --with-decryption \

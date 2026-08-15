@@ -183,11 +183,13 @@ provider carries `profile = aws_profile` from `terraform.tfvars`; the
 CLI-based targets have no such fallback. Per-target credential table in
 `docs/CLUSTER.md` §4.
 
-**Fix**:
-
-```bash
-AWS_PROFILE=k8s-vanilla-lab make kubeconfig     # or export it / enable direnv
-```
+**Fix (durable, shipped after the trap bit twice in one day)**: the
+Makefile now defaults `AWS_PROFILE=k8s-vanilla-lab` LOCALLY (env override
+respected; in CI — `GITHUB_ACTIONS` set — the default does not apply, OIDC
+env credentials rule), and every CLI target runs a `check-aws` preflight
+that fails fast NAMING the profile in use and the exact login to run.
+A bare `make kubeconfig` after `aws sso login --profile k8s-vanilla-lab`
+now just works.
 
 ## OpenTofu state locked
 
