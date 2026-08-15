@@ -167,6 +167,28 @@ Other causes:
 
 ---
 
+## `make kubeconfig` fails with "Token has expired" right after a successful SSO login
+
+**Symptom**: `aws sso login --profile k8s-vanilla-lab` (and/or `k8s-platform`)
+succeeds, but `make kubeconfig` / `make platform` / `make smoke-test` still
+die with `Token has expired`.
+
+**Cause**: those targets call the plain `aws` CLI with **no `--profile`** —
+they resolve credentials from the ambient environment (`AWS_PROFILE`, else
+the `default` profile). The login renewed the named profile's token, but the
+command is reading a different chain (typically: `AWS_PROFILE` not exported
+in this shell — direnv not hooked — so `default` with a stale token). The
+asymmetry: `make apply` works without exporting anything because the tofu
+provider carries `profile = aws_profile` from `terraform.tfvars`; the
+CLI-based targets have no such fallback. Per-target credential table in
+`docs/CLUSTER.md` §4.
+
+**Fix**:
+
+```bash
+AWS_PROFILE=k8s-vanilla-lab make kubeconfig     # or export it / enable direnv
+```
+
 ## OpenTofu state locked
 
 **Symptom**: `Error: Error acquiring the state lock`

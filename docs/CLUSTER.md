@@ -114,6 +114,20 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
   `http://<ip-worker>:<nodeport>` (password en el secret
   `kube-prometheus-stack-grafana`)
 
+**Qué login necesita cada target de make** — la trampa: `aws sso login`
+renueva el token del perfil, pero los targets que llaman a `aws` a pelo no
+llevan `--profile`, así que usan lo que haya en el ambiente (`AWS_PROFILE`
+o el perfil `default`):
+
+| Target | Credencial que usa |
+|--------|--------------------|
+| `make apply` / `plan` / `destroy` | el provider lee `aws_profile` de `terraform.tfvars` → basta `aws sso login --profile k8s-vanilla-lab`, sin exportar nada |
+| `make kubeconfig` / `platform` / `smoke-test` / `smoke-app-contract` | CLI ambiente → **exportar `AWS_PROFILE=k8s-vanilla-lab`** (`.envrc` + direnv, o prefijo en el comando) además del login |
+| `make kubeconfig-admin` / `kubeconfig-dev` | sesiones SSO `k8s-platform` / `k8s-dev` (ADR-005) — perfiles distintos del de tofu |
+
+Síntoma típico de mezclarlos: `Token has expired` en `make kubeconfig` con
+los SSO recién logueados — ver `docs/troubleshooting.md`.
+
 **FinOps**: ~$0.055/h (CP $0.038 + 3×spot $0.0055) ≈ **$1.3/día** si se deja
 encendido. El cron de destroy nocturno está **pausado** durante el sprint —
 el cluster no se apaga solo: destruir a mano al terminar el día. Slack
