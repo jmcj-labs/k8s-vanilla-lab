@@ -61,6 +61,17 @@ Secuencia profesional: plataforma → app en staging → **hardening de resilien
 
 El orden interno importa:
 
+### Microcommit de higiene operativa (al arrancar S2)
+- La notificación Slack introducida en el PR #40 debe obtener
+  `control_plane_public_ip` de `tofu output -raw` al terminar el apply y
+  publicarla como output no sensible del job; `notify-slack` recibe esa EIP y
+  añade `:6443`. Así conserva su diseño sin checkout/backend/Tofu y deja de
+  descifrar el kubeconfig admin de SSM para obtener un dato público.
+- El `awk` actual solo emite el primer valor de `server:`, elimina `https://` y
+  no vuelca certificado ni clave. No hay filtración observada; el cambio se
+  justifica por mínima superficie y separación de responsabilidades, no por una
+  fuga activa.
+
 ### 1. Backups con restore probado (primero — nunca tocar etcd sin backup)
 - etcd: CronJob → snapshot a S3 (patrón BP-005 del Review EPO) + **restore ejecutado y documentado**
 - Postgres: CNPG backups a S3 (barman) + restore probado
