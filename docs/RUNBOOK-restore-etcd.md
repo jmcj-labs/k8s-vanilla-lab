@@ -100,4 +100,9 @@ Después: `kubectl delete configmap drill-marker` y
 
 | Fecha | Snapshot→S3 | Restore completo (API caída) | Testigo verificado | Operador |
 |-------|-------------|------------------------------|--------------------|----------|
-| _(pendiente de la primera ejecución con cluster vivo)_ | | | | |
+| 2026-08-15 | 11s (`etcd-20260815T195612Z.db`, 42 MB) | 45s | ✅ `drill-marker` ts=2026-08-15T19:56:09Z intacto — **THE WITNESS IS BACK** | jmcastellanojimenez (vía `scripts/drill-restore-etcd.sh`) |
+
+Primera ejecución real: drill completo en **58s** end-to-end. Nota de la
+ejecución: el primer intento abortó a los 7s por el nombre del tarball en
+la verificación de checksum (PR #57) — fail-closed exacto: el plano de
+control no se tocó hasta que la verificación pasó.
