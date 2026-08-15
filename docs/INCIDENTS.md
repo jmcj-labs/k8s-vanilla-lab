@@ -351,7 +351,8 @@ curso, y el failover no puede completar sin ese pod**. Reiniciar el
 operador no ayuda: el bucle es status-driven, no de caché.
 
 Promocionar la única instancia viva (`kubectl cnpg promote … logistics-pg-3`)
-habría reproducido el cuelgue de #14: pg-3 también era env-less.
+habría arriesgado el mismo cuelgue de wal-restore que atascó a pg-2 (la
+causa exacta de esos cuelgues quedó sin probar — ver la corrección de #14).
 
 **La salida quirúrgica existe y es esta** (para el día en que esto ocurra
 con datos que importen): editar el **status subresource** del Cluster para
