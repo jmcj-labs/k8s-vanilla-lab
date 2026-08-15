@@ -249,3 +249,30 @@ list length is fixed by a static `for_each` even when the ARNs are unknown.
 runs `tofu plan` against an **empty local-backend state** (`make plan-empty`),
 turning "plans from zero" into a CI invariant. Verified: `47 to add, 0 change,
 0 destroy`.
+
+## 12. First real app deploy: OIDC trust rejected the ID-qualified subject claim
+
+**Symptom**: logistics-lab's first `workflow_dispatch` deploy on `main`
+(run 31885711901) died at `configure-aws-credentials`:
+`Not authorized to perform sts:AssumeRoleWithWebIdentity` after 12 retries.
+Audience, provider and the six repo variables were all correct, and the
+`sub` pattern in the trust — `repo:jmcj-labs/logistics-lab:ref:refs/heads/main`
+— looked like an exact match for a dispatch on main (without `environment:`
+in the job, `workflow_dispatch` emits the same ref-based sub as push).
+
+**Root cause**: the repo emits its OIDC subject in GitHub's **ID-qualified
+(immutable) naming scheme** — the repo's OIDC customization endpoint reports
+`sub_claim_prefix: repo:jmcj-labs@284581373/logistics-lab@1331865297` — so
+the token's sub is `repo:jmcj-labs@284581373/logistics-lab@1331865297:ref:…`,
+which the classic-form `StringLike` can never match. Rename-proof subjects
+protect against repo-resurrection attacks; the trust policy predates the
+scheme. The two `@` IDs are the org and repo database IDs — stable across
+renames, unique to this exact repo.
+
+**Fix**: trust BOTH naming schemes of the same repo — the classic pair and
+the ID-qualified pair (`app_repo_ids` in `tofu/modules/registry`), still
+main + tags only, still zero wildcards on the repo identity. GitHub decides
+which scheme a token carries, so the trust covers both; nothing is widened
+(the IDs are strictly narrower than the name — they survive renames).
+Smoke check 11b updated to accept either scheme while still failing on any
+foreign repo or broad wildcard.

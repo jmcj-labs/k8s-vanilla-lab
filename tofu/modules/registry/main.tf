@@ -103,12 +103,22 @@ resource "aws_iam_role" "app_ci" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           # Exactly this repo, exactly main or release tags — never a
-          # wildcard that admits other repos or the whole org.
+          # wildcard that admits other repos or the whole org. Both naming
+          # schemes of the SAME repo are trusted: the classic org/name sub
+          # and the ID-qualified sub (owner@id/repo@id) that repos with
+          # immutable subject claims emit (INCIDENTS #12) — GitHub decides
+          # which one the token carries, so the trust must cover both.
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = [
-              "repo:${var.app_repo}:ref:refs/heads/main",
-              "repo:${var.app_repo}:ref:refs/tags/*"
-            ]
+            "token.actions.githubusercontent.com:sub" = concat(
+              [
+                "repo:${var.app_repo}:ref:refs/heads/main",
+                "repo:${var.app_repo}:ref:refs/tags/*"
+              ],
+              var.app_repo_ids == "" ? [] : [
+                "repo:${var.app_repo_ids}:ref:refs/heads/main",
+                "repo:${var.app_repo_ids}:ref:refs/tags/*"
+              ]
+            )
           }
         }
       }
