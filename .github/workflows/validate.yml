@@ -59,6 +59,11 @@ jobs:
 
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
+        env:
+          # tflint --init downloads the AWS ruleset from the GitHub API;
+          # unauthenticated it shares 60 req/h across the runner's IP and
+          # flakes with 403 rate limits (PR #16's June failure).
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Validate (fmt + syntax, no AWS needed)
         run: make validate
