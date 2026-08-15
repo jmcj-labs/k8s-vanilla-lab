@@ -162,8 +162,10 @@ module "control_plane" {
 
   # IGW must exist before instances (internet access needed during bootstrap).
   # On destroy this reverses: module destroyed before IGW, releasing EIP
-  # associations so the IGW can detach from the VPC cleanly.
-  depends_on = [aws_internet_gateway.main]
+  # associations so the IGW can detach from the VPC cleanly. The EBS cleanup
+  # dependency makes "ALL instances dead before deleting volumes" strict —
+  # workers alone would leave the CP racing the cleanup.
+  depends_on = [aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
 }
 
 # Stable Kubernetes-access IAM roles (aws-iam-authenticator identities).
@@ -185,6 +187,75 @@ module "registry" {
 }
 
 # Worker Module
+# Destroy-time cleanup of the DYNAMIC EBS volumes the CSI driver provisions
+# at runtime (PG/Kafka PVCs) — OpenTofu never tracks them, so without this
+# they linger `available` and billing after every destroy (CLUSTER.md §5).
+# Safe to delete blindly since S2 piece 1: the conservation path is S3
+# (CNPG base+WAL and etcd snapshots in the persistent bucket), not these
+# volumes.
+#
+# Ordering trick (inverse of the orphaned-ENI pattern): BOTH instance
+# modules depend ON this resource, so on destroy every instance dies FIRST,
+# the CSI volumes detach, and only then does this provisioner run — with a
+# bounded wait for volumes still detaching. Scoped by the CSI tags AND the
+# cluster's OWN tag (k8s-cluster, stamped by the gp3 StorageClass
+# tagSpecification), the same tag the CI role's DeleteVolume permission is
+# conditioned on. Fails the destroy HARD if volumes remain after the last
+# retry, and only tolerates the transient detaching errors — anything else
+# aborts immediately.
+resource "terraform_data" "cleanup_dynamic_ebs" {
+  input = {
+    region  = var.aws_region
+    cluster = var.cluster_name
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      set -eu
+      echo "Cleaning dynamic CSI EBS volumes (backups in S3 are the conservation path)..."
+      REMAINING=-1
+      for ATTEMPT in $(seq 1 12); do
+        VOLS=$(aws ec2 describe-volumes \
+          --filters "Name=status,Values=available" \
+                    "Name=tag-key,Values=kubernetes.io/created-for/pvc/name" \
+                    "Name=tag:ebs.csi.aws.com/cluster,Values=true" \
+                    "Name=tag:k8s-cluster,Values=${self.input.cluster}" \
+          --query 'Volumes[*].VolumeId' \
+          --output text \
+          --region ${self.input.region})
+        for VOL in $VOLS; do
+          [ -z "$VOL" ] && continue
+          echo "Deleting volume $VOL"
+          if ! OUT=$(aws ec2 delete-volume --volume-id "$VOL" --region ${self.input.region} 2>&1); then
+            case "$OUT" in
+              *VolumeInUse*|*IncorrectState*)
+                echo "  transient: $VOL still detaching" ;;
+              *)
+                echo "$OUT" >&2
+                exit 1 ;;
+            esac
+          fi
+        done
+        REMAINING=$(aws ec2 describe-volumes \
+          --filters "Name=tag-key,Values=kubernetes.io/created-for/pvc/name" \
+                    "Name=tag:ebs.csi.aws.com/cluster,Values=true" \
+                    "Name=tag:k8s-cluster,Values=${self.input.cluster}" \
+          --query 'length(Volumes)' --output text \
+          --region ${self.input.region})
+        [ "$REMAINING" = "0" ] && break
+        echo "  $REMAINING volume(s) still present — retry $ATTEMPT/12"
+        sleep 10
+      done
+      if [ "$REMAINING" != "0" ]; then
+        echo "ERROR: $REMAINING dynamic CSI volume(s) still present after all retries — failing the destroy" >&2
+        exit 1
+      fi
+      echo "Dynamic EBS cleanup complete."
+    EOT
+  }
+}
+
 module "worker" {
   source = "../../modules/worker"
 
@@ -203,5 +274,5 @@ module "worker" {
   capacity_type                   = var.worker_capacity_type
   tags                            = local.common_tags
 
-  depends_on = [module.control_plane, aws_internet_gateway.main]
+  depends_on = [module.control_plane, aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
 }
