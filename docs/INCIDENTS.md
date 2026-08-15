@@ -386,3 +386,46 @@ sintéticos, incidente ya convertido en tres fixes de código (#49 prefer-standb
 ejercita además el propio S2-1 (cleanup de EBS, supervivencia del bucket,
 pods nacidos con envs). La cirugía queda documentada; la decisión de usarla
 es del operador y depende del valor de los datos.
+
+## 15. The missing link: the data CNP was blackholing barman's road to S3
+
+**Symptom (fresh cluster, IAM fixed)**: `ContinuousArchiving` turned True at
+18:49, the platform finished at 18:51, and the first base backup then sat in
+`running` for 25+ minutes — barman's postgres session idle in `ClientRead`,
+nothing in `base/`, and a direct probe from the PG pods to the bucket
+endpoint timing out from EVERY instance.
+
+**Root cause**: `cnp-data-postgres` (phase 2) flips the PG operand pods into
+default-deny and its egress list opened exactly three things: kube-dns,
+replication peers, kube-apiserver. It predates S2-1 — **no rule for S3**.
+The two-minute window between archiving turning green (18:49) and step 11
+applying the policies (18:51:36) explains the deceptive sequence: the WALs
+that landed did so inside that window, the condition stayed True (it
+re-evaluates on failures, and barman's calls were HANGING, not failing),
+and everything after the policy landed was silently blackholed.
+
+**This retroactively closes #13/#14's "cause not fully proven"**: on the
+old cluster the policies were in place all along, so every barman S3 call
+(wal-restore during the promotion, the zombie backup) hung exactly the same
+way. Not IMDS, not credentials, not stale config — a default-deny doing its
+job on traffic nobody had declared.
+
+**Fix**: explicit egress opening in `cnp-data-postgres` — `toEntities:
+world` on TCP/443 (S3 has no stable CIDR; tightening to `toFQDNs` via the
+DNS-proxy path is a Sprint 3 candidate). Verified live: the S3 probe went
+from timeout to an instant HTTP 403 (anonymous, correct) on every pod, and
+an on-demand `Backup` completed in ~30 seconds.
+
+**Lessons**:
+- A hang is a NETWORK answer; an error is a SERVICE answer. barman hanging
+  (instead of 403ing) pointed at packet drop from the start — the IMDS
+  rabbit hole of #14 was chased because the 403 arrived first and stole
+  the spotlight.
+- When a default-deny namespace gains a new external dependency (S2-1
+  adding S3), the policy is part of the feature's definition of done.
+  Hubble would have shown the DROP immediately: it is the FIRST tool for
+  any silent degradation (the house rule existed; it was not applied).
+- `ContinuousArchiving=True` is a health signal with hysteresis: it proves
+  the last attempt worked, not the current path. The install gate now
+  passing on it is still right — but drills remain the only proof that
+  matters.
