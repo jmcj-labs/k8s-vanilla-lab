@@ -185,6 +185,54 @@ module "registry" {
 }
 
 # Worker Module
+# Destroy-time cleanup of the DYNAMIC EBS volumes the CSI driver provisions
+# at runtime (PG/Kafka PVCs) — OpenTofu never tracks them, so without this
+# they linger `available` and billing after every destroy (CLUSTER.md §5).
+# Safe to delete blindly since S2 piece 1: the conservation path is S3
+# (CNPG base+WAL and etcd snapshots in the persistent bucket), not these
+# volumes.
+#
+# Ordering trick (inverse of the orphaned-ENI pattern): module.worker
+# depends ON this resource, so on destroy the instances die FIRST, the CSI
+# volumes detach, and only then does this provisioner run — with a bounded
+# wait for volumes still detaching. Scoped by BOTH CSI tags; the lab
+# account runs a single cluster (documented assumption).
+resource "terraform_data" "cleanup_dynamic_ebs" {
+  input = {
+    region = var.aws_region
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      echo "Cleaning dynamic CSI EBS volumes (backups in S3 are the conservation path)..."
+      for ATTEMPT in $(seq 1 12); do
+        VOLS=$(aws ec2 describe-volumes \
+          --filters "Name=status,Values=available" \
+                    "Name=tag-key,Values=kubernetes.io/created-for/pvc/name" \
+                    "Name=tag:ebs.csi.aws.com/cluster,Values=true" \
+          --query 'Volumes[*].VolumeId' \
+          --output text \
+          --region ${self.input.region} 2>/dev/null || echo "")
+        for VOL in $VOLS; do
+          [ -z "$VOL" ] && continue
+          echo "Deleting volume $VOL"
+          aws ec2 delete-volume --volume-id "$VOL" --region ${self.input.region} || true
+        done
+        REMAINING=$(aws ec2 describe-volumes \
+          --filters "Name=tag-key,Values=kubernetes.io/created-for/pvc/name" \
+                    "Name=tag:ebs.csi.aws.com/cluster,Values=true" \
+          --query 'length(Volumes)' --output text \
+          --region ${self.input.region} 2>/dev/null || echo 0)
+        [ "$REMAINING" = "0" ] && break
+        echo "  $REMAINING volume(s) still present (detaching?) — retry $ATTEMPT/12"
+        sleep 10
+      done
+      echo "Dynamic EBS cleanup complete."
+    EOT
+  }
+}
+
 module "worker" {
   source = "../../modules/worker"
 
@@ -203,5 +251,5 @@ module "worker" {
   capacity_type                   = var.worker_capacity_type
   tags                            = local.common_tags
 
-  depends_on = [module.control_plane, aws_internet_gateway.main]
+  depends_on = [module.control_plane, aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
 }
