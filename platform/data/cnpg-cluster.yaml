@@ -65,6 +65,13 @@ spec:
   # its ORIGIN generation explicitly from there.
   backup:
     retentionPolicy: "14d"
+    # prefer-standby (INCIDENTS #13): base backups run on a REPLICA, so a
+    # backup in flight never collides with losing the primary — CNPG's smart
+    # shutdown holds a terminating primary up to 1800s waiting for its
+    # backup, which wedged the smoke's failover drill on first contact.
+    # With 3 instances a standby is always available; the automatic
+    # fallback to primary only happens in degraded single-instance states.
+    target: prefer-standby
     barmanObjectStore:
       serverName: __SERVER_NAME__
       destinationPath: s3://__BACKUP_BUCKET__/cnpg

@@ -346,6 +346,19 @@ OK "CNPG healthy: 3 instances on 3 distinct workers"
 
 # 10b. FAILOVER — the crown jewel: kill the primary, the operator promotes,
 # the cluster returns to healthy with a DIFFERENT primary.
+# Guard (INCIDENTS #13): never kill the primary while a backup is running.
+# Backups target prefer-standby, but in a degraded state CNPG may fall back
+# to the primary — and its smart shutdown then holds the terminating pod up
+# to 1800s waiting for the backup, wedging the 300s failover wait.
+BK_ELAPSED=0
+while kubectl -n data get backup -o jsonpath='{.items[*].status.phase}' 2>/dev/null | grep -qw running; do
+  if [ "${BK_ELAPSED}" -ge 600 ]; then
+    FAIL "a CNPG backup has been running for over 600s — not safe to run the failover drill"
+  fi
+  echo "  backup in flight — waiting before the failover drill (${BK_ELAPSED}s)"
+  sleep 15
+  BK_ELAPSED=$((BK_ELAPSED + 15))
+done
 OLD_PRIMARY=$(kubectl -n data get cluster logistics-pg -o jsonpath='{.status.currentPrimary}')
 echo "  primary before: ${OLD_PRIMARY}"
 kubectl -n data delete pod "${OLD_PRIMARY}" --wait=false >/dev/null
