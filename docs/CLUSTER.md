@@ -144,8 +144,11 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   excepción (caché STS ~1h).
 - **Exposición del Gateway por NodePort** (IP LB virtual, no anunciada) —
   hasta el NLB de Sprint 2.
-- **Ingreso sin e2e probado**: `Programmed=True` demuestra reconciliación,
-  no tráfico; el HTTPRoute + petición HTTPS real llega con la app.
+- ~~Ingreso sin e2e probado~~ **CERRADA (2026-08-15)**: e2e exterior en la
+  coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
+  desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
+  evidencia en [HANDOFF.md](HANDOFF.md). La *exposición* sigue por NodePort
+  hasta el NLB de S2.
 - **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
   ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
 - **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el

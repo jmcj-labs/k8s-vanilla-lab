@@ -5,7 +5,7 @@ Método: decisiones de diseño en chat (Claude); ejecución de código en Cursor
 
 ---
 
-## Sprint 1 — Cluster automático + App MVP (7 días, día 1 = 10 ago)
+## Sprint 1 — Cluster automático + App MVP (7 días, día 1 = 10 ago) — ✅ CERRADO 15-ago
 
 **Entregables:** Repo 1 (`k8s-vanilla-lab` evolucionado, cluster completo con `make apply`) + Repo 2 (logistics-lab MVP desplegado).
 
@@ -45,6 +45,10 @@ Evolución de `k8s-vanilla-lab` en main, sin ramas. Cambios (todos validados en 
 - Smoke tests E2E, README de ambos repos, diagrama de arquitectura del sprint
 
 **Criterio de coronación Sprint 1:** `make apply` → cluster completo sin intervención manual; app respondiendo por el Gateway con TLS; eventos fluyendo por Kafka; datos en PG; Grafana mostrando métricas de la app.
+
+**→ CUMPLIDO y observado en real el 15-ago-2026** — cada punto con su
+evidencia (e2e exterior HTTP+gRPC, topics en simetría, filas en PG, métricas
+de los 4 servicios) en [HANDOFF.md](HANDOFF.md). Siguiente: Sprint 2.
 
 ### Fuera del Sprint 1 (explícito)
 Fase 1.5 completa (L7 policies, mesh, Tetragon), los 4 servicios restantes de logistics-lab, OTel Collector/tracing, todo lo del Sprint 2.
