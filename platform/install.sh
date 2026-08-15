@@ -280,12 +280,37 @@ aws ssm get-parameter --name "${SSM_KEYS_PARAM}" --with-decryption \
 import json,sys
 keys=json.load(sys.stdin)
 json.dump({"apiVersion":"v1","kind":"Secret",
-     "metadata":{"name":"cnpg-backup-creds","namespace":"data"},
+     "metadata":{"name":"cnpg-backup-creds","namespace":"data",
+                 "annotations":{"cnpg.io/reload":"true"}},
      "type":"Opaque",
      "stringData":{"ACCESS_KEY_ID":keys["ACCESS_KEY_ID"],
                    "SECRET_ACCESS_KEY":keys["SECRET_ACCESS_KEY"]}},sys.stdout)' \
   | kubectl apply -f - >/dev/null
-log "✓ cnpg-backup-creds present in data (values never printed)"
+log "✓ cnpg-backup-creds present in data (cnpg.io/reload on; values never printed)"
+
+# Backup GENERATION — one per cluster incarnation. barman will not archive
+# into a prefix written by a previous cluster, so serverName must change on
+# every apply-from-scratch while staying STABLE across re-runs on the same
+# cluster: the in-cluster ConfigMap is the source of truth (survives
+# re-runs, dies with the cluster), and SSM under the persistent prefix
+# records the latest generation so the restore drill can select its origin
+# after a destroy.
+GEN=$(kubectl -n data get configmap cnpg-backup-generation \
+  -o jsonpath='{.data.generation}' 2>/dev/null || true)
+if [ -z "${GEN}" ]; then
+  GEN="$(date -u +%Y%m%dt%H%M%Sz)"
+  kubectl -n data create configmap cnpg-backup-generation \
+    --from-literal=generation="${GEN}"
+  aws ssm put-parameter \
+    --name "/k8s/persistent/${CLUSTER_NAME}/cnpg-server-name" \
+    --type String --overwrite \
+    --value "logistics-pg-${GEN}" \
+    --region "${AWS_REGION}" >/dev/null
+  log "✓ New backup generation minted: logistics-pg-${GEN} (recorded in SSM)"
+else
+  log "✓ Existing backup generation reused: logistics-pg-${GEN}"
+fi
+CNPG_SERVER_NAME="logistics-pg-${GEN}"
 
 log "Step 10/12: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
 DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"
@@ -295,7 +320,8 @@ DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"
 for f in "${DATA}"/*.yaml; do
   case "$(basename "${f}")" in
     cnpg-cluster.yaml)
-      sed -e "s|__BACKUP_BUCKET__|${BACKUP_BUCKET}|g" "${f}" | kubectl apply -f -
+      sed -e "s|__BACKUP_BUCKET__|${BACKUP_BUCKET}|g" \
+          -e "s|__SERVER_NAME__|${CNPG_SERVER_NAME}|g" "${f}" | kubectl apply -f -
       ;;
     *)
       kubectl apply -f "${f}"

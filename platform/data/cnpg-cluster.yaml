@@ -56,9 +56,16 @@ spec:
   # supported through CNPG 1.x; the Barman Cloud plugin migration is noted
   # for the External Secrets sprint. Retention matches the bucket lifecycle
   # (14d). __BACKUP_BUCKET__ is substituted by platform/install.sh.
+  # serverName is PER INCARNATION (__SERVER_NAME__ = logistics-pg-<gen>):
+  # barman refuses to archive into a prefix already written by a previous
+  # cluster, so each apply-from-scratch gets its own generation. install.sh
+  # mints it once per cluster (ConfigMap cnpg-backup-generation) and records
+  # the latest in SSM under the persistent prefix — the restore drill picks
+  # its ORIGIN generation explicitly from there.
   backup:
     retentionPolicy: "14d"
     barmanObjectStore:
+      serverName: __SERVER_NAME__
       destinationPath: s3://__BACKUP_BUCKET__/cnpg
       s3Credentials:
         accessKeyId:

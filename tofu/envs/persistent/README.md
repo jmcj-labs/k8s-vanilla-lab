@@ -44,9 +44,19 @@ aws iam create-access-key --user-name k8s-vanilla-lab-cnpg-backup \
 `platform/install.sh` reads that parameter on every run and (re)creates the
 `data/cnpg-backup-creds` Secret — reentrant, values never printed.
 
-**Rotation (manual until External Secrets, S3 sprint)**: create a second
-access key, overwrite the SSM parameter, re-run `make platform`, verify WAL
-archiving still green, delete the old key. Debt noted in CLUSTER.md §5.
+**Rotation (manual until External Secrets, S3 sprint)** — complete flow:
+
+1. `aws iam create-access-key --user-name k8s-vanilla-lab-cnpg-backup` (the
+   user supports two concurrent keys — no gap).
+2. Overwrite the SSM parameter with the new pair (same command as above).
+3. `make platform` — re-projects `data/cnpg-backup-creds`; the Secret
+   carries `cnpg.io/reload: "true"`, so CNPG reloads it into the pods
+   without a rollout.
+4. Verify archiving stayed green: `kubectl -n data get cluster logistics-pg
+   -o jsonpath='{.status.conditions[?(@.type=="ContinuousArchiving")].status}'`
+   → `True`, and a fresh WAL lands under `cnpg/<serverName>/wals/`.
+5. `aws iam delete-access-key` for the OLD key id. Debt noted in
+   CLUSTER.md §5.
 
 ## Destroy
 

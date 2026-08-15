@@ -31,6 +31,14 @@ resource "aws_s3_bucket_versioning" "backups" {
   }
 }
 
+# Accepted trade-off (2026-08-15, ratified in the #S2-1 cross-review): SSE-S3
+# instead of a customer managed key. A CMK WOULD add revocation and key-usage
+# auditability; what it does NOT change in this lab is the blast radius of an
+# account compromise (key and data live in the same lab account). Cost and
+# key-policy complexity are not worth that delta until backups carry data
+# with compliance requirements. Scoped to THIS resource, expires at the
+# start of Sprint 3 so the decision is re-examined, not inherited.
+#trivy:ignore:AVD-AWS-0132:exp:2026-09-01
 resource "aws_s3_bucket_server_side_encryption_configuration" "backups" {
   bucket = aws_s3_bucket.backups.id
 

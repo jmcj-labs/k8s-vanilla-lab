@@ -32,8 +32,24 @@ kubectl delete configmap drill-marker
 > línea base antes de HA.
 
 ```bash
-# 4. Bajar el snapshot elegido
-sudo aws s3 cp "s3://<BACKUP_BUCKET>/etcd/<SNAPSHOT>.db" /tmp/restore.db
+# 4a. DESDE TU MÁQUINA (identidad de operador — el rol del CP es write-only
+#     a etcd/* a propósito y NO se amplía): URL prefirmada de 10 min
+aws s3 presign "s3://<BACKUP_BUCKET>/etcd/<SNAPSHOT>.db" \
+  --expires-in 600 --profile k8s-vanilla-lab --region eu-west-1
+# → copiar la URL
+
+# 4b. EN EL CP: descargar con la URL prefirmada + etcdutl pinneado con
+#     checksum verificado contra el SHA256SUMS oficial de la release
+curl -fsSL -o /tmp/restore.db '<URL_PREFIRMADA>'
+
+ETCD_VER=v3.6.4    # mantener alineado con el etcd que corre kubeadm
+curl -fsSL -o /tmp/etcd.tgz \
+  "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz"
+curl -fsSL -o /tmp/etcd-SHA256SUMS \
+  "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/SHA256SUMS"
+(cd /tmp && grep "etcd-${ETCD_VER}-linux-amd64.tar.gz" etcd-SHA256SUMS | sha256sum -c -)
+tar -xzf /tmp/etcd.tgz -C /tmp --strip-components=1 \
+  "etcd-${ETCD_VER}-linux-amd64/etcdutl"
 
 # 5. Parar los pods estáticos (kubelet los relanzará al reaparecer el manifest)
 sudo mv /etc/kubernetes/manifests/etcd.yaml /tmp/
@@ -42,7 +58,7 @@ sleep 20   # dar tiempo a kubelet a parar etcd y liberar el data dir
 
 # 6. Restaurar en un data dir nuevo (nunca sobre el vivo)
 sudo mv /var/lib/etcd /var/lib/etcd.pre-drill
-sudo ETCDCTL_API=3 etcdutl snapshot restore /tmp/restore.db \
+sudo /tmp/etcdutl snapshot restore /tmp/restore.db \
   --data-dir /var/lib/etcd
 
 # 7. Relanzar el plano de control
@@ -60,7 +76,7 @@ kubectl get configmap drill-marker -o jsonpath='{.data.ts}'   # ← debe existir
 
 El drill es aceptado si `drill-marker` existe con su timestamp original.
 Después: `kubectl delete configmap drill-marker` y
-`sudo rm -rf /var/lib/etcd.pre-drill /tmp/restore.db` en el CP.
+`sudo rm -rf /var/lib/etcd.pre-drill /tmp/restore.db /tmp/etcd.tgz /tmp/etcdutl /tmp/etcd-SHA256SUMS` en el CP.
 
 > Nota: los objetos creados DESPUÉS del snapshot vuelven a existir solo si
 > sus reconciliadores los recrean (Deployments sí; objetos sueltos no). En

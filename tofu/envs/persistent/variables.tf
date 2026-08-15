@@ -34,7 +34,7 @@ variable "etcd_retention_days" {
 }
 
 variable "cnpg_retention_days" {
-  description = "Days before cnpg/ objects (current and noncurrent versions) expire. Keep coherent with the barman retentionPolicy in platform/data/cnpg-cluster.yaml."
+  description = "Days before cnpg/ objects (current and noncurrent versions) expire. Deliberately ABOVE barman's 14d retentionPolicy (platform/data/cnpg-cluster.yaml): barman prunes by policy first; the lifecycle is the safety net, never the executioner — S3 must not expire objects barman still considers alive."
   type        = number
-  default     = 14
+  default     = 18
 }

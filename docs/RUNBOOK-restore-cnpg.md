@@ -21,8 +21,17 @@ trae de vuelta el sprint entero.
 export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
 BACKUP_BUCKET="k8s-vanilla-lab-backups-<ACCOUNT_ID>"
 
+# 0. Seleccionar EXPLÍCITAMENTE la generación origen. Cada encarnación del
+#    cluster archiva bajo su propio serverName (logistics-pg-<gen>); SSM
+#    guarda la última y S3 lista todas las que siguen en retención:
+aws ssm get-parameter --profile k8s-vanilla-lab --region eu-west-1 \
+  --name /k8s/persistent/k8s-vanilla-lab/cnpg-server-name \
+  --query Parameter.Value --output text          # ← la última generación
+aws s3 ls "s3://${BACKUP_BUCKET}/cnpg/" --profile k8s-vanilla-lab
+ORIGIN_SERVER="logistics-pg-<gen elegida>"        # ← decisión del operador
+
 # 1. Cluster de recuperación — nuevo, pequeño (1 instancia), en data.
-#    serverName apunta al nombre con el que barman archiva el cluster vivo.
+#    serverName apunta a la GENERACIÓN ORIGEN elegida, nunca implícito.
 cat <<EOF | kubectl apply -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -40,7 +49,7 @@ spec:
   externalClusters:
     - name: origin
       barmanObjectStore:
-        serverName: logistics-pg
+        serverName: ${ORIGIN_SERVER}
         destinationPath: s3://${BACKUP_BUCKET}/cnpg
         s3Credentials:
           accessKeyId:
