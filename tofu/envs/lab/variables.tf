@@ -107,3 +107,9 @@ variable "aws_profile" {
   type        = string
   default     = ""
 }
+
+variable "backup_bucket_name" {
+  description = "Name of the persistent backups bucket (tofu/envs/persistent — separate lifecycle, applied manually). Empty derives '<cluster_name>-backups-<account_id>', the same default the persistent stack uses. Consumed by variable on purpose: no remote-state coupling between the graphs."
+  type        = string
+  default     = ""
+}

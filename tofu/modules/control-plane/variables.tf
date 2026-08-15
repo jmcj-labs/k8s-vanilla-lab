@@ -77,3 +77,15 @@ variable "api_server_allowed_cidrs" {
     error_message = "All entries must be valid CIDR blocks (e.g., 1.2.3.4/32)"
   }
 }
+
+variable "enable_etcd_backup_policy" {
+  description = "Grant the CP instance role write access to the etcd/ prefix of the backups bucket (S2 piece 1). Static bool on purpose — count must never depend on a computed value (INCIDENTS #11)."
+  type        = bool
+  default     = true
+}
+
+variable "backup_bucket_name" {
+  description = "Name of the persistent backups bucket (tofu/envs/persistent). Only used to build the etcd/ policy Resource strings."
+  type        = string
+  default     = ""
+}

@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in — never commit the real file.
+
+# Lab member account (allowed_account_ids guard — required)
+lab_account_id = "111111111111"
+
+# Local AWS profile with lab-account credentials
+aws_profile = "k8s-vanilla-lab"
+
+# Optional overrides (defaults documented in variables.tf)
+# aws_region  = "eu-west-1"
+# bucket_name = ""   # empty → <cluster_name>-backups-<account_id>

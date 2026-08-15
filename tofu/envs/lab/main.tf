@@ -73,9 +73,16 @@ resource "aws_route_table_association" "public" {
 }
 
 # Local values for cloud-init templates
+data "aws_caller_identity" "current" {}
+
 locals {
   # common_tags removed - using provider default_tags to avoid case-insensitive duplicates in IAM
   common_tags = {}
+
+  # Same derivation as tofu/envs/persistent — both sides agree on the name
+  # without remote-state coupling. Known at plan (caller_identity is a
+  # dependency-free data source), and only ever used inside Resource strings.
+  backup_bucket_name = var.backup_bucket_name != "" ? var.backup_bucket_name : "${var.cluster_name}-backups-${data.aws_caller_identity.current.account_id}"
 
   # Kubernetes network configuration
   # (K8s version is not pinned here: bootstrap installs the latest 1.35.x
@@ -150,6 +157,7 @@ module "control_plane" {
   api_server_allowed_cidrs = var.api_server_allowed_cidrs
   user_data_base64         = data.cloudinit_config.control_plane.rendered
   cluster_name             = var.cluster_name
+  backup_bucket_name       = local.backup_bucket_name
   tags                     = local.common_tags
 
   # IGW must exist before instances (internet access needed during bootstrap).
