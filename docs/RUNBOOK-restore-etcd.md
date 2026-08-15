@@ -6,6 +6,20 @@ este runbook se revisa: el restore multi-miembro es otro procedimiento.
 
 Principio: sin restore probado no es backup.
 
+> **Ceremonia ejecutable**: el ciclo completo de este runbook (testigo →
+> snapshot → borrado → restore vía Job nsenter en el CP — el patrón sin-SSH
+> del rollout ECR — → testigo de vuelta → tiempos) vive en
+> [`scripts/drill-restore-etcd.sh`](../scripts/drill-restore-etcd.sh):
+>
+> ```bash
+> export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+> AWS_PROFILE=k8s-vanilla-lab bash scripts/drill-restore-etcd.sh
+> ```
+>
+> La API cae ~30-60s a mitad de drill (esperado, medido e impreso). Los
+> pasos manuales de abajo quedan como referencia y para ejecuciones
+> parciales.
+
 ## Preparación del drill
 
 ```bash
