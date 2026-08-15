@@ -84,14 +84,21 @@ log "✓ Helm repositories ready"
 log "Step 2/12: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
 # The SC carries the cluster tag (__CLUSTER_NAME__) in tagSpecification_1.
-# SC parameters are immutable: if a pre-tag gp3 SC exists (upgrade on a live
-# cluster), recreate it — deleting an SC never touches bound PVs/PVCs.
+# SC parameters are immutable, so recreation is BOUNDED to exactly one
+# condition: the existing SC's tagSpecification differs from the desired
+# one (e.g. a pre-tag SC on a live cluster). Any other apply error
+# propagates untouched — recreation is never a reaction to a generic
+# failure. Deleting an SC never touches bound PVs/PVCs.
 SC_RENDERED=$(sed -e "s|__CLUSTER_NAME__|${CLUSTER_NAME}|g" "${MANIFESTS}/storageclass-gp3.yaml")
-echo "${SC_RENDERED}" | kubectl apply -f - || {
-  log "⚠ gp3 StorageClass parameters differ (immutable) — recreating"
-  kubectl delete storageclass gp3 --ignore-not-found
-  echo "${SC_RENDERED}" | kubectl apply -f -
-}
+DESIRED_TAGSPEC="k8s-cluster=${CLUSTER_NAME}"
+if kubectl get storageclass gp3 >/dev/null 2>&1; then
+  CURRENT_TAGSPEC=$(kubectl get storageclass gp3 -o jsonpath='{.parameters.tagSpecification_1}')
+  if [ "${CURRENT_TAGSPEC}" != "${DESIRED_TAGSPEC}" ]; then
+    log "⚠ gp3 SC tagSpecification is '${CURRENT_TAGSPEC:-<none>}', want '${DESIRED_TAGSPEC}' — recreating (parameters immutable; bound PVs unaffected)"
+    kubectl delete storageclass gp3
+  fi
+fi
+echo "${SC_RENDERED}" | kubectl apply -f -
 log "✓ Namespaces and default gp3 StorageClass applied (cluster tag on dynamic volumes)"
 
 log "Step 2b/12: IAM access — authenticator mappings, RBAC and DaemonSet"

@@ -299,9 +299,18 @@ aws ec2 describe-volumes --filters "Name=status,Values=available" \
   --query 'length(Volumes)' --output text --region eu-west-1
 ```
 
-Automating this in the destroy path (a destroy-time provisioner filtering on
-the `kubernetes.io/created-for/pvc/*` tag, mirroring the orphaned-ENI cleanup)
-is a candidate for Sprint 2.
+The destroy-time cleanup (S2-1) deletes these automatically, scoped by the
+CSI tags AND the cluster's own `k8s-cluster` tag stamped by the gp3
+StorageClass. **Tag backfill note**: volumes provisioned BEFORE the tagged
+StorageClass existed carry no `k8s-cluster` tag — if this ever ships onto a
+live cluster (not the case today: the cluster is recreated and every volume
+is born tagged), backfill them once so the cleanup and the tag-conditioned
+`ec2:DeleteVolume` can see them:
+
+```bash
+aws ec2 create-tags --resources <vol-id ...> \
+  --tags Key=k8s-cluster,Value=k8s-vanilla-lab --region eu-west-1
+```
 
 ## After `destroy`: blank `K8S_SERVER` in logistics-lab
 
