@@ -280,6 +280,25 @@ Automating this in the destroy path (a destroy-time provisioner filtering on
 the `kubernetes.io/created-for/pvc/*` tag, mirroring the orphaned-ENI cleanup)
 is a candidate for Sprint 2.
 
+## After `destroy`: blank `K8S_SERVER` in logistics-lab
+
+While `K8S_SERVER` in `jmcj-labs/logistics-lab` still holds the endpoint of a
+destroyed cluster, a push to its main branch runs the deploy workflow against
+an endpoint that no longer exists (and the ECR repos are gone too —
+`force_delete`), ending in a red run. This stale-variable window is recorded
+in logistics-lab PR #4; its deploy job skips cleanly when `K8S_SERVER` is
+empty, so close the window as part of every destroy:
+
+```bash
+# GitHub rejects empty variable values (HTTP 422), so "blank" = delete the
+# variable: vars.K8S_SERVER then evaluates to "" in the workflow, which is
+# exactly what the deploy job's skip guard checks.
+gh variable delete K8S_SERVER --repo jmcj-labs/logistics-lab
+```
+
+The next apply sets it again together with `K8S_CA_DATA` — see "Handoff
+after a cluster recreate" below.
+
 ## Network policy drops — inspecting with Hubble
 
 Default-deny (`logistics`) and the clusterwide IMDS deny are the #1 suspects
@@ -372,7 +391,8 @@ Each apply-from-scratch changes only `K8S_SERVER` and `K8S_CA_DATA`
 LAB_ACCOUNT_ID.REGION.CLUSTER_NAME`). Procedure:
 
 ```
-destroy → apply (make smoke-test green)
+destroy (+ delete K8S_SERVER in logistics-lab — see the destroy step above)
+→ apply (make smoke-test green)
 → read the new endpoint + CA:
     aws ssm get-parameter --name /k8s/<cluster>/kubeconfig --with-decryption \
       --query Parameter.Value --output text --region <region>   # server: + certificate-authority-data

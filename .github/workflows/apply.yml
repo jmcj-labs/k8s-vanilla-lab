@@ -298,12 +298,17 @@ jobs:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
+          # /api-endpoint in SSM is the CP *private* IP by design (workers join
+          # through it). The reachable endpoint is the server: URL of the
+          # EIP-rewritten kubeconfig (ADR-004), so extract it from there.
           API_ENDPOINT=$(aws ssm get-parameter \
-            --name "/k8s/${CLUSTER_NAME}/api-endpoint" \
+            --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
             --with-decryption \
             --query Parameter.Value \
             --output text \
-            --region "${AWS_REGION}" 2>/dev/null || echo "unknown")
+            --region "${AWS_REGION}" 2>/dev/null \
+            | awk '$1 == "server:" {sub(/^https:\/\//, "", $2); print $2; exit}')
+          API_ENDPOINT="${API_ENDPOINT:-unknown}"
 
           WORKER_COUNT=$(aws ec2 describe-instances \
             --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \

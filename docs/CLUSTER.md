@@ -147,7 +147,10 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   (`make platform`), hasta External Secrets (S3). Nada en Git.
 - **Refresh manual de variables tras recreate**: `K8S_SERVER`/`K8S_CA_DATA`
   se actualizan a mano en logistics-lab; un canal de publicación de metadatos
-  no sensibles es candidato post-S1.
+  no sensibles es candidato post-S1. La cara destroy de esta deuda es la
+  ventana de variable stale (PR #4 de logistics-lab): al destruir, borrar
+  `K8S_SERVER` allí para que su deploy quede en skip y no en rojo — paso en
+  el runbook de destroy (`docs/troubleshooting.md`).
 - **`tofu destroy` no elimina los volúmenes EBS dinámicos del CSI** (PVCs de
   PG/Kafka): los provisiona el driver en runtime, Tofu no los rastrea, así que
   quedan **huérfanos (`available`) facturando** tras el destroy. Verificación
