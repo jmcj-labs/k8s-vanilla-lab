@@ -146,7 +146,7 @@ make smoke-test
 - **El nuevo nodo no aparece**: `/var/log/k8s-cp-bootstrap.log` en la
   instancia (`make ssh-cp CP_INDEX=<n>`). Causa típica: material de join
   caducado → ejecutar la renovación.
-- **Membresía con 4 miembros**: se saltó el paso 4; retirar a mano con
+- **Membresía con 4 miembros**: se saltó el paso 5; retirar a mano con
   `etcdctl member remove` desde un superviviente y volver a comprobar.
 - **Dos o más CPs caídos**: esto ya no es un reemplazo —
   [restore HA](RUNBOOK-restore-etcd-ha.md).

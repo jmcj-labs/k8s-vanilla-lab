@@ -275,7 +275,7 @@ if [ -n "${OLD_NODE}" ]; then
   kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null 2>&1 || true
 fi
 
-# ── 6. Close on capacity RESTORED, with EXACT sets (smoke §14 invariants) ───
+# ── 7. Close on capacity RESTORED, with EXACT sets (smoke §14 invariants) ───
 log "Waiting for the replacement to join (bootstrap takes 8-12 min)..."
 DEADLINE=$(( $(date -u +%s) + 1800 ))
 while true; do
