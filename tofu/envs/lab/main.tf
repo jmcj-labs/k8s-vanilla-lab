@@ -95,8 +95,14 @@ locals {
 
 }
 
-# Multi-part cloud-init for control plane (common + control-plane scripts)
+# Multi-part cloud-init for control planes (common + per-index script).
+# NLB-FIRST pattern (replaces the historical EIP-first): the stable API
+# endpoint rendered into user_data is the NLB's DNS, which depends on no
+# instance — so it exists before any node boots. Index 0 renders the
+# kubeadm-init script; 1..N render the sequential control-plane join script.
 data "cloudinit_config" "control_plane" {
+  count = var.control_plane_count
+
   gzip          = true
   base64_encode = true
 
@@ -108,13 +114,19 @@ data "cloudinit_config" "control_plane" {
 
   part {
     content_type = "text/x-shellscript"
-    content = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
-      cluster_name            = var.cluster_name
-      aws_region              = var.aws_region
-      pod_cidr                = local.pod_cidr
-      service_cidr            = local.service_cidr
-      control_plane_public_ip = module.control_plane.public_ip
-      ssm_parameter_path      = local.ssm_parameter_base
+    content = count.index == 0 ? templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
+      cluster_name       = var.cluster_name
+      aws_region         = var.aws_region
+      pod_cidr           = local.pod_cidr
+      service_cidr       = local.service_cidr
+      api_endpoint_dns   = module.nlb.dns_name
+      ssm_parameter_path = local.ssm_parameter_base
+      }) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
+      cluster_name       = var.cluster_name
+      aws_region         = var.aws_region
+      api_endpoint_dns   = module.nlb.dns_name
+      ssm_parameter_path = local.ssm_parameter_base
+      cp_index           = count.index
     })
     filename = "02-control-plane.sh"
   }
@@ -147,18 +159,19 @@ data "cloudinit_config" "worker" {
 module "control_plane" {
   source = "../../modules/control-plane"
 
-  name                     = var.cluster_name
-  vpc_id                   = aws_vpc.main.id
-  subnet_id                = aws_subnet.public.id
-  instance_type            = var.control_plane_instance_type
-  ami_id                   = data.aws_ami.ubuntu.id
-  key_name                 = var.ssh_key_name
-  my_ip                    = var.my_ip
-  api_server_allowed_cidrs = var.api_server_allowed_cidrs
-  user_data_base64         = data.cloudinit_config.control_plane.rendered
-  cluster_name             = var.cluster_name
-  backup_bucket_name       = local.backup_bucket_name
-  tags                     = local.common_tags
+  name                  = var.cluster_name
+  vpc_id                = aws_vpc.main.id
+  subnet_id             = aws_subnet.public.id
+  instance_type         = var.control_plane_instance_type
+  ami_id                = data.aws_ami.ubuntu.id
+  key_name              = var.ssh_key_name
+  my_ip                 = var.my_ip
+  control_plane_count   = var.control_plane_count
+  user_data_base64      = data.cloudinit_config.control_plane[*].rendered
+  nlb_security_group_id = module.nlb.security_group_id
+  cluster_name          = var.cluster_name
+  backup_bucket_name    = local.backup_bucket_name
+  tags                  = local.common_tags
 
   # IGW must exist before instances (internet access needed during bootstrap).
   # On destroy this reverses: module destroyed before IGW, releasing EIP
@@ -279,19 +292,22 @@ module "worker" {
   depends_on = [module.control_plane, aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
 }
 
-# Application NLB (S2 piece 2) — lives and dies with the cluster.
-# The module-level mutual reference is fine: the RESOURCE graph is acyclic
-# (NLB SG depends on nothing from the workers; the worker SG references
-# the NLB SG; the target attachments reference the worker instance IDs).
+# NLB (S2 pieces 2+3) — application entry AND API endpoint; lives and dies
+# with the cluster. The module-level mutual references are fine: the
+# RESOURCE graph is acyclic (the NLB itself and its SG depend on no
+# instance; CP/worker SG rules and user_data reference the NLB side; the
+# target attachments reference the instance IDs last).
 module "nlb" {
   source = "../../modules/nlb"
 
-  name                = var.cluster_name
-  vpc_id              = aws_vpc.main.id
-  vpc_cidr            = var.vpc_cidr
-  subnet_id           = aws_subnet.public.id
-  gateway_nodeport    = var.gateway_nodeport
-  worker_count        = var.worker_count
-  worker_instance_ids = module.worker.instance_ids
-  tags                = local.common_tags
+  name                       = var.cluster_name
+  vpc_id                     = aws_vpc.main.id
+  vpc_cidr                   = var.vpc_cidr
+  subnet_id                  = aws_subnet.public.id
+  gateway_nodeport           = var.gateway_nodeport
+  worker_count               = var.worker_count
+  worker_instance_ids        = module.worker.instance_ids
+  control_plane_count        = var.control_plane_count
+  control_plane_instance_ids = module.control_plane.instance_ids
+  tags                       = local.common_tags
 }

@@ -9,6 +9,11 @@ output "security_group_id" {
 }
 
 output "target_group_arn" {
-  description = "Target group ARN (smoke: target set and health assertions)"
+  description = "Application target group ARN (smoke: target set and health assertions)"
   value       = aws_lb_target_group.gateway.arn
+}
+
+output "api_target_group_arn" {
+  description = "API target group ARN (smoke §14: 3 CP targets healthy)"
+  value       = aws_lb_target_group.api.arn
 }

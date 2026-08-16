@@ -16,20 +16,16 @@ variable "environment" {
   default     = "lab"
 }
 
-variable "api_server_allowed_cidrs" {
-  description = "CIDRs allowed to reach the K8s API (6443). Default 0.0.0.0/0: the API is TLS + cert-authenticated and CI (platform install + smoke test via SSM kubeconfig, ADR-004) runs from GitHub runners with dynamic IPs. SSH stays restricted to my_ip."
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
-  validation {
-    condition = alltrue([
-      for cidr in var.api_server_allowed_cidrs : can(cidrhost(cidr, 0))
-    ])
-    error_message = "All entries must be valid CIDR blocks (e.g., 1.2.3.4/32)"
-  }
+variable "control_plane_count" {
+  # 3 control planes, stacked etcd, ONE AZ: this is NODE HA (survives losing
+  # a CP), not zonal HA — zonal is declared post-S2 debt (ADR-007).
+  description = "Number of control-plane nodes (odd, for etcd quorum). The API endpoint is the NLB's DNS on TCP/6443."
+  type        = number
+  default     = 3
 }
 
 variable "my_ip" {
-  description = "CIDR allowed for SSH and K8s API access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0)."
+  description = "CIDR allowed for SSH access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0). The K8s API no longer uses it: 6443 enters through the NLB (ADR-007)."
   type        = string
   validation {
     condition     = can(cidrhost(var.my_ip, 0))

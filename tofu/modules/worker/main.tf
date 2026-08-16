@@ -154,7 +154,12 @@ resource "aws_iam_role" "worker" {
   )
 }
 
-# IAM Policy for SSM Parameter Store (read-only for join token)
+# IAM Policy for SSM Parameter Store (read-only for join data).
+# EXACT ARNs, never the /k8s/<cluster>/* wildcard: that path also holds the
+# control-plane join material (cp/ subpath: certificate-key) and the admin
+# kubeconfig — with the wildcard, a compromised worker could read the
+# certificate-key and elevate itself to control plane (S2 piece 3, Codex
+# finding). Workers need exactly the two parameters below.
 resource "aws_iam_role_policy" "worker_ssm" {
   name = "${var.name}-worker-ssm-policy"
   role = aws_iam_role.worker.id
@@ -168,7 +173,10 @@ resource "aws_iam_role_policy" "worker_ssm" {
           "ssm:GetParameter",
           "ssm:GetParameters"
         ]
-        Resource = "arn:aws:ssm:*:*:parameter/k8s/${var.cluster_name}/*"
+        Resource = [
+          "arn:aws:ssm:*:*:parameter/k8s/${var.cluster_name}/join-command",
+          "arn:aws:ssm:*:*:parameter/k8s/${var.cluster_name}/ca-cert-hash"
+        ]
       }
     ]
   })

@@ -30,7 +30,7 @@ variable "key_name" {
 }
 
 variable "my_ip" {
-  description = "CIDR allowed for SSH and K8s API access (no default — must be passed by the caller)"
+  description = "CIDR allowed for SSH access (no default — must be passed by the caller). The K8s API no longer uses it: 6443 enters through the NLB only (ADR-007)."
   type        = string
   validation {
     condition     = can(cidrhost(var.my_ip, 0))
@@ -38,8 +38,23 @@ variable "my_ip" {
   }
 }
 
+variable "control_plane_count" {
+  description = "STATIC control-plane node count (3 for HA, stacked etcd — quorum needs an odd number). Drives instance count and must never depend on a computed value (INCIDENTS #11)."
+  type        = number
+  default     = 3
+  validation {
+    condition     = var.control_plane_count % 2 == 1
+    error_message = "control_plane_count must be odd (etcd quorum)"
+  }
+}
+
 variable "user_data_base64" {
-  description = "Base64-encoded (gzipped) cloud-init user data for control plane bootstrap (cloudinit_config with gzip + base64_encode)"
+  description = "Base64-encoded (gzipped) cloud-init user data per control-plane node, by index (index 0 = kubeadm init, rest = sequential control-plane joins). Length must match control_plane_count."
+  type        = list(string)
+}
+
+variable "nlb_security_group_id" {
+  description = "NLB's security group — the ONLY source the API :6443 accepts (ADR-007)"
   type        = string
 }
 
@@ -64,18 +79,6 @@ variable "root_volume_type" {
 variable "cluster_name" {
   description = "Kubernetes cluster name for token storage in SSM"
   type        = string
-}
-
-variable "api_server_allowed_cidrs" {
-  description = "CIDR blocks allowed to access Kubernetes API server (6443). Defaults to my_ip for security."
-  type        = list(string)
-  default     = []
-  validation {
-    condition = alltrue([
-      for cidr in var.api_server_allowed_cidrs : can(cidrhost(cidr, 0))
-    ])
-    error_message = "All entries must be valid CIDR blocks (e.g., 1.2.3.4/32)"
-  }
 }
 
 variable "enable_etcd_backup_policy" {
