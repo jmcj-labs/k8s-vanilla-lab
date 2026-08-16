@@ -43,9 +43,13 @@ internet-facing NLB (S2 piece 2, application entry).
    stays alive alongside `K8S_CA_DATA`. This piece does not change that debt.
 5. **Topology: 3× t3.medium on-demand, stacked etcd, ONE AZ.** This is **node
    HA, not zonal HA** — zonal resilience remains declared post-S2 debt. CP-0
-   runs `kubeadm init --upload-certs`; CP-1/2 join `--control-plane`
-   **sequentially** (kubeadm HA guide requirement), serialized through the SSM
-   gate `cp/joined-count`.
+   runs `kubeadm init` (certs uploaded by the explicit phase afterwards, see
+   point 7); CP-1/2 join `--control-plane` **sequentially** (kubeadm HA guide
+   requirement), serialized through the SSM gate `cp/joined-count`. Which
+   node is the founder is decided AT RUNTIME, not at plan time: index 0
+   renders the founder script but skips it when `cp/joined-count` already
+   exists, so a REBUILT index 0 joins instead of initialising a second
+   cluster.
 6. **CP join material is a security boundary**: `cp/certificate-key` lives in
    an SSM subpath **excluded from the worker role**, which enumerates exact
    ARNs (`join-command`, `ca-cert-hash`) — a compromised worker holding the
@@ -55,8 +59,7 @@ internet-facing NLB (S2 piece 2, application entry).
    privilege, so narrowing it would buy nothing. Both join materials expire
    (key 2h, bootstrap token 24h) and the renewal ceremony
    (`scripts/renew-cp-certificate-key.sh` + runbook) renews **both**;
-   replacements re-fetch on retry. Replacements are performed **one at a
-   time** — with 3 members the quorum tolerates losing one, never two.
+   replacements re-fetch on retry.
 
 7. **Two gates protect the bootstrap from lying to itself**: CP-0 waits until
    it sees its own instance registered in the API target group before
@@ -68,6 +71,18 @@ internet-facing NLB (S2 piece 2, application entry).
    upload-certs` whose key this bootstrap captures (`--upload-certs` is
    deliberately absent from `kubeadm init`: it would create a second,
    unmanaged copy under a key nobody owns).
+
+8. **Replacing a control plane is a CEREMONY, not an apply**
+   (`scripts/replace-control-plane.sh` + RUNBOOK-replace-control-plane.md).
+   Recreating the instance is the easy half: etcd remembers the dead member
+   forever, so without `member remove` the cluster ends with 4 members
+   (3 alive, 1 dead) — the quorum threshold rises to 3 and the NEXT single
+   failure kills it. The ceremony enforces ONE replacement at a time
+   (with 3 members the quorum tolerates losing one, never two), removes the
+   dead member and the stale Node, and recreates with `-replace` on a FULL
+   plan — `-target` would skip the target-group attachment and leave the new
+   node unregistered in the API endpoint. It closes on capacity RESTORED:
+   3/3 nodes, 3/3 etcd members, 3/3 healthy targets.
 
 ## Consequences
 

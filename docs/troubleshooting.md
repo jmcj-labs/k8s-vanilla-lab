@@ -115,7 +115,9 @@ Then on the worker:
 ```bash
 make ssh-worker
 
-sudo kubeadm join 10.0.1.X:6443 \
+# The endpoint is the NLB's DNS (ADR-007) — never a node IP.
+# Read it from SSM: aws ssm get-parameter --name /k8s/<cluster>/api-endpoint --with-decryption --query Parameter.Value --output text
+sudo kubeadm join <cluster>-gw-nlb-xxxx.elb.<region>.amazonaws.com:6443 \
   --token YOUR_TOKEN \
   --discovery-token-ca-cert-hash sha256:YOUR_HASH \
   --cri-socket unix:///run/containerd/containerd.sock

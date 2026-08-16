@@ -1,6 +1,8 @@
 #!/bin/bash
-# Control Plane JOIN bootstrap — replica nodes (index 1..N) of the HA
-# control plane (S2 piece 3, ADR-007).
+# Control Plane JOIN bootstrap — rendered for EVERY control-plane index
+# (S2 piece 3, ADR-007). On index 0 it is a no-op during genesis (the
+# founder script already made that node a control plane) and the real
+# worker when index 0 is REBUILT against a live cluster.
 # Purpose: join this node as an additional control plane (stacked etcd),
 #          STRICTLY SEQUENTIALLY: the kubeadm HA guide requires one
 #          control-plane join at a time, so joins serialize through the SSM
@@ -17,12 +19,25 @@ log() {
 
 log "=== Starting Control Plane JOIN bootstrap (index ${cp_index}) ==="
 
+# ALREADY-A-CONTROL-PLANE GUARD (runs first, no exceptions). Two callers
+# land here on a node that must NOT be touched:
+#   - index 0 on GENESIS: this script is rendered as the cloud-init part
+#     right after the founder's, so it executes seconds after `kubeadm
+#     init` — joining that node to itself would be absurd and destructive.
+#   - any index re-running cloud-init (rescue, manual re-execution).
+# The presence of the API server static pod manifest is the strongest
+# possible signal: kubeadm writes it on BOTH init and join, and only a
+# successful `kubeadm reset` removes it. It does not depend on the node
+# being Ready yet, so it has no race with the founder's last steps.
+if [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
+  log "✓ This node is ALREADY a control plane (kube-apiserver manifest present) — nothing to do"
+  exit 0
+fi
+
 # REENTRANCY GUARD — the single most destructive path in this script is
 # `kubeadm reset` (retry branch) running on a node that is ALREADY a
 # healthy control plane: it would wipe a live etcd member and break the
-# quorum. cloud-init is first-boot only, so this script normally runs once,
-# but a re-run (manual cloud-init re-execution, rescue, a future
-# reprovisioning flow) must be a NO-OP, not a self-destruction.
+# quorum.
 #
 # Healthy means all four: admin.conf present, kubelet active, this node
 # registered Ready in the API, and its LOCAL etcd static pod Running.
@@ -141,7 +156,8 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
   fi
 done
 
-# Step 4: Fetch join material (shared join-command + CP-only certificate-key)
+# Step 4: Fetch join material (shared join-command + certificate-key from
+# the cp/ path, which the worker role is excluded from)
 log "Step 4/6: Fetching join material from SSM"
 
 JOIN_COMMAND=$(aws ssm get-parameter \
@@ -235,16 +251,31 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
   fi
 done
 
-# Step 6: Pass the baton — open the gate for the next control plane
+# Step 6: Pass the baton — open the gate for the next control plane.
+# MONOTONIC: the counter may only ever rise. A REPLACEMENT of a low index
+# (say 0 or 1) rejoining a cluster that already reached 3 must not lower
+# the gate, or a later replacement of a higher index would wait forever for
+# a baton that already passed.
 NEXT_COUNT=$((${cp_index} + 1))
-log "Step 6/6: Publishing cp/joined-count = $${NEXT_COUNT}"
-aws ssm put-parameter \
+CURRENT_COUNT=$(aws ssm get-parameter \
   --name "${ssm_parameter_path}/cp/joined-count" \
-  --value "$${NEXT_COUNT}" \
-  --type String \
-  --overwrite \
-  --region ${aws_region} \
-  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+  --query Parameter.Value --output text \
+  --region ${aws_region} 2>/dev/null || echo 0)
+case "$${CURRENT_COUNT}" in
+  ''|*[!0-9]*) CURRENT_COUNT=0 ;;
+esac
+if [ "$${CURRENT_COUNT}" -gt "$${NEXT_COUNT}" ]; then
+  log "Step 6/6: cp/joined-count stays at $${CURRENT_COUNT} (replacement of index ${cp_index}; counter is monotonic)"
+else
+  log "Step 6/6: Publishing cp/joined-count = $${NEXT_COUNT}"
+  aws ssm put-parameter \
+    --name "${ssm_parameter_path}/cp/joined-count" \
+    --value "$${NEXT_COUNT}" \
+    --type String \
+    --overwrite \
+    --region ${aws_region} \
+    2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+fi
 
 log "=== Control Plane JOIN bootstrap (index ${cp_index}) completed successfully ==="
 kubectl get nodes >> /var/log/k8s-cp-bootstrap.log 2>&1 || true

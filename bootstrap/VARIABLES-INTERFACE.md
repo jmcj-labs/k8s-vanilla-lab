@@ -53,7 +53,7 @@ ssm_parameter_path        # string, e.g., "/k8s/k8s-vanilla-lab"
    - `${ssm_parameter_path}/join-command` = full worker/CP join command (NLB endpoint)
    - `${ssm_parameter_path}/ca-cert-hash` = CA cert hash
    - `${ssm_parameter_path}/api-endpoint` = `${api_endpoint_dns}:6443`
-   - `${ssm_parameter_path}/cp/certificate-key` = CP join material (CP-role-only path)
+   - `${ssm_parameter_path}/cp/certificate-key` = CP join material (path excluded from the worker role)
    - `${ssm_parameter_path}/kubeconfig` = admin.conf (server = NLB)
 7. Open the sequential-join gate: `${ssm_parameter_path}/cp/joined-count` = 1
 
@@ -139,9 +139,9 @@ ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 
 ## File References
 
-**Tofu Module**: `tofu/envs/lab/main.tf` lines 85-110 (locals block with templatefile calls)
+**Tofu Module**: `tofu/envs/lab/main.tf` (`data.cloudinit_config.control_plane`, one per CP index)
 
-**Control Plane Module**: `tofu/modules/control-plane/main.tf` lines 148-160 (EIP-first pattern)
+**Control Plane Module**: `tofu/modules/control-plane/main.tf` (NLB-first pattern — the EIP-first pattern was removed in S2 piece 3, ADR-007)
 
 **Bootstrap Files** (to be created):
 - `bootstrap/common.yaml`

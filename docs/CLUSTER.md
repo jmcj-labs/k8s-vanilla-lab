@@ -119,8 +119,10 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | **Cross-zone OFF explícito** | Una sola AZ hoy: el NLB no añade resiliencia zonal y fingirlo en config sería mentir. La pieza 3 entregó HA **de nodo** (3 CPs, misma AZ); la zonal queda como deuda consciente post-S2 | brief S2-2 corregido por S2-3 |
 | **API por el NLB, listener TCP/6443 y TG propio (`preserve_client_ip=false`)** | Endpoint estable que sobrevive a cualquier CP; hairpin CP→NLB→CP exige no preservar IP (AWS lo desaconseja con targets-clientes); el TG de aplicación conserva `true` — ambos explícitos | [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
 | **CP SG: 6443 solo desde el SG del NLB** | La API sigue pública por diseño (ADR-004) pero por la puerta única; prueba negativa sobre las 3 IPs públicas de CP en smoke §14 | ADR-007 |
-| **Join de CPs secuenciado por gate SSM (`cp/joined-count`)** | La guía HA de kubeadm exige joins de CP de uno en uno; el gate serializa sin lock server | ADR-007 |
-| **Path SSM `cp/` exclusivo del role de CP** | El certificate-key eleva a control plane a quien lo tenga; el role de worker enumera ARNs exactos y no lo ve (hallazgo Codex S2-3) | ADR-007 |
+| **Join de CPs secuenciado por gate SSM (`cp/joined-count`)** | La guía HA de kubeadm exige joins de CP de uno en uno; el gate serializa sin lock server. Contador **monótono**: el reemplazo de un índice bajo no baja la barrera que ya pasaron los altos | ADR-007 |
+| **El fundador se decide en runtime, no en el plan** | Un índice 0 reconstruido encontraría `cp/joined-count` en SSM y **se une** en vez de inicializar un segundo cluster sobre el vivo (hallazgo Codex, cruce 3) | ADR-007, [runbook de reemplazo](RUNBOOK-replace-control-plane.md) |
+| **Guard de recreate que falla CERRADO** | Un state ilegible (credenciales, backend, lock) no puede probarse libre del CP singleton: abortar es la única respuesta segura | `scripts/guard-legacy-cp-state.sh` |
+| **Path SSM `cp/` excluido del role de worker** | El certificate-key eleva a control plane a quien lo tenga; el worker enumera ARNs exactos y no lo ve (hallazgo Codex S2-3). No es "exclusivo de CP": el role OIDC de CI lee `/k8s/*` y ya custodia el kubeconfig admin | ADR-007 |
 | Bucket de backups único y **persistente** (stack propio, manual) | Los backups deben sobrevivir a cualquier destroy del cluster; consumo por variable, no remote state — grafos desacoplados | brief S2-1, `tofu/envs/persistent` |
 | etcd backup con **instance role** vs barman con **usuario IAM** | El CronJob es hostNetwork en el CP (IMDS le funciona sin tocar la CCNP); los pods CNPG están tras el deny de IMDS que NO se agujerea — credencial estática mínima, acotada a `cnpg/*` | brief S2-1 |
 | Snapshots etcd write-only desde el CP (`s3:PutObject` a `etcd/*`, nada más) | Un CP comprometido no puede leer ni borrar los backups existentes | brief S2-1 |
@@ -140,8 +142,9 @@ logistics-lab → `workflow_dispatch` (rebuild→push SHA→deploy→e2e) →
 `make smoke-app-contract`. El refresh es manual (deuda §5).
 
 **Smoke test** (`make smoke-test`, también al final del workflow Apply):
-4/4 nodos Ready · cero pods kube-proxy · `cilium-dbg` reporta
-KubeProxyReplacement True · providerID en los 4 nodos · PVC gp3 dinámico
+6/6 nodos Ready (3 CPs + 3 workers, `EXPECTED_NODES`) · cero pods
+kube-proxy · `cilium-dbg` reporta KubeProxyReplacement True · providerID en
+los 6 nodos · PVC gp3 dinámico
 Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
 `Programmed` · operators CNPG y Strimzi Ready.
 

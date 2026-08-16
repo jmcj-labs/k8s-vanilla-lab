@@ -21,7 +21,7 @@
 # HOW: privileged nsenter Job pinned to a Ready control plane (the house's
 # no-SSH pattern). The key NEVER leaves the node in logs: the Job itself
 # publishes it to SSM cp/certificate-key using the CP instance role (which
-# owns /k8s/<cluster>/* — the cp/ path is CP-role-only by design). The
+# owns /k8s/<cluster>/* — the cp/ path is excluded from the worker role). The
 # waiting replacement CP re-fetches the key on every join retry
 # (bootstrap/control-plane-join.yaml step 5).
 #

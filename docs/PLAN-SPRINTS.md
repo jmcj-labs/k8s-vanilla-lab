@@ -99,8 +99,10 @@ El orden interno importa:
   = DNS del NLB; el SG de CPs solo acepta 6443 del SG del NLB (ADR-007)
 - Rediseño de IaC ejecutado como recreate completo (NO migración in-place):
   muere el patrón EIP-first (nace NLB-first), joins de CP secuenciados por gate
-  SSM, path `cp/` exclusivo del role de CP (cierre de seguridad de Codex)
-- Ceremonias nuevas: renovación del certificate-key (TTL 2h) y **restore HA**
+  SSM, path `cp/` excluido del role de worker (cierre de seguridad de Codex)
+- Ceremonias nuevas: **reemplazo de un CP** (retira miembro etcd muerto +
+  Node, uno solo a la vez, `-replace` con plan completo, cierra en 3/3),
+  renovación del material de join (key 2h + token 24h) y **restore HA**
   (reconstrucción de cluster lógico, `etcdutl --bump-revision --mark-compacted`)
 - Contraste honesto con EKS: `docs/eks-contrast.md`
 - Coronación: 3/3 CPs·etcd·targets + negativa 6443 en IPs de CP + drill de

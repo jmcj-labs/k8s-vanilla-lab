@@ -13,7 +13,27 @@ log() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
-log "=== Starting Control Plane bootstrap ==="
+log "=== Starting Control Plane bootstrap (founder path) ==="
+
+# GENESIS OR REPLACEMENT? Index 0 renders this founder script statically at
+# plan time, so a REBUILT index 0 would land here too — and running
+# `kubeadm init` while CP-1/CP-2 still hold a live cluster would create a
+# second, irreconcilable one. The cluster's existence is decided by
+# cp/joined-count: the founder publishes it and `tofu destroy` deletes the
+# whole /k8s/<cluster>/ prefix, so on a genuinely fresh apply it is absent.
+#
+# FAIL CLOSED toward NOT initialising: if the parameter exists (even if the
+# API is currently unreachable), this is a replacement — never a genesis.
+# The join script rendered as the next cloud-init part takes over.
+if aws ssm get-parameter \
+     --name "${ssm_parameter_path}/cp/joined-count" \
+     --region ${aws_region} >/dev/null 2>&1; then
+  log "cp/joined-count exists — a cluster is already running."
+  log "This node is a REPLACEMENT of index 0, not the founder: skipping kubeadm init."
+  log "The control-plane JOIN script (next cloud-init part) will join it."
+  exit 0
+fi
+log "No cluster registered in SSM — this is the genesis of the cluster"
 
 # Step 1: Wait for common.yaml bootstrap to complete
 log "Step 1/9: Waiting for common bootstrap to complete"
@@ -347,7 +367,7 @@ log "Storing parameters in SSM (region: ${aws_region}):"
 log "  - ${ssm_parameter_path}/join-command"
 log "  - ${ssm_parameter_path}/ca-cert-hash"
 log "  - ${ssm_parameter_path}/api-endpoint"
-log "  - ${ssm_parameter_path}/cp/certificate-key (CP-role-only path)"
+log "  - ${ssm_parameter_path}/cp/certificate-key (path excluded from the worker role)"
 
 # Store join command (SecureString)
 aws ssm put-parameter \

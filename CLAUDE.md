@@ -16,7 +16,7 @@ learning in public, not for production.
 4. **Modern Stack**: OpenTofu, Cilium CNI, OIDC, cloud-init automation
 
 **Not Goals**:
-- Production-ready cluster (no HA, no backups, spot workers)
+- Production-ready cluster (node HA only — single AZ, no zonal resilience; spot workers)
 - Managed Kubernetes (EKS, GKE, AKS)
 - Multi-cloud or on-prem support
 
@@ -53,6 +53,10 @@ k8s-vanilla-lab/
 ├── Makefile                         # Primary local interface — see §6 below
 ├── scripts/
 │   ├── bootstrap-aws.sh            # One-time AWS setup (S3, DynamoDB, OIDC, IAM)
+│   ├── guard-legacy-cp-state.sh    # Fail-closed: refuses apply over a pre-HA state (make apply + CI)
+│   ├── replace-control-plane.sh    # Ceremony: replace ONE CP (etcd member remove → -replace → 3/3)
+│   ├── renew-cp-certificate-key.sh # Ceremony: renew CP join material (key 2h + token 24h)
+│   ├── drill-restore-etcd-ha.sh    # Drill: HA etcd restore (logical cluster reconstruction)
 │   └── smoke-test.sh               # Cluster + platform verification (invoked by make smoke-test)
 ├── platform/
 │   ├── install.sh                  # Ordered, idempotent platform install (make platform)
@@ -68,7 +72,8 @@ k8s-vanilla-lab/
 │           └── terraform.tfvars.example
 ├── bootstrap/
 │   ├── common.yaml                 # Base: containerd, kubeadm, kubelet (no variables)
-│   ├── control-plane.yaml          # kubeadm init, SSM store join data + kubeconfig
+│   ├── control-plane.yaml          # FOUNDER: genesis check, kubeadm init, SSM join data + kubeconfig
+│   ├── control-plane-join.yaml     # EVERY CP index: sequential join (no-op if already a CP)
 │   └── worker.yaml                 # SSM fetch, kubeadm join
 ├── addons/
 │   ├── metrics-server/             # Metrics server manifests
@@ -86,7 +91,8 @@ k8s-vanilla-lab/
 │   │   ├── ADR-001-opentofu-vs-terraform.md
 │   │   ├── ADR-002-spot-workers-ondemand-cp.md
 │   │   ├── ADR-003-cilium-ebpf.md
-│   │   └── ADR-004-kubeconfig-ssm.md
+│   │   ├── ADR-004-kubeconfig-ssm.md
+│   │   └── ADR-007-api-endpoint-nlb.md   # HA control plane behind the NLB endpoint
 │   ├── bootstrap.md                # AWS one-time setup guide
 │   ├── development.md              # Pre-commit, tflint, trivy — local dev setup
 │   ├── INCIDENTS.md                # Findings from the 2026-08 manual platform sprint
@@ -241,7 +247,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 **Creates**:
 - 3× EC2 instances (t3.medium On-Demand, `count = control_plane_count`, auto-assigned public IPs — NO EIP anymore)
 - Security group (SSH from `my_ip`; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
-- IAM role with SSM write permissions (`/k8s/${cluster_name}/*` — includes the CP-only `cp/` subpath)
+- IAM role with SSM write permissions (`/k8s/${cluster_name}/*` — includes the `cp/` subpath, which the WORKER role is excluded from; the CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig)
 
 **Key Pattern**: NLB-first (replaced the historical EIP-first):
 1. The NLB and its DNS depend on NO instance → created first

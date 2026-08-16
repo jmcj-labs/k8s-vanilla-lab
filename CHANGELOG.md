@@ -20,7 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequential control-plane joins via the SSM gate `cp/joined-count`
   (`bootstrap/control-plane-join.yaml`, with per-node aws-iam-authenticator material);
   worker SSM policy narrowed to exact ARNs (the `cp/` subpath — certificate-key — is
-  CP-role-only); ceremonies + runbooks: certificate-key renewal
+  excluded from the worker role); a fail-closed recreate guard
+  (`scripts/guard-legacy-cp-state.sh`, wired into `make apply` and CI);
+  ceremonies + runbooks: control-plane replacement
+  (`scripts/replace-control-plane.sh` — etcd member remove, one at a time,
+  `-replace` on a full plan, closes on 3/3 nodes/etcd/targets), join-material renewal
   (`scripts/renew-cp-certificate-key.sh`) and HA etcd restore
   (`scripts/drill-restore-etcd-ha.sh`, `etcdutl --bump-revision --mark-compacted`);
   smoke §14 (3/3 CPs·etcd·API targets, negative :6443 on CP public IPs, endpoint

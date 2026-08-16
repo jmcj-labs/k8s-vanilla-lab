@@ -95,11 +95,17 @@ locals {
 
 }
 
-# Multi-part cloud-init for control planes (common + per-index script).
+# Multi-part cloud-init for control planes.
 # NLB-FIRST pattern (replaces the historical EIP-first): the stable API
 # endpoint rendered into user_data is the NLB's DNS, which depends on no
-# instance — so it exists before any node boots. Index 0 renders the
-# kubeadm-init script; 1..N render the sequential control-plane join script.
+# instance — so it exists before any node boots.
+#
+# Index 0 carries TWO scripts (founder + join), every other index only the
+# join script. Which one acts is decided AT RUNTIME, not at plan time:
+# a rebuilt index 0 finds cp/joined-count in SSM, skips the founder path
+# and joins like any replacement (Codex cruce 3 — the static
+# `count.index == 0 ? init : join` selector would have re-initialised a
+# second cluster on top of the live one).
 data "cloudinit_config" "control_plane" {
   count = var.control_plane_count
 
@@ -112,26 +118,43 @@ data "cloudinit_config" "control_plane" {
     filename     = "01-common.sh"
   }
 
+  # Index 0 only: the founder script. It self-detects genesis vs
+  # replacement (SSM cp/joined-count) and exits early when a cluster
+  # already exists, leaving the join part below to do the work — that is
+  # what makes a REBUILT index 0 join instead of initialising a second
+  # cluster (Codex cruce 3).
+  dynamic "part" {
+    for_each = count.index == 0 ? [1] : []
+    content {
+      content_type = "text/x-shellscript"
+      content = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
+        cluster_name = var.cluster_name
+        aws_region   = var.aws_region
+        pod_cidr     = local.pod_cidr
+        service_cidr = local.service_cidr
+        # Both the name AND the target group: resolving proves the NLB
+        # exists, registration proves the endpoint can route back here.
+        api_endpoint_dns     = module.nlb.dns_name
+        api_target_group_arn = module.nlb.api_target_group_arn
+        ssm_parameter_path   = local.ssm_parameter_base
+      })
+      filename = "02-control-plane-init.sh"
+    }
+  }
+
+  # EVERY index, including 0: the join script. It is a no-op on a node that
+  # is already a control plane (kube-apiserver manifest present), so on
+  # genesis it costs one check and exits.
   part {
     content_type = "text/x-shellscript"
-    content = count.index == 0 ? templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
-      cluster_name = var.cluster_name
-      aws_region   = var.aws_region
-      pod_cidr     = local.pod_cidr
-      service_cidr = local.service_cidr
-      # Both the name AND the target group: resolving proves the NLB exists,
-      # registration proves the endpoint can route back to this node.
-      api_endpoint_dns     = module.nlb.dns_name
-      api_target_group_arn = module.nlb.api_target_group_arn
-      ssm_parameter_path   = local.ssm_parameter_base
-      }) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
+    content = templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
       cluster_name       = var.cluster_name
       aws_region         = var.aws_region
       api_endpoint_dns   = module.nlb.dns_name
       ssm_parameter_path = local.ssm_parameter_base
       cp_index           = count.index
     })
-    filename = "02-control-plane.sh"
+    filename = "03-control-plane-join.sh"
   }
 }
 
