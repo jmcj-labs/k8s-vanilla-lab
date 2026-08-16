@@ -49,14 +49,81 @@ muere entero, la cadena restaurable sobrevive.
 
 ## 2. Nacimiento HA desde estado vacío
 
-PENDIENTE — 3 CPs con joins secuenciados; se vigila el **fail-open** del NLB
-durante el `kubeadm init` (tradeoff aceptado en el cruce 4: si kubeadm
-resulta intermitente, escalonar los attachments).
+[run 31954021824](https://github.com/jmcj-labs/k8s-vanilla-lab/actions/runs/31954021824) ·
+66 recursos · NLB fresco `k8s-vanilla-lab-gw-nlb-ccd407a2916738a0`.
+
+Los 3 CPs con joins **secuenciados**, verificado por el gate: al terminar,
+`/k8s/k8s-vanilla-lab/cp/joined-count = 3` (CP-0 lo abre en 1, cada join
+publica su incremento). 6/6 nodos Ready.
+
+### Veredicto del fail-open: NO se materializa (tradeoff cerrado)
+
+Del log de CP-0, leído **sin SSH** (pod privilegiado, patrón de la casa):
+
+```
+14:59:20  ✓ NLB DNS resolves
+14:59:21  ✓ Registered in the API target group (i-0735a5deee16b3102) — the endpoint routes here
+14:59:21  Step 3/9: Running kubeadm init
+14:59:42  ✓ kubeadm init completed successfully          ← 21 segundos
+15:00:41  Step 9/9: Opening control-plane join gate (cp/joined-count = 1)
+```
+
+**Cero** errores de conexión, timeouts o reintentos en toda la fase de init
+(`grep -icE "connection refused|connection reset|timeout|retry|error|dial tcp"`
+sobre las líneas del init → `0`). La razón está en el propio log: kubeadm
+espera contra **`127.0.0.1`** (`kubelet-check ... http://127.0.0.1:10248/healthz`,
+`control-plane-check ... https://127.0.0.1:10257/healthz`), **no** contra
+`controlPlaneEndpoint`. El endpoint solo lo usan los *joins* y los clientes,
+y para entonces CP-0 ya está healthy y el NLB ya no está en fail-open.
+
+**Conclusión: no hace falta escalonar los attachments.** El gate de registro
+en el TG sigue siendo necesario por lo que sí garantiza (que el endpoint
+pueda enrutar a este nodo), pero la intermitencia temida no ocurre.
+
+### Incidencia del apply: flake de red, no diseño
+
+El paso `Install platform layer` falló en el 7/12 descargando el chart de
+Strimzi (`release-assets.githubusercontent.com ... read: connection reset by
+peer`). El cluster ya estaba sano; `make platform` es idempotente y completó
+los 12/12 al reintentar. Misma familia que el 502 de Docker Hub del 15-ago:
+descargas de terceros en el camino crítico.
 
 ## 3. Smoke completo con §14
 
-PENDIENTE — 6/6 nodos · etcd 3/3 · targets API 3/3 · negativa `:6443` en las
-3 IPs públicas de CP · coherencia de endpoint · authenticator 3/3.
+**Verde de principio a fin**, cerrando con `✓ Smoke test passed: cluster,
+platform, IAM, network, data, registry, app contract, backups, NLB entry and
+HA control plane are healthy`. La sección nueva:
+
+```
+✓ 3/3 control-plane nodes Ready
+✓ etcd: 3/3 members started (stacked quorum)
+✓ API targets: exactly the 3 control planes, ALL healthy
+✓ negative proof: :6443 closed on EVERY CP public IP (NLB is the only API door)
+✓ endpoint coherence: kubeconfig + Cilium on the NLB DNS · authenticator 3/3
+```
+
+### Bug encontrado en la propia §14e (y corregido en vivo)
+
+La primera pasada falló: `Cilium k8s-service-host is , want <NLB DNS>`. La
+asertación miraba una clave del ConfigMap `cilium-config` que **no existe en
+Cilium 1.19** — de haberla dado por buena, habría fallado siempre sin
+haberse validado nunca. El endpoint vive como variable de entorno
+`KUBERNETES_SERVICE_HOST` en los contenedores del DaemonSet, y su valor
+efectivo era correcto desde el principio (comprobado dentro del agente vivo).
+
+La comprobación corregida es **más fuerte** que la original: exige el valor
+en el spec del DaemonSet **y** dentro del agente en ejecución — un spec
+actualizado sin rollout leería como conforme mientras los agentes vivos
+siguen hablando con el endpoint viejo.
+
+### Nota operativa: el smoke no es idempotente en la capa de datos
+
+Ejecutarlo dos veces seguidas cortó el segundo pase: la suite provoca un
+**failover real de CNPG** y **mata un broker de Kafka** en cada ejecución, y
+la capa de datos necesita asentarse entre pases. El cluster quedó sano
+(6/6 nodos, CNPG 3/3, Kafka 3/3, ningún pod fuera de Running). No es un
+defecto a corregir — es la naturaleza de un smoke que prueba resiliencia de
+verdad —, pero conviene no encadenarlos.
 
 ## 4. Drill de pérdida: parar CP-0 (el fundador)
 
@@ -69,7 +136,31 @@ PENDIENTE — dos terminales; renovación dentro de la ventana de 6 reintentos.
 
 ## 6. Restore HA con testigo recuperado
 
-PENDIENTE — tiempos al runbook.
+**BLOQUEADO POR ACCESO FUERA DE BANDA — no por el diseño.**
+
+El restore HA para los TRES control planes; con las tres APIs abajo,
+`kubectl` deja de existir como herramienta por definición, así que la
+ceremonia se orquesta por SSH (así está escrita en
+`scripts/drill-restore-etcd-ha.sh`). En la máquina desde la que opero:
+
+- No está la clave privada del par `k8s-vanilla-lab` (`~/.ssh` solo tiene
+  `agent` y `known_hosts`).
+- **Session Manager no es alternativa**: `describe-instance-information`
+  devuelve 0 instancias gestionadas y el role de nodo no lleva
+  `AmazonSSMManagedInstanceCore`.
+
+Los otros drills **no** dependen de SSH (usan kubectl + API de AWS) y sí se
+ejecutan. Opciones para desbloquear este, en orden de preferencia técnica:
+
+1. **Clave SSH disponible** en `~/.ssh/k8s-vanilla-lab.pem` → el drill corre
+   tal cual está escrito.
+2. **Adoptar Session Manager** (`AmazonSSMManagedInstanceCore` en los roles
+   de nodo) y portar la ceremonia a `aws ssm send-command`. Mejora de fondo:
+   permitiría **cerrar el puerto 22** al mundo y dejar el acceso fuera de
+   banda auditado en CloudTrail — pero es un cambio de alcance con su propio
+   PR y su propio cruce, no algo que colar en la coronación.
+3. Diferir el drill declarándolo deuda con fecha (la regla de la casa dice
+   que entonces el runbook es esperanza, no backup: **no** recomendado).
 
 ## 7. Segundo apply con plan vacío
 

@@ -1003,9 +1003,26 @@ OK "negative proof: :6443 closed on EVERY CP public IP (NLB is the only API door
 KC_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 [ "${KC_SERVER}" = "https://${NLB_DNS}:6443" ] \
   || FAIL "kubeconfig server is ${KC_SERVER}, want https://${NLB_DNS}:6443"
-CILIUM_HOST=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.k8s-service-host}')
+# Cilium 1.19 does NOT keep k8sServiceHost in cilium-config: the chart
+# injects it as KUBERNETES_SERVICE_HOST into the DaemonSet's containers
+# (verified live 2026-08-16 — the ConfigMap has no such key at all).
+# Assert BOTH the spec and the value inside the RUNNING agent: a spec
+# updated without a rollout would otherwise read as compliant while the
+# live agents still talked to the old endpoint.
+CILIUM_HOST=$(kubectl -n kube-system get ds cilium -o json | python3 -c '
+import json,sys
+spec=json.load(sys.stdin)["spec"]["template"]["spec"]
+for c in spec["containers"]:
+    if c["name"] == "cilium-agent":
+        for e in c.get("env", []):
+            if e["name"] == "KUBERNETES_SERVICE_HOST":
+                print(e.get("value", ""))
+                break')
 [ "${CILIUM_HOST}" = "${NLB_DNS}" ] \
-  || FAIL "Cilium k8s-service-host is ${CILIUM_HOST}, want ${NLB_DNS}"
+  || FAIL "Cilium DaemonSet KUBERNETES_SERVICE_HOST is '${CILIUM_HOST}', want ${NLB_DNS}"
+CILIUM_LIVE=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- printenv KUBERNETES_SERVICE_HOST 2>/dev/null | tr -d '\r')
+[ "${CILIUM_LIVE}" = "${NLB_DNS}" ] \
+  || FAIL "the RUNNING cilium-agent points at '${CILIUM_LIVE}', want ${NLB_DNS} (DaemonSet updated without a rollout?)"
 # IAM auth path: the authenticator DaemonSet must cover all 3 CPs (the API
 # server on EVERY CP webhooks to ITS OWN local authenticator).
 AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
