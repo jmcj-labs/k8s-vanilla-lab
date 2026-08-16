@@ -18,14 +18,9 @@ resource "aws_security_group" "worker" {
   vpc_id                 = var.vpc_id
   revoke_rules_on_delete = true
 
-  # SSH access from my IP only
-  ingress {
-    description = "SSH from my IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
-  }
+  # NO inbound SSH — out-of-band access is SSM Run Command / Session Manager
+  # (INCIDENTS #16). See the note in the control-plane module for why
+  # `key_name` survives on the instances while this rule does not.
 
   # Kubelet API - from control plane
   ingress {

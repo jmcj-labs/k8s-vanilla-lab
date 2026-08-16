@@ -3,6 +3,8 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
+# Node shells are SSM sessions now, not ssh — there is no inbound SSH and no
+# key (INCIDENTS #16). Use `make ssm-cp CP_INDEX=n` / `make ssm-worker`.
 output "control_plane_public_ips" {
   description = "Control plane public IPs by index (auto-assigned — SSH/egress only; the API endpoint is the NLB, ADR-007)"
   value       = module.control_plane.public_ips
@@ -21,22 +23,6 @@ output "worker_public_ips" {
 output "worker_private_ips" {
   description = "Worker node private IPs"
   value       = module.worker.private_ips
-}
-
-output "ssh_control_planes" {
-  description = "SSH commands for the control planes (index 0 = kubeadm init node)"
-  value = [
-    for ip in module.control_plane.public_ips :
-    "ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@${ip}"
-  ]
-}
-
-output "ssh_workers" {
-  description = "SSH commands for workers"
-  value = [
-    for ip in module.worker.public_ips :
-    "ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@${ip}"
-  ]
 }
 
 output "cluster_info" {

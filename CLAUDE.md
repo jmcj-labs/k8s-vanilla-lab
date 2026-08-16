@@ -184,7 +184,7 @@ If validation fails, fix immediately before proceeding.
 
 ### 5. Security Best Practices
 
-- SSH access: restricted to `var.my_ip` only
+- NO inbound SSH: node access is SSM (Session Manager for humans, Run Command for ceremonies) — INCIDENTS #16
 - API server: public THROUGH THE NLB only (ADR-007) — the CP SG accepts 6443 solely from the NLB's SG; `api_server_allowed_cidrs` no longer exists
 - IAM policies: minimal scope (`/k8s/${cluster_name}/*` for SSM)
 - IMDSv2: enforced on all EC2 instances
@@ -207,8 +207,8 @@ The `Makefile` is the single source of truth for operational commands. **Any pro
 | `make kubeconfig-dev` | IAM-auth kubeconfig (developer role, ns logistics only) |
 | `make platform` | Fetch kubeconfig (temp file), run `platform/install.sh` (EBS CSI, cert-manager, Gateway, operators, monitoring) |
 | `make smoke-test` | Fetch kubeconfig (temp file), run `scripts/smoke-test.sh`: nodes Ready, no kube-proxy, Cilium KPR True, providerID set, gp3 PVC Bound, Gateway Programmed, operators Ready |
-| `make ssh-cp` | SSH into control plane |
-| `make ssh-worker` | SSH into first worker node |
+| `make ssm-cp` | Shell on a control plane via SSM Session Manager (CP_INDEX=0\|1\|2) — there is NO inbound SSH (INCIDENTS #16) |
+| `make ssm-worker` | Shell on a worker via SSM Session Manager (WORKER_INDEX=1..N) |
 | `make clean` | Remove `.terraform/` cache and `*.tfstate.backup` |
 | `make bootstrap-aws` | One-time: create/verify S3, DynamoDB, OIDC, IAM role |
 
@@ -443,7 +443,7 @@ without opening another file:
 
 - **Bootstrap takes 8-12 min after `make apply`**: cloud-init runs in the background. Logs at
   `/var/log/k8s-bootstrap.log`, `/var/log/k8s-cp-bootstrap.log`,
-  `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
+  `/var/log/k8s-worker-bootstrap.log`. Use `make ssm-cp` / `make ssm-worker` to reach nodes (SSM; no SSH exists).
 - **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
   re-execute bootstrap scripts. Only new instances run them.
 - **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply (from any CP

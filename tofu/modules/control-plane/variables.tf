@@ -29,15 +29,6 @@ variable "key_name" {
   type        = string
 }
 
-variable "my_ip" {
-  description = "CIDR allowed for SSH access (no default — must be passed by the caller). The K8s API no longer uses it: 6443 enters through the NLB only (ADR-007)."
-  type        = string
-  validation {
-    condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"
-  }
-}
-
 variable "control_plane_count" {
   description = "STATIC control-plane node count (3 for HA, stacked etcd — quorum needs an odd number). Drives instance count and must never depend on a computed value (INCIDENTS #11)."
   type        = number

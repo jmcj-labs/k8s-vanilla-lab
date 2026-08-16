@@ -429,3 +429,33 @@ an on-demand `Backup` completed in ~30 seconds.
   the last attempt worked, not the current path. The install gate now
   passing on it is still right — but drills remain the only proof that
   matters.
+
+### Resolution (same day)
+
+SSM adopted as the out-of-band channel, in the order the brief demanded:
+**prove the new door before closing the old one.**
+
+1. `AmazonSSMManagedInstanceCore` on both node roles → 6/6 nodes `Online`.
+2. Canary Run Command executed on each node, asserting its exact output.
+3. Interactive Session Manager shell opened and verified running a command.
+4. **Only then** the inbound TCP/22 rules were removed from both security
+   groups, and `my_ip` retired from the modules with it.
+
+Two things the live run taught that the plan did not anticipate:
+
+- **Attaching the policy is not enough on a running node.** The agent had
+  already failed to get credentials and had backed off:
+  `[CredentialRefresher] Sleeping for 27m48s before retrying`. Without
+  restarting the agent, registration appears broken for half an hour. Nodes
+  born after this change are unaffected — the permission is in the profile
+  from first boot.
+- **`AWS-RunShellScript` executes with `/bin/sh`** (dash on Ubuntu), which
+  rejects `set -o pipefail` outright. A shebang as the FIRST command IS
+  honoured (verified: bash 5.2.21), which is how `scripts/lib/ssm-exec.sh`
+  keeps the strictness the SSH helper had. Without this the ceremonies would
+  have silently lost their error handling.
+
+**The generalised lesson is now enforced, not just written**: smoke §15
+proves the channel on every apply — exact inventory, all `Online`, a canary
+Run Command per node, the absence of inbound TCP/22, and (locally, where the
+plugin exists) an interactive shell that opens and runs a command.

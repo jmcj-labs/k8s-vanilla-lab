@@ -25,7 +25,10 @@ variable "control_plane_count" {
 }
 
 variable "my_ip" {
-  description = "CIDR allowed for SSH access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0). The K8s API no longer uses it: 6443 enters through the NLB (ADR-007)."
+  # VESTIGIAL since INCIDENTS #16: nothing consumes it any more (no inbound
+  # SSH exists). Kept only so existing terraform.tfvars / CI variables do not
+  # break; delete it in a later sweep once every caller has dropped it.
+  description = "UNUSED since the move to SSM out-of-band access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0). The K8s API no longer uses it: 6443 enters through the NLB (ADR-007)."
   type        = string
   validation {
     condition     = can(cidrhost(var.my_ip, 0))

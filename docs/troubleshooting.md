@@ -41,9 +41,9 @@ helm upgrade --install cilium cilium/cilium \
 
 ---
 
-## SSH connection refused
+## Cannot open a shell on a node
 
-**Symptom**: `ssh: connect to host X port 22: Connection refused`
+**Symptom**: `make ssm-cp` fails to start a session
 
 **Most likely cause**: Bootstrap is still running. Wait 2-3 minutes after `make apply`, then retry.
 
@@ -52,11 +52,11 @@ Other causes:
 | Cause | Fix |
 |-------|-----|
 | `my_ip` doesn't match your current IP | `curl ifconfig.me` → update `terraform.tfvars` → `make apply` |
-| Wrong SSH key | Verify `ssh_key_name` in `terraform.tfvars` matches the key pair in AWS |
+| Session does not open | `session-manager-plugin` missing locally, or the node is not `Online` in SSM (`aws ssm describe-instance-information`) |
 
 ```bash
-make ssh-cp     # control plane
-make ssh-worker # first worker
+make ssm-cp     # control plane (SSM Session Manager — no SSH exists)
+make ssm-worker # first worker
 ```
 
 ---
@@ -78,14 +78,14 @@ aws ssm get-parameter \
 `ParameterNotFound` means the control plane bootstrap hasn't completed yet. Check Stage 2 logs:
 
 ```bash
-make ssh-cp
+make ssm-cp
 sudo tail -100 /var/log/k8s-cp-bootstrap.log
 ```
 
 **Step 2: Check worker logs**
 
 ```bash
-make ssh-worker
+make ssm-worker
 sudo tail -100 /var/log/k8s-worker-bootstrap.log
 ```
 
@@ -104,7 +104,7 @@ Bootstrap tokens expire after 24 hours. If a worker needs to rejoin after that w
 
 ```bash
 # On the control plane
-make ssh-cp
+make ssm-cp
 
 # Generate a new token
 sudo kubeadm token create --ttl 24h
@@ -118,7 +118,7 @@ openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
 Then on the worker:
 
 ```bash
-make ssh-worker
+make ssm-worker
 
 # The endpoint is the NLB's DNS (ADR-007) — never a node IP.
 # Read it from SSM: aws ssm get-parameter --name /k8s/<cluster>/api-endpoint --with-decryption --query Parameter.Value --output text
@@ -178,7 +178,7 @@ Other causes:
 |-------|-----|
 | Stale NLB DNS from a previous incarnation | The name changes with every destroy/apply: `make kubeconfig` again, and refresh `K8S_SERVER` in Repo 2 (`docs/RUNBOOK-post-apply.md`) |
 | API targets unhealthy | `aws elbv2 describe-target-health --target-group-arn $(aws elbv2 describe-target-groups --names "$CLUSTER_NAME-api-tg" --query 'TargetGroups[0].TargetGroupArn' --output text)` — the NLB fails OPEN when all are unhealthy, so `:6443` may answer from a node whose API is down |
-| Control planes not running | Check instance state in AWS console; `make ssh-cp` (`CP_INDEX=1|2` for the others) then `sudo systemctl status kubelet` |
+| Control planes not running | Check instance state in AWS console; `make ssm-cp CP_INDEX=n` then `sudo systemctl status kubelet` |
 
 ---
 
@@ -388,7 +388,7 @@ kubectl get node <node> -o jsonpath='{.metadata.labels.k8s-vanilla-lab/ecr-cp}'
 #    KUBECONFIG=… bash scripts/rollout-ecr-credential-provider.sh
 
 # 2. kubelet logs on the node show the provider being invoked / its error
-#    (via a debug pod with nsenter, or make ssh-worker if you have the key):
+#    (via a debug pod with nsenter, or `make ssm-worker`):
 journalctl -u kubelet | grep -i credential
 
 # 3. Does the worker role actually allow the pull?

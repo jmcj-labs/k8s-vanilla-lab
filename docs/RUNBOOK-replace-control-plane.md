@@ -117,7 +117,7 @@ SKIP_RENEW=1 bash scripts/replace-control-plane.sh 0
 ```bash
 export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
 # Espera a ver el primer fallo en el nodo nuevo
-make ssh-cp CP_INDEX=0        # sudo tail -f /var/log/k8s-cp-bootstrap.log
+make ssm-cp CP_INDEX=0        # sudo tail -f /var/log/k8s-cp-bootstrap.log
 #   → "Join attempt 1/6 ... failed" · "retrying in 120s (re-fetching certificate-key)"
 
 # 3. Renueva: el reintento en curso recoge la clave fresca (≤120s)
@@ -144,7 +144,7 @@ make smoke-test
 ## Si algo va mal
 
 - **El nuevo nodo no aparece**: `/var/log/k8s-cp-bootstrap.log` en la
-  instancia (`make ssh-cp CP_INDEX=<n>`). Causa típica: material de join
+  instancia (`make ssm-cp CP_INDEX=<n>`). Causa típica: material de join
   caducado → ejecutar la renovación.
 - **Membresía con 4 miembros**: se saltó el paso 4; retirar a mano con
   `etcdctl member remove` desde un superviviente y volver a comprobar.

@@ -29,15 +29,6 @@ variable "key_name" {
   type        = string
 }
 
-variable "my_ip" {
-  description = "CIDR allowed for SSH access (no default — must be passed by the caller)"
-  type        = string
-  validation {
-    condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"
-  }
-}
-
 variable "control_plane_security_group_id" {
   description = "Security group ID of control plane (for ingress rules)"
   type        = string

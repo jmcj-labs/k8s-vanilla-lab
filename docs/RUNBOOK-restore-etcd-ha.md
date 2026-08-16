@@ -22,19 +22,45 @@ Dos flags de `etcdutl snapshot restore` son **obligatorios** aquí
 - `--mark-compacted` — fuerza a los watchers a resincronizar desde cero en vez
   de continuar desde una revisión que ya no significa nada.
 
-## Por qué la orquestación es SSH y no kubectl
+## Por qué la orquestación es fuera de banda, y por qué SSM
 
 En el escenario real la API está caída — ese es el escenario. `kubectl` solo
 abre el drill (testigo + snapshot) y lo cierra (testigo recuperado); todo lo
-demás viaja por SSH (`my_ip` es el único origen admitido en el SG).
+demás viaja por **SSM Run Command** (`AWS-RunShellScript`, que ejecuta como
+**root**, sin `sudo`).
+
+Antes esto era SSH. Dejó de serlo por [INCIDENTS #16](INCIDENTS.md): al ir a
+ejecutar este mismo drill se descubrió que **la clave privada no existía en
+ningún sitio** — el procedimiento era correcto y a la vez inejecutable. El
+canal SSM viaja con el instance profile, así que ninguna máquina nueva nace
+sin él y ningún portátil puede perderlo.
+
+**El preflight prueba el canal en los tres CPs antes de tocar nada.** Si la
+puerta no abre, la ceremonia se detiene con el cluster intacto — que es
+exactamente la lección que la originó.
+
+### Reentrada
+
+Cada fase publica un marcador en un parámetro SSM, y el lock también vive
+ahí (un ConfigMap no puede arbitrar exclusión mutua cuando la API en la que
+vive está muerta). Si la ceremonia se interrumpe —incluso después de apartar
+los data dirs, el punto delicado— **se relanza el mismo comando y continúa
+donde estaba**. Para abandonarla a conciencia:
+
+```bash
+aws ssm delete-parameter --name /k8s/<cluster>/oob/restore-lock  --region <region>
+aws ssm delete-parameter --name /k8s/<cluster>/oob/restore-phase --region <region>
+```
 
 ## Precondiciones
 
 - Snapshot en `s3://<cluster>-backups-<account>/etcd/` (el CronJob de backup
   corre en **cualquier** CP sano — sin pin, a propósito: pinearlo a un nodo
   mataría el backup justo al perder ese nodo).
-- Credenciales de operador (presign; el role de CP es write-only a `etcd/*`
-  por diseño y no se amplía para drills).
+- Credenciales de operador con `ssm:SendCommand` sobre `AWS-RunShellScript`
+  y presign de S3 (el role de CP es write-only a `etcd/*` por diseño y no se
+  amplía para drills).
+- **Sin clave SSH ni puerto 22**: no existen desde INCIDENTS #16.
 - Los manifests generados por kubeadm en cada nodo (supuesto que el script
   explota, generado por el propio kubeadm):
   - **CP-0 (fundador)**: `etcd.yaml` con `--initial-cluster=<cp0>` solo,

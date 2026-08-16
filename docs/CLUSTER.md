@@ -155,7 +155,7 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
   `--forward-session-name`; la sesión viene de `aws sso login`.
 - Break-glass: `make kubeconfig` → cert admin de kubeadm desde SSM (ADR-004).
   Solo si el authenticator no responde.
-- `make ssh-cp` / `make ssh-worker`
+- `make ssm-cp` / `make ssm-worker` (SSM; no existe SSH entrante)
 - Grafana — **por port-forward** (S2-2 cerró los NodePort al exterior; no
   abrir otro puerto ni regla):
   `kubectl port-forward -n infra svc/kube-prometheus-stack-grafana 3000:80`
@@ -174,6 +174,21 @@ nombrando el perfil y el login exacto:
 | `make kubeconfig-admin` / `kubeconfig-dev` | sesiones SSO `k8s-platform` / `k8s-dev` (ADR-005) — perfiles distintos del de tofu |
 
 Historia del cepo (`Token has expired` sin dueño): `docs/troubleshooting.md`.
+
+**Acceso a los nodos (desde INCIDENTS #16): SSM, cero SSH entrante.**
+
+| Necesidad | Herramienta | Identidad en el nodo |
+|---|---|---|
+| Shell humana | `make ssm-cp CP_INDEX=n` · `make ssm-worker WORKER_INDEX=n` (Session Manager) | `ssm-user` (sudo sin contraseña) |
+| Ceremonias guionizadas | `scripts/lib/ssm-exec.sh` → `send-command` con `AWS-RunShellScript` | **root** directamente |
+
+Requiere el plugin local: `brew install --cask session-manager-plugin` (o el
+bundle sin sudo de `s3.amazonaws.com/session-manager-downloads/plugin/latest/`).
+
+No hay regla de entrada TCP/22 en ningún SG y no existe clave privada que
+custodiar: el acceso viaja con el instance profile. `key_name` sigue en las
+instancias **a propósito** — es `ForceNew` y quitarlo recrearía los 6 nodos
+sin ganancia; queda vestigial hasta el próximo nacimiento desde cero.
 
 **FinOps**: con S2-3 el control plane pasa a 3× on-demand: CP 3×$0.038 +
 3×spot + NLB (~$0.55/día) + IPv4 públicas ≈ **~4,8–5 $/día encendido**
@@ -209,6 +224,11 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
   desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
   evidencia en [HANDOFF.md](HANDOFF.md). La exposición es el NLB desde S2-2.
+- **Auditoría de sesiones: parcial hasta configurar el logging.** CloudTrail
+  registra *que* se abrió una sesión y quién, pero **el contenido de la shell
+  solo queda grabado si se activa el logging de Session Manager** (S3 o
+  CloudWatch, con su preferencia de cifrado). Mientras no esté, decir "shell
+  auditada" sería exagerar: es *acceso trazado*, no *sesión grabada*.
 - **API 6443 pública (por el NLB desde S2-3)** y **kubeconfig admin en SSM**
   (ya solo break-glass, ADR-005) — aceptable en lab efímero, inaceptable en
   cualquier otro contexto. Desde ADR-007 los CPs ya no exponen 6443 al mundo
