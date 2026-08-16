@@ -168,9 +168,88 @@ Los tres se corrigieron y la ejecución de arriba ya es con el script sano:
    sentencia, tuberías sin `|| true`). Reescritas para **reportar su valor y
    neutralizar su código de salida**: son observaciones, no asertos.
 
-## 5. Drill de reemplazo con `kubeadm-certs` invalidado
+## 4b. Hallazgo lateral: deriva de `my_ip` entre CI y local (ping-pong)
 
-PENDIENTE — dos terminales; renovación dentro de la ventana de 6 reintentos.
+Al aplicar la ceremonia de reemplazo, el plan arrastró **2 cambios** ajenos
+al reemplazo: las reglas SSH del SG de control plane y del de workers.
+
+| Origen | `my_ip` |
+|---|---|
+| Variable de GitHub `TF_VAR_MY_IP` (la que usa el Apply de CI) | `92.172.18.227/32` |
+| `tofu/envs/lab/terraform.tfvars` (la que usa cualquier apply local) | `45.85.248.117/32` |
+
+Consecuencia: **cada apply local reescribe la regla SSH y el siguiente apply
+de CI la revierte** — ping-pong indefinido sobre una regla de seguridad, sin
+que nadie lo note. La ceremonia lo aplicó en silencio porque la inspección
+del plan solo vigilaba destrucciones de instancias: otra vez el patrón de
+esta pieza — *el silencio parecía "no pasó nada más"*.
+
+Correcciones aplicadas:
+
+**La dirección de la deriva importa, y la conté al revés en el primer
+informe**: la variable de GitHub (`92.172.18.227/32`) es **la correcta y
+vigente** — coincide con la IP pública real del equipo de operación,
+verificada con `curl ifconfig.me`. El `terraform.tfvars` local llevaba un
+valor **obsoleto**. Es decir, la ceremonia no "actualizó" nada: **cerró el
+SSH desde la IP real del operador**.
+
+Correcciones aplicadas:
+
+1. **La inspección del plan imprime TODOS los cambios** que trae, no solo los
+   que rechaza. Sigue abortando por instancias ajenas, pero lo que acepta
+   queda a la vista. Esta regla es la misma que arreglamos tres veces en el
+   código: *el silencio no es una respuesta segura*.
+2. **`terraform.tfvars` alineado con la variable de GitHub** (la fuente de
+   verdad) y reglas SSH restauradas a `92.172.18.227/32` en ambos SGs.
+
+## 5. Drill de reemplazo con `kubeadm-certs` invalidado — **SUPERADO**
+
+Escenario: se borró el Secret `kubeadm-certs` (equivale a haber pasado las 2 h
+de TTL) y se reemplazó el índice 0 **sin renovar** (`SKIP_RENEW=1`), para que
+el join tuviera que fallar antes de que la ceremonia de renovación lo
+rescatara.
+
+**La secuencia, con sellos temporales del log del nodo nuevo** (leídos sin
+SSH, con pod privilegiado):
+
+```
+15:55:08  ✓ Gate open (joined-count=3) — my turn
+15:55:10  ✓ certificate-key retrieved     ← la clave OBSOLETA
+15:55:10  Join attempt 1/6
+15:55:20  Join failed — resetting and retrying in 120s (re-fetching certificate-key)
+15:57:21  Join attempt 2/6   → failed
+15:59:23  Join attempt 3/6   → failed
+16:01:24  Join attempt 4/6   → failed
+          ─── 16:01:57  renovación ejecutada desde un superviviente ───
+16:03:26  Join attempt 5/6
+16:03:50  ✓ kubeadm join (control-plane) completed
+```
+
+**Cuatro fallos con la clave caducada, renovación, y el siguiente intento
+entra.** La caducidad de 2 h tiene salida operativa demostrada, no teórica.
+
+**Cierre de la ceremonia** (819 s en total):
+
+```
+✓ exactly 3 control-plane Nodes, all Ready · exactly 3 etcd members, all started
+✓ etcd endpoint health: all endpoints healthy
+✓ API target group: registered set == exactly the 3 live control planes,
+  ALL healthy (no stale/draining target)
+=== Replacement complete in 819s — HA capacity RESTORED ===
+```
+
+Los invariantes son **conjuntos exactos**, no conteos: exactamente 3 nodos y
+3 miembros (no "al menos"), y el conjunto de targets **registrados** igual al
+de instancias vivas — que es lo que descarta un cuarto target agonizando.
+
+Detalles verificados de paso:
+- El **plan se inspeccionó antes** de retirar el miembro etcd (el fix del
+  cruce 5): `✓ plan inspected and saved` precede a `Removing etcd member`.
+- El **attachment del TG se recreó** con la instancia nueva
+  (`...api-tg/...,i-0f444dddfabdbfc37,6443`) — la razón de usar `-replace`
+  con plan completo en vez de `-target`.
+- El **contador monótono** funcionó: el índice 0 rejunto no bajó
+  `joined-count` de 3.
 
 ## 6. Restore HA con testigo recuperado
 

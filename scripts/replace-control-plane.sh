@@ -206,6 +206,16 @@ if bad:
 if not expected:
     print("plan does NOT replace " + target)
     sys.exit(3)
+# Everything the plan carries rides in front of the operator. Refusing
+# only what is dangerous while staying silent about the rest is how a
+# stale my_ip rewrote a security-group rule unnoticed (live phase,
+# 2026-08-16): silence read as "nothing else happened".
+other=[c["address"] + ": " + ",".join(c["change"]["actions"])
+       for c in plan.get("resource_changes",[])
+       if c["address"] != target and c.get("change",{}).get("actions",["no-op"]) != ["no-op"]]
+if other:
+    print("plan also carries these changes (accepted, but SHOWN):")
+    for o in other: print("   ", o)
 print("plan verified: only the target control plane is replaced")' \
   || FAIL "plan inspection refused this plan (see above) — NOTHING was applied and the cluster is untouched: etcd still has all its members and no Node was deleted"
 log "✓ plan inspected and saved: only ${ADDR} is replaced"
