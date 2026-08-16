@@ -1,0 +1,213 @@
+#!/bin/bash
+# Control Plane JOIN bootstrap — replica nodes (index 1..N) of the HA
+# control plane (S2 piece 3, ADR-007).
+# Purpose: join this node as an additional control plane (stacked etcd),
+#          STRICTLY SEQUENTIALLY: the kubeadm HA guide requires one
+#          control-plane join at a time, so joins serialize through the SSM
+#          gate cp/joined-count (CP-1 waits for >=1, CP-2 for >=2; each
+#          publishes its own increment after joining).
+# Variables: cluster_name, aws_region, api_endpoint_dns, ssm_parameter_path, cp_index
+
+set -euo pipefail
+exec >> /var/log/k8s-cp-bootstrap.log 2>&1
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log "=== Starting Control Plane JOIN bootstrap (index ${cp_index}) ==="
+
+# Step 1: Wait for common.yaml bootstrap to complete
+log "Step 1/6: Waiting for common bootstrap to complete"
+TIMEOUT=600  # 10 minutes
+ELAPSED=0
+INTERVAL=10
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if grep -q "Step 8/8: Enabling kubelet service" /var/log/k8s-bootstrap.log 2>/dev/null && \
+     grep -q "Common bootstrap completed successfully" /var/log/k8s-bootstrap.log 2>/dev/null; then
+    log "✓ Common bootstrap completed"
+    break
+  fi
+
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
+    tail -20 /var/log/k8s-bootstrap.log || true
+    exit 1
+  fi
+done
+
+# Step 2: aws-iam-authenticator webhook material — the DaemonSet does NOT
+# create it, and this node's API server static pod (generated at join from
+# the cluster-stored ClusterConfiguration: same extraArgs/extraVolumes as
+# the founder's init) starts with the webhook flags pointing at these host
+# paths. MUST exist before kubeadm join; abort otherwise — continuing would
+# produce a control plane silently missing IAM auth.
+log "Step 2/6: Installing aws-iam-authenticator v0.7.18 (server init)"
+
+IAM_AUTH_VERSION="0.7.18"
+IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a5"
+
+curl -fsSL -o /usr/local/bin/aws-iam-authenticator \
+  "https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v$${IAM_AUTH_VERSION}/aws-iam-authenticator_$${IAM_AUTH_VERSION}_linux_amd64"
+if ! echo "$${IAM_AUTH_SHA256}  /usr/local/bin/aws-iam-authenticator" | sha256sum -c -; then
+  log "✗ ERROR: aws-iam-authenticator checksum mismatch — aborting bootstrap"
+  exit 1
+fi
+chmod 0755 /usr/local/bin/aws-iam-authenticator
+
+# Same clusterID derivation as the founder, platform/install.sh and the CI
+# smoke: ACCOUNT.REGION.NAME. `init` self-signs a PER-NODE webhook cert —
+# each API server talks to ITS OWN local authenticator over localhost.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CLUSTER_ID="$${ACCOUNT_ID}.${aws_region}.${cluster_name}"
+log "authenticator clusterID: $${CLUSTER_ID}"
+
+mkdir -p /var/aws-iam-authenticator /etc/kubernetes/aws-iam-authenticator
+cd /var/aws-iam-authenticator
+aws-iam-authenticator init -i "$${CLUSTER_ID}" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+mv -f aws-iam-authenticator.kubeconfig /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml
+cd /
+
+for REQUIRED in /var/aws-iam-authenticator/cert.pem \
+                /var/aws-iam-authenticator/key.pem \
+                /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml; do
+  if [ ! -s "$${REQUIRED}" ]; then
+    log "✗ ERROR: authenticator init did not produce $${REQUIRED} — aborting bootstrap"
+    exit 1
+  fi
+done
+log "✓ aws-iam-authenticator webhook material in place"
+
+# Step 3: Wait for my turn at the sequential-join gate
+log "Step 3/6: Waiting for join gate (cp/joined-count >= ${cp_index})"
+TIMEOUT=1800  # founder takes ~8-12 min; each predecessor join ~3-5 min
+ELAPSED=0
+INTERVAL=30
+
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  JOINED_COUNT=$(aws ssm get-parameter \
+    --name "${ssm_parameter_path}/cp/joined-count" \
+    --query Parameter.Value \
+    --output text \
+    --region ${aws_region} 2>/dev/null || echo 0)
+  if [ "$${JOINED_COUNT}" -ge "${cp_index}" ] 2>/dev/null; then
+    log "✓ Gate open (joined-count=$${JOINED_COUNT}) — my turn"
+    break
+  fi
+
+  if [ $(($${ELAPSED} % 300)) -eq 0 ] && [ $${ELAPSED} -gt 0 ]; then
+    log "Still waiting for gate... (joined-count=$${JOINED_COUNT}, $${ELAPSED}s elapsed)"
+  fi
+
+  sleep $${INTERVAL}
+  ELAPSED=$((ELAPSED + INTERVAL))
+
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: join gate did not reach ${cp_index} within $${TIMEOUT}s"
+    log "Check the predecessor's /var/log/k8s-cp-bootstrap.log"
+    exit 1
+  fi
+done
+
+# Step 4: Fetch join material (shared join-command + CP-only certificate-key)
+log "Step 4/6: Fetching join material from SSM"
+
+JOIN_COMMAND=$(aws ssm get-parameter \
+  --name "${ssm_parameter_path}/join-command" \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text \
+  --region ${aws_region})
+[ -n "$${JOIN_COMMAND}" ] || { log "✗ ERROR: empty join-command"; exit 1; }
+log "✓ Join command retrieved (endpoint: ${api_endpoint_dns}:6443)"
+
+fetch_cert_key() {
+  aws ssm get-parameter \
+    --name "${ssm_parameter_path}/cp/certificate-key" \
+    --with-decryption \
+    --query Parameter.Value \
+    --output text \
+    --region ${aws_region}
+}
+CERT_KEY=$(fetch_cert_key)
+echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "✗ ERROR: invalid certificate-key"; exit 1; }
+log "✓ certificate-key retrieved (never logged)"
+
+# Step 5: Join as control plane — with RETRY + key re-fetch. The kubeadm-certs
+# Secret expires 2h after upload: if this node arrives late (e.g. a
+# replacement CP), the join fails until an operator runs the renewal
+# ceremony (scripts/renew-cp-certificate-key.sh) which publishes a FRESH
+# key to SSM; each retry re-fetches it. Reading the old key from SSM would
+# NOT help — the Secret itself is gone; re-upload is the only cure.
+log "Step 5/6: Joining as control plane (kubeadm join --control-plane)"
+
+MAX_ATTEMPTS=6
+ATTEMPT=1
+until [ $${ATTEMPT} -gt $${MAX_ATTEMPTS} ]; do
+  log "Join attempt $${ATTEMPT}/$${MAX_ATTEMPTS}"
+  if $${JOIN_COMMAND} \
+       --control-plane \
+       --certificate-key "$${CERT_KEY}" \
+       --cri-socket unix:///run/containerd/containerd.sock \
+       2>&1 | tee -a /var/log/k8s-cp-bootstrap.log; then
+    log "✓ kubeadm join (control-plane) completed"
+    break
+  fi
+
+  if [ $${ATTEMPT} -eq $${MAX_ATTEMPTS} ]; then
+    log "✗ ERROR: control-plane join failed after $${MAX_ATTEMPTS} attempts"
+    log "If the kubeadm-certs Secret expired (2h TTL), run scripts/renew-cp-certificate-key.sh and re-run cloud-init or replace the node"
+    exit 1
+  fi
+
+  log "Join failed — resetting and retrying in 120s (re-fetching certificate-key)"
+  kubeadm reset -f 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log || true
+  sleep 120
+  CERT_KEY=$(fetch_cert_key)
+  echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "✗ ERROR: invalid certificate-key on re-fetch"; exit 1; }
+  ATTEMPT=$((ATTEMPT + 1))
+done
+
+# kubectl for root on this node too (join --control-plane writes admin.conf)
+mkdir -p /root/.kube
+cp -f /etc/kubernetes/admin.conf /root/.kube/config
+chown root:root /root/.kube/config
+chmod 600 /root/.kube/config
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# Verify this node registered and its LOCAL etcd member is running before
+# passing the baton — the next join needs a healthy quorum.
+NODE_NAME=$(hostname)
+TIMEOUT=300
+ELAPSED=0
+while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+  if kubectl get node "$${NODE_NAME}" &>/dev/null && \
+     [ "$(kubectl -n kube-system get pod "etcd-$${NODE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ]; then
+    log "✓ Node registered and local etcd member Running"
+    break
+  fi
+  sleep 10
+  ELAPSED=$((ELAPSED + 10))
+  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
+    log "✗ ERROR: node/etcd not healthy after $${TIMEOUT}s — NOT passing the baton"
+    exit 1
+  fi
+done
+
+# Step 6: Pass the baton — open the gate for the next control plane
+NEXT_COUNT=$((${cp_index} + 1))
+log "Step 6/6: Publishing cp/joined-count = $${NEXT_COUNT}"
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --value "$${NEXT_COUNT}" \
+  --type String \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+
+log "=== Control Plane JOIN bootstrap (index ${cp_index}) completed successfully ==="
+kubectl get nodes >> /var/log/k8s-cp-bootstrap.log 2>&1 || true
