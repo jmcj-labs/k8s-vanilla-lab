@@ -179,11 +179,18 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   entre sí a los clientes *dentro* de `logistics`. Control futuro: L7/auth en
   el Gateway + policies por servicio, Fase 1.5.
 - **Egress S3 de los pods PG = `world:443`** (fix de INCIDENTS #15): abre
-  todo el 443 saliente desde los operand pods, no solo S3. Refinamiento
-  anotado para el cruce de Codex y candidato S3: **VPC endpoint de S3 +
-  regla por prefix-list** (`pl-…` del endpoint en la CNP/SG) — elimina el
-  tránsito por IGW y acota el destino a S3 de verdad; de paso ahorra el
-  data transfer de backups.
+  todo el 443 saliente desde la capa de DATOS — un canal de exfiltración
+  que contradice la postura zero-trust de la casa. Refinamiento **ratificado
+  en el cruce final y SUBIDO a primera tarea de S3**: VPC *gateway* endpoint
+  de S3 (coste cero) + regla por prefix-list en el SG (`pl-…` del endpoint;
+  la CNP de Cilium no referencia prefix-lists — su enforcement queda en la
+  capa SG/rutas, y el estrechado de la CNP a CIDRs de S3 es opcional
+  encima). Elimina el tránsito por IGW y abarata el transfer de backups.
+- **Kafka sin backup — decisión de alcance de S2-1, ahora deuda declarada**:
+  la pieza cubre etcd y PG; los eventos de Kafka son efímeros por diseño
+  (los topics son recurso de plataforma y se recrean; el estado de negocio
+  vive en PG). Si algún día un topic carga estado que importe, entra
+  MirrorMaker/tiered storage — decisión consciente, no olvido.
 - **Rotación manual de las access keys de barman** (usuario `cnpg-backup`)
   hasta External Secrets (S3): crear segunda key → sobrescribir el parámetro
   SSM persistente → `make platform` (el Secret lleva el label

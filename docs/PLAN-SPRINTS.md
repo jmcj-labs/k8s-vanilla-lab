@@ -72,7 +72,7 @@ El orden interno importa:
   justifica por mínima superficie y separación de responsabilidades, no por una
   fuga activa.
 
-### 1. Backups con restore probado (primero — nunca tocar etcd sin backup) — 🔨 IaC lista (15-ago), drills pendientes del próximo apply
+### 1. Backups con restore probado (primero — nunca tocar etcd sin backup) — 👑 CORONADA 16-ago (drill etcd 58s #58 · drill CNPG 121s con CORONATION-002 3/3 #59 · bucket superviviente a 2 destroys)
 - etcd: CronJob → snapshot a S3 (patrón BP-005 del Review EPO) + **restore ejecutado y documentado**
 - Postgres: CNPG backups a S3 (barman) + restore probado
 - Regla: sin restore probado, no es un backup — es una esperanza
