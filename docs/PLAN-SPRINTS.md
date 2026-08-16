@@ -84,7 +84,7 @@ El orden interno importa:
   ejecutan y cronometran con el cluster levantado; la pieza corona cuando
   ambos testigos vuelven (ConfigMap + `CORONATION-001`).
 
-### 2. LB de entrada real — 🔨 EN CURSO (16-ago, brief #S2-2 ratificado)
+### 2. LB de entrada real — 👑 CORONADA 16-ago (smoke §13 5/5 ×2 · e2e HTTP 201 + gRPC por el DNS del NLB · negativa en las 3 IPs · source IP en Hubble · NLB muerto y renacido con el cluster en ciclo completo)
 - NLB delante del Gateway (target group a los workers)
 - Sustituye la decisión provisional de exposición del Sprint 1
 - Implementación: passthrough L4 puro, targets instance sobre NodePort
