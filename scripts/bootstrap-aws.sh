@@ -223,6 +223,7 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "ec2:DeleteTags",
         "ec2:DeleteVpc",
         "ec2:Describe*",
+        "ec2:GetSecurityGroupsForVpc",
         "ec2:DetachInternetGateway",
         "ec2:DisassociateAddress",
         "ec2:DisassociateRouteTable",

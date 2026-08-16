@@ -58,7 +58,7 @@ resource "aws_vpc_security_group_ingress_rule" "https_world" {
 
 resource "aws_vpc_security_group_egress_rule" "to_nodeport" {
   security_group_id = aws_security_group.nlb.id
-  description       = "Forwarded traffic + TCP health checks to the workers' Gateway NodePort"
+  description       = "Forwarded traffic + TCP health checks to the worker Gateway NodePort"
   from_port         = var.gateway_nodeport
   to_port           = var.gateway_nodeport
   ip_protocol       = "tcp"
