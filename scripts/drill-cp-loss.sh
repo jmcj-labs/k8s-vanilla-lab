@@ -22,6 +22,13 @@ set -euo pipefail
 CP_INDEX="${1:-0}"
 CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
+# TWO different identities are in play and conflating them costs a 403:
+# the drill itself needs EC2/S3 powers (the lab profile in AWS_PROFILE),
+# while the IAM proof must present an identity the platform-admin role
+# actually trusts — the SSO bridge, never a generic admin session (ADR-005).
+# The authenticator's exec block inherits the ambient AWS_PROFILE, so that
+# one call gets its own.
+IAM_AWS_PROFILE="${IAM_AWS_PROFILE:-k8s-platform}"
 
 log()  { echo "[$(date -u +'%H:%M:%SZ')] $*"; }
 FAIL() { echo "✗ $*" >&2; exit 1; }
@@ -75,7 +82,40 @@ STOPPED_INSTANCE="${TARGET_INSTANCE}"   # arms the restore-on-exit trap
 aws ec2 stop-instances --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}" >/dev/null
 aws ec2 wait instance-stopped --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}"
 T_DOWN=$(date -u +%s)
-log "✓ instance stopped after $((T_DOWN-T0))s — the cluster is now 2/3"
+log "✓ instance stopped after $((T_DOWN-T0))s"
+
+# WAIT UNTIL THE LOSS IS ACKNOWLEDGED, then prove things. Powering a machine
+# off and immediately asserting "the cluster is fine" proves almost nothing:
+# for the first ~40s Kubernetes still believes the Node is Ready
+# (node-monitor-grace-period) and for up to ~90s the NLB still lists its
+# target as healthy (health-check interval × threshold). Running the proofs
+# inside that blind spot would be theatre. The real 2/3 state is the one
+# where BOTH control loops have noticed.
+log "Waiting for the loss to be ACKNOWLEDGED (Node NotReady + API target out of service)..."
+API_TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-api-tg" \
+  --region "${AWS_REGION}" --query 'TargetGroups[0].TargetGroupArn' --output text)
+ACK_DEADLINE=$(( $(date -u +%s) + 300 ))
+NODE_ACK=""; TG_ACK=""
+while [ -z "${NODE_ACK}" ] || [ -z "${TG_ACK}" ]; do
+  if [ -z "${NODE_ACK}" ]; then
+    NODE_STATE=$(kubectl get node "${TARGET_NODE}" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+    [ "${NODE_STATE}" != "True" ] && NODE_ACK="yes" && OK "Kubernetes marked ${TARGET_NODE} NotReady"
+  fi
+  if [ -z "${TG_ACK}" ]; then
+    TG_STATE=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" \
+      --region "${AWS_REGION}" --query "TargetHealthDescriptions[?Target.Id=='${TARGET_INSTANCE}'].TargetHealth.State" \
+      --output text 2>/dev/null || echo "")
+    if [ "${TG_STATE}" != "healthy" ]; then
+      TG_ACK="yes"; OK "the NLB took the target out of service (state: ${TG_STATE:-deregistered})"
+    fi
+  fi
+  [ -n "${NODE_ACK}" ] && [ -n "${TG_ACK}" ] && break
+  [ "$(date -u +%s)" -lt "${ACK_DEADLINE}" ] || FAIL "the loss was not acknowledged within 300s (Node=${NODE_STATE:-?}, target=${TG_STATE:-?})"
+  sleep 10
+done
+T_ACK=$(date -u +%s)
+log "✓ loss acknowledged by both control loops after $((T_ACK-T_DOWN))s — NOW the cluster is genuinely 2/3"
 
 # ── Proof 1: the API still serves WRITES and READS (through the NLB) ────────
 # The kubeconfig points at the NLB DNS, so this also proves the endpoint
@@ -105,12 +145,16 @@ AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
   -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}')
 log "  authenticator DaemonSet: ${AUTH_DS} (2/2 expected while one CP is down)"
 IAM_WHO=""
+IAM_GROUPS=""
 if [ -f "${HOME}/.kube/${CLUSTER_NAME}-admin.conf" ]; then
-  IAM_WHO=$(KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}-admin.conf" \
+  IAM_WHO=$(AWS_PROFILE="${IAM_AWS_PROFILE}" KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}-admin.conf" \
     kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)
+  IAM_GROUPS=$(AWS_PROFILE="${IAM_AWS_PROFILE}" KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}-admin.conf" \
+    kubectl auth whoami -o jsonpath='{.status.userInfo.groups}' 2>/dev/null || true)
 fi
 if [ -n "${IAM_WHO}" ]; then
-  OK "IAM identity authenticated end to end: ${IAM_WHO}"
+  OK "IAM identity authenticated end to end: ${IAM_WHO} · groups ${IAM_GROUPS}"
+  OK "SSO bridge → platform-admin role → webhook → RBAC, all with one control plane down"
 else
   # The full proof needs an SSO session allowed to assume the platform-admin
   # role (ADR-005: that role trusts the k8s-platform/k8s-dev bridges and the
@@ -134,15 +178,31 @@ fi
 
 # ── Proof 3: the workloads are untouched ───────────────────────────────────
 log "Proof 3/4: workloads intact"
-NOT_RUNNING=$(kubectl get pods -A --no-headers \
-  --field-selector 'status.phase!=Running,status.phase!=Succeeded' 2>/dev/null \
-  | grep -v "${TARGET_NODE}" | grep -c . || true)
-kubectl -n data get cluster logistics-pg -o jsonpath='{.status.readyInstances}/{.status.instances}' 2>/dev/null \
-  | { read -r PG; [ -n "${PG}" ] && OK "CNPG logistics-pg: ${PG} instances ready" || true; }
-KAFKA_READY=$(kubectl -n data get pods -l strimzi.io/cluster=logistics-kafka --no-headers 2>/dev/null \
-  | awk '$3=="Running"' | grep -c . || true)
-[ "${KAFKA_READY}" -gt 0 ] && OK "Kafka brokers Running: ${KAFKA_READY}"
-log "  pods not Running outside the stopped node: ${NOT_RUNNING}"
+# Written defensively ON PURPOSE. Under `set -euo pipefail` an informational
+# probe must never be able to kill the drill mid-window: a bare
+# `[ x -gt 0 ] && echo ...` returns non-zero when false, and any pipeline
+# stage failing (grep with no matches) aborts the script. Every probe below
+# is wrapped so its VALUE is reported and its exit status is neutralised —
+# these are observations, not assertions.
+PG_STATUS=$( { kubectl -n data get cluster logistics-pg \
+  -o jsonpath='{.status.readyInstances}/{.status.instances} ({.status.phase})' 2>/dev/null; } || true )
+if [ -n "${PG_STATUS}" ]; then
+  OK "CNPG logistics-pg: ${PG_STATUS}"
+else
+  log "  (no CNPG cluster deployed — skipping that observation)"
+fi
+
+KAFKA_READY=$( { kubectl -n data get pods -l strimzi.io/cluster=logistics-kafka \
+  --no-headers 2>/dev/null | awk '$3=="Running"' | wc -l | tr -d ' '; } || echo 0 )
+if [ "${KAFKA_READY:-0}" -gt 0 ]; then
+  OK "Kafka pods Running: ${KAFKA_READY}"
+else
+  log "  (no Kafka pods found — skipping that observation)"
+fi
+
+NOT_RUNNING=$( { kubectl get pods -A --no-headers 2>/dev/null \
+  | awk -v n="${TARGET_NODE}" '$4!="Running" && $4!="Completed" && $8!=n' | wc -l | tr -d ' '; } || echo 0 )
+log "  pods not Running outside the stopped node: ${NOT_RUNNING:-0}"
 
 # ── Proof 4: the etcd backup runs from a SURVIVING member ──────────────────
 # The CronJob has no node pin ON PURPOSE (S2-3): pinning it would kill the
@@ -167,7 +227,7 @@ kubectl -n kube-system delete job etcd-drill-loss --ignore-not-found >/dev/null
 
 # ── Heal: bring it back and watch the quorum close ─────────────────────────
 T_PROOFS=$(date -u +%s)
-log "All proofs passed with 2/3 control planes ($((T_PROOFS-T_DOWN))s of degraded operation)"
+log "All proofs passed with a genuinely 2/3 cluster ($((T_PROOFS-T_ACK))s of acknowledged-degraded operation)"
 log "Starting ${TARGET_INSTANCE} back up..."
 aws ec2 start-instances --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}" >/dev/null
 aws ec2 wait instance-running --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}"
@@ -189,8 +249,9 @@ print(len(started), len(m))')
 [ "${MEMBERS}" = "3 3" ] || FAIL "etcd did not return to 3/3 (got ${MEMBERS})"
 T1=$(date -u +%s)
 
+STOPPED_INSTANCE=""   # node is back and verified: stand the restore trap down
 kubectl delete configmap cp-loss-witness cp-loss-during --ignore-not-found >/dev/null
 echo ""
 log "=== DRILL PASSED: the cluster survived losing index ${CP_INDEX} ==="
-log "timings: stop $((T_DOWN-T0))s · degraded operation $((T_PROOFS-T_DOWN))s · full heal $((T1-T_PROOFS))s · total $((T1-T0))s"
+log "timings: stop $((T_DOWN-T0))s · loss acknowledged $((T_ACK-T_DOWN))s · proofs under 2/3 $((T_PROOFS-T_ACK))s · full heal $((T1-T_PROOFS))s · total $((T1-T0))s"
 log "record them in docs/EVIDENCE-S2-piece3.md"

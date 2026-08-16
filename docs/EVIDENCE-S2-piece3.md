@@ -127,41 +127,46 @@ verdad —, pero conviene no encadenarlos.
 
 ## 4. Drill de pérdida: parar CP-0 (el fundador) — **SUPERADO**
 
-`scripts/drill-cp-loss.sh 0` · víctima: `ip-10-0-1-77` (i-0735a5deee16b3102),
-el nodo que hizo `kubeadm init`. Parado 15:25:02Z → 15:27:02Z (122 s hasta
-`stopped`), cluster operando a **2/3** durante toda la ventana.
+`scripts/drill-cp-loss.sh 0` · víctima `ip-10-0-1-77` (i-0735a5deee16b3102),
+el nodo que hizo `kubeadm init`.
 
-| Prueba | Resultado con el fundador caído |
+**Las pruebas solo corren cuando la pérdida está RECONOCIDA por los dos
+bucles de control** — Kubernetes marcando el Node `NotReady` *y* el NLB
+sacando el target de servicio (`unhealthy`). Sin ese gate, un drill mide el
+punto ciego (~40 s de `node-monitor-grace-period`, hasta ~90 s de health
+checks) y prueba mucho menos de lo que afirma.
+
+| Prueba | Resultado con el fundador caído y la pérdida reconocida |
 |---|---|
-| **API escrituras + lecturas** | Escribió un objeto nuevo y releyó el testigo previo al corte · **10/10 sondas consecutivas** al endpoint (una sola podría ser suerte con fail-open) |
-| **Autenticación IAM** | El webhook **respondió** `Unauthorized` a una identidad no mapeada — un "no" **autenticado**, no un timeout: la cadena API server → authenticator local vive en los supervivientes (ver matiz abajo) |
-| **Workloads** | CNPG `3/3 · Cluster in healthy state` · Kafka 3 brokers Running |
-| **Backup de etcd** | `etcd/etcd-20260816T152823Z.db` fresco en S3, tomado desde **`ip-10-0-1-207`** — NO desde el nodo parado. **La decisión de no pinear el CronJob queda validada en el único momento en que importa.** |
+| **API escrituras + lecturas** | Objeto nuevo escrito y testigo previo releído · **10/10 sondas consecutivas** al endpoint |
+| **Autenticación IAM (end-to-end)** | `platform-admin:jmcastelllanojimenez-yahoo.es`, grupos `["platform-admins","system:authenticated"]` — **puente SSO → rol → webhook → RBAC** con un CP caído. DaemonSet 2/2, como toca |
+| **Workloads** | CNPG `3/3 (Cluster in healthy state)` · Kafka 4 pods Running · **0** pods no-Running fuera del nodo parado |
+| **Backup de etcd** | `etcd/etcd-20260816T154937Z.db` fresco, tomado desde **`ip-10-0-1-207`** — no desde el parado. **Valida no haber pineado el CronJob.** |
 
-**Curación**: al arrancar la instancia, el nodo reingresó solo (cloud-init no
-se re-ejecuta; el guard de reentrada del join sale con 0 al ver el manifest
-del API server) → **etcd 3/3 started** y `endpoint health --cluster` con los
-tres sanos (18-22 ms).
+**Tiempos**: parada 109 s · pérdida reconocida +2 s · pruebas bajo 2/3 17 s ·
+**curación completa 39 s** · total 167 s. Al arrancar, el nodo reingresó solo
+(el guard de reentrada sale con 0 al ver el manifest del API server) y etcd
+volvió a **3/3 started** con los tres endpoints sanos (18-22 ms).
 
-### Matiz honesto sobre la prueba IAM
+### Tres defectos del propio drill, encontrados al ejecutarlo
 
-La prueba **end-to-end** (asumir `platform-admin` y ver el username mapeado)
-no se pudo ejecutar desde esta máquina: el rol confía en los puentes SSO
-`k8s-platform`/`k8s-dev` y en el rol de CI — **no** en una sesión
-`AdministratorAccess` genérica —, exactamente como ADR-005 quiso. Es una
-limitación de credenciales del operador, no del cluster; la prueba del
-**camino del webhook** sí es concluyente. Para el sello completo basta
-`aws sso login --profile k8s-platform` antes del drill.
+Los tres se corrigieron y la ejecución de arriba ya es con el script sano:
 
-### Dos defectos del propio drill, encontrados al ejecutarlo
-
-1. **Un drill fallido dejaba un CP parado.** Al fallar la prueba IAM, el
-   script salió con el fundador aún apagado: un ensayo que rompe justo lo que
-   venía a demostrar seguro. Corregido con un `trap` que **rearranca la
-   instancia en cualquier salida** desde el momento en que la para.
-2. **La prueba IAM era todo-o-nada.** Ahora degrada explícitamente: si no hay
-   sesión capaz de asumir el rol, prueba el camino del webhook y **dice** que
-   eso es lo que está probando, en vez de fallar o —peor— callar.
+1. **Un drill fallido dejaba un CP parado.** La primera pasada falló en la
+   prueba IAM y salió con el fundador apagado: un ensayo que rompe justo lo
+   que venía a demostrar seguro. Ahora un `trap` **rearranca la instancia en
+   cualquier salida** desde el instante en que la para (y se desarma al
+   verificar la curación, para no ensuciar el final feliz).
+2. **La prueba IAM confundía dos identidades.** El drill necesita el perfil
+   del lab (parar instancias) pero el `exec` del authenticator hereda ese
+   mismo `AWS_PROFILE` — y `platform-admin` **no confía** en una sesión
+   `AdministratorAccess` genérica, sino en los puentes SSO (ADR-005
+   funcionando). Ahora esa llamada usa su propio `IAM_AWS_PROFILE`
+   (`k8s-platform` por defecto).
+3. **Sondas informativas mataban el drill.** Escritas con construcciones
+   hostiles a `set -euo pipefail` (`[ x -gt 0 ] && ...` como última
+   sentencia, tuberías sin `|| true`). Reescritas para **reportar su valor y
+   neutralizar su código de salida**: son observaciones, no asertos.
 
 ## 5. Drill de reemplazo con `kubeadm-certs` invalidado
 
