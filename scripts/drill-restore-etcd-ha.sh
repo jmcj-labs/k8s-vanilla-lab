@@ -66,16 +66,29 @@ state_put()  { aws ssm put-parameter --name "${STATE_PARAM}" --type String --ove
 state_get()  { aws ssm get-parameter --name "${STATE_PARAM}" --query Parameter.Value \
                  --output text --region "${AWS_REGION}" 2>/dev/null || echo ""; }
 
-# Phases in order; `after <phase>` is true once that phase is complete.
+# Phases in order. `after <phase>` answers "is that phase already complete?"
+# and MUST be an index comparison: an earlier attempt walked the list setting
+# a flag when it met the completed phase, which — since "none" leads the list
+# — made every phase look done and skipped the whole ceremony. Harmless that
+# time (it aborted at the verification with the cluster untouched), lethal in
+# a real resume, where it would skip phases that never happened.
 PHASES="none witness snapshot stopped datadirs restored cp0up cp1 cp2 verified"
 DONE_PHASE=$(phase_get)
-after() {
-  local target="$1" p seen_done=0
+phase_index() {
+  local want="$1" i=0 p
   for p in ${PHASES}; do
-    [ "${p}" = "${DONE_PHASE}" ] && seen_done=1
-    [ "${p}" = "${target}" ] && { [ "${seen_done}" = 1 ] && return 0 || return 1; }
+    [ "${p}" = "${want}" ] && { echo "${i}"; return 0; }
+    i=$((i + 1))
   done
-  return 1
+  echo "-1"
+}
+after() {
+  local ti di
+  ti=$(phase_index "$1")
+  di=$(phase_index "${DONE_PHASE}")
+  [ "${ti}" -ge 0 ] || FAIL "unknown phase '$1'"
+  [ "${di}" -ge 0 ] || FAIL "unrecognised recorded phase '${DONE_PHASE}' — inspect ${PHASE_PARAM}"
+  [ "${di}" -ge "${ti}" ]
 }
 
 # ── Acquire the lock (atomic: put-parameter without --overwrite) ────────────
@@ -136,6 +149,14 @@ BACKUP_BUCKET="${BACKUP_BUCKET:-${CLUSTER_NAME}-backups-${ACCOUNT_ID}}"
 # "the witness is back" is also what you would see if nothing happened.
 if after snapshot; then
   read -r STAMP SNAP <<<"$(state_get)"
+  # A resume without the witness/snapshot it is resuming FROM is not a
+  # resume: proceeding would verify a witness nobody wrote against a
+  # snapshot nobody took.
+  [ -n "${STAMP}" ] && [ -n "${SNAP}" ] \
+    || FAIL "phase marker says '${DONE_PHASE}' but ${STATE_PARAM} carries no STAMP/SNAP.
+  Inspect and, if this is not a genuine resume, clear the markers:
+    aws ssm delete-parameter --name ${PHASE_PARAM} --region ${AWS_REGION}
+    aws ssm delete-parameter --name ${LOCK_PARAM}  --region ${AWS_REGION}"
   log "resuming with STAMP=${STAMP} SNAP=${SNAP}"
 else
   STAMP=$(date -u +%Y%m%dT%H%M%SZ)
