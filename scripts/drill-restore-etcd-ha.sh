@@ -30,7 +30,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-${HOME}/.ssh/k8s-vanilla-lab.pem}"
 TOFU_DIR="${TOFU_DIR:-tofu/envs/lab}"
-ETCD_VER="v3.6.4"  # matches the etcd static-pod image pin (3.6.4-0)
+ETCD_VER="${ETCD_VER:-v3.6.6}"  # must match the running etcd image (kubectl -n kube-system get pod -l component=etcd -o jsonpath='{.items[0].spec.containers[0].image}')
 BUMP_REVISION=1000000000
 
 log()  { echo "[$(date -u +'%H:%M:%SZ')] $*"; }
@@ -143,6 +143,17 @@ ETCDCTL="etcdctl --endpoints https://127.0.0.1:2379 \
   --key /etc/kubernetes/pki/etcd/server.key"
 for i in 1 2; do
   run "${CP_PUB[0]}" "${ETCDCTL} member add '${CP_NAME[$i]}' --peer-urls='https://${CP_PRIV[$i]}:2380'"
+  # REWRITE --initial-cluster BEFORE restarting. A joined node's manifest
+  # carries the membership as it was AT ITS join, which after any earlier
+  # replacement can name a machine that no longer exists (observed live
+  # 2026-08-16: two manifests still listed the replaced founder). With an
+  # EMPTY data dir etcd obeys these flags, so a stale list hangs the join.
+  # The authoritative value is the one this ceremony is building.
+  EXPECTED_CLUSTER="${CP_NAME[0]}=https://${CP_PRIV[0]}:2380"
+  for j in $(seq 1 $i); do
+    EXPECTED_CLUSTER="${EXPECTED_CLUSTER},${CP_NAME[$j]}=https://${CP_PRIV[$j]}:2380"
+  done
+  run "${CP_PUB[$i]}" "sed -i 's|--initial-cluster=.*|--initial-cluster=${EXPECTED_CLUSTER}|' /etc/kubernetes/manifests-stopped/etcd.yaml && grep -q -- '--initial-cluster=${EXPECTED_CLUSTER}' /etc/kubernetes/manifests-stopped/etcd.yaml"
   run "${CP_PUB[$i]}" 'mv /etc/kubernetes/manifests-stopped/*.yaml /etc/kubernetes/manifests/'
   WANT=$((i + 1))
   run "${CP_PUB[0]}" "
