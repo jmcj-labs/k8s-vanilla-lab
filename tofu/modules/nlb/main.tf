@@ -65,6 +65,12 @@ resource "aws_vpc_security_group_egress_rule" "to_nodeport" {
   cidr_ipv4         = var.vpc_cidr
 }
 
+# AVD-AWS-0053 warns against ACCIDENTAL public exposure. This exposure is
+# the deliverable: an internet-facing ingress NLB (brief #S2-2), TCP/443
+# only, backed by SG scoping on both sides (world→443 here; NodePort only
+# from this SG on the workers) and TLS terminating at the Gateway. No exp
+# date: an ingress LB is public by definition — not a decision to revisit.
+#trivy:ignore:AVD-AWS-0053
 resource "aws_lb" "gateway" {
   name               = "${var.name}-gw-nlb"
   internal           = false
