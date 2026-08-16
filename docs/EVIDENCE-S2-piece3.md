@@ -251,33 +251,73 @@ Detalles verificados de paso:
 - El **contador monótono** funcionó: el índice 0 rejunto no bajó
   `joined-count` de 3.
 
-## 6. Restore HA con testigo recuperado
+## 6. Restore HA con testigo recuperado — **SUPERADO** (193 s)
 
-**BLOQUEADO POR ACCESO FUERA DE BANDA — no por el diseño.**
+Ejecutado el 2026-08-16, 17:19-17:22 UTC, **por SSM Run Command**: sin SSH y
+sin clave privada. El canal lo construyó esta misma pieza después de que este
+drill descubriera que no existía ([INCIDENTS #16](INCIDENTS.md)).
 
-El restore HA para los TRES control planes; con las tres APIs abajo,
-`kubectl` deja de existir como herramienta por definición, así que la
-ceremonia se orquesta por SSH (así está escrita en
-`scripts/drill-restore-etcd-ha.sh`). En la máquina desde la que opero:
+```
+17:19:18  === DRILL: HA etcd restore over SSM Run Command ===
+17:19:20  Preflight: proving out-of-band access to all three control planes
+          ✓ CP-0 / CP-1 / CP-2 — channel proven       ← ANTES de tocar nada
+          ✓ witness written before the snapshot (ts=20260816T171927Z)
+          ✓ snapshot taken: etcd/etcd-20260816T171944Z.db
+          ✓ witness deleted · anti-witness created AFTER the snapshot
+          ✓ CP-0, CP-1, CP-2 stopped
+17:21:28  the API is now DOWN — this is the scenario, not a failure
+          ✓ data dirs preserved as /var/lib/etcd.pre-restore-20260816T171927Z
+          ✓ snapshot restored (revision bumped +1000000000, marked compacted)
+          ✓ CP-0 serving again — API restored from the single-member etcd
+          ✓ CP-1 re-joined — 2/3 · CP-2 re-joined — 3/3
+          ✓ THE WITNESS IS BACK (ts=20260816T171927Z)
+          ✓ the anti-witness is GONE — etcd genuinely rewound to the snapshot
+          ✓ etcd: 3/3 members started and all endpoints healthy
+17:22:31  === DRILL PASSED === total 193s
+```
 
-- No está la clave privada del par `k8s-vanilla-lab` (`~/.ssh` solo tiene
-  `agent` y `known_hosts`).
-- **Session Manager no es alternativa**: `describe-instance-information`
-  devuelve 0 instancias gestionadas y el role de nodo no lleva
-  `AmazonSSMManagedInstanceCore`.
+**Ventana de API caída: ~35 s** de una ceremonia de 193 s. El grueso es la
+parada ordenada y las verificaciones, no la restauración.
 
-Los otros drills **no** dependen de SSH (usan kubectl + API de AWS) y sí se
-ejecutan. Opciones para desbloquear este, en orden de preferencia técnica:
+**Los dos testigos prueban cosas distintas, y por eso vale como prueba**: el
+testigo de vuelta con su sello exacto dice que se recuperó lo que había en el
+snapshot; el anti-testigo desaparecido dice que **etcd rebobinó de verdad**.
+Sin el segundo, "el testigo está" también describiría un cluster donde no
+pasó nada.
 
-1. **Clave SSH disponible** en `~/.ssh/k8s-vanilla-lab.pem` → el drill corre
-   tal cual está escrito.
-2. **Adoptar Session Manager** (`AmazonSSMManagedInstanceCore` en los roles
-   de nodo) y portar la ceremonia a `aws ssm send-command`. Mejora de fondo:
-   permitiría **cerrar el puerto 22** al mundo y dejar el acceso fuera de
-   banda auditado en CloudTrail — pero es un cambio de alcance con su propio
-   PR y su propio cruce, no algo que colar en la coronación.
-3. Diferir el drill declarándolo deuda con fecha (la regla de la casa dice
-   que entonces el runbook es esperanza, no backup: **no** recomendado).
+Verificación independiente posterior:
+
+| Comprobación | Resultado |
+|---|---|
+| Nodos | **6/6 Ready** |
+| etcd (vista de `etcdctl`) | 3/3 started · `endpoint health` los 3 sanos (17-20 ms) |
+| Pods de etcd (vista de la API) | 3/3 `1/1 Running` |
+| Targets del API en el NLB | **3/3 healthy** |
+| Capa de datos | CNPG `3/3 Cluster in healthy state` · Kafka 4 pods Running |
+| Pods fuera de Running en el cluster | **0** |
+| ConfigMaps en `default` | solo `kube-root-ca.crt` |
+| Lock de la ceremonia | liberado (`ParameterNotFound`) |
+
+### Dos trampas esquivadas al verificar
+
+1. **`Forbidden` no es `NotFound`.** La primera comprobación manual del
+   anti-testigo devolvió `Forbidden` (RBAC asentándose tras el rebobinado).
+   Darlo por ausencia habría sido [INCIDENTS #17](INCIDENTS.md) cometido al
+   minuto de escribirlo. Se reintentó hasta un `NotFound` inequívoco.
+2. **La vista de la API va por detrás de los hechos.** El pod de etcd de CP-2
+   se leyó `Pending` y luego `0/1` mientras `etcdctl` ya lo daba sano en
+   20 ms; alcanzó `1/1` en ~15 s. Anotado en el runbook para que nadie aborte
+   una ceremonia sana.
+
+### El bug que encontró el propio lanzamiento
+
+El **primer** intento no ejecutó nada: la lógica de reentrada daba todas las
+fases por completadas (`none` encabezaba la lista y activaba el flag en la
+primera iteración). Inofensivo entonces —abortó en la verificación con el
+cluster intacto, comprobado nodo a nodo— pero **letal en una reanudación
+real**: un restore que cree que los data dirs ya están apartados es un
+restore que nunca ocurre sobre un cluster que sí está parado. Reescrito como
+comparación de índices y **probado con una tabla de verdad**.
 
 ## 7. Segundo apply con plan vacío
 
