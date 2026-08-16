@@ -77,3 +77,13 @@ output "backup_bucket_name" {
   description = "Backups bucket this cluster writes to (persistent stack — survives destroy)"
   value       = local.backup_bucket_name
 }
+
+output "gateway_nodeport" {
+  description = "Deterministic Gateway NodePort (source of truth for install.sh and the smoke)"
+  value       = var.gateway_nodeport
+}
+
+output "nlb_dns_name" {
+  description = "Public DNS of the application NLB — fresh every apply; never persist a previous value"
+  value       = module.nlb.dns_name
+}

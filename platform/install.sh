@@ -236,7 +236,29 @@ kubectl wait --for=condition=Accepted gatewayclass/cilium --timeout=180s
 # gets an address (no cloud LB controller) and Programmed stays False.
 kubectl apply -f "${MANIFESTS}/lb-ipam-pool.yaml"
 kubectl apply -f "${MANIFESTS}/gateway-shared.yaml"
-log "✓ Gateway infra/shared-gw applied (LB IP from Cilium LB-IPAM; external access via NodePort)"
+# Deterministic NodePort (S2 piece 2): Tofu owns 30443 as the single source
+# of truth (the NLB target group and the worker SG rule are built on it);
+# Cilium lets Kubernetes pick a random NodePort, so reconcile the Service.
+# Cilium's controller does not manage the nodePort field — the patch
+# persists, and a re-run verifies it (reentrant).
+GATEWAY_NODEPORT="${GATEWAY_NODEPORT:-30443}"
+GW_SVC="cilium-gateway-shared-gw"
+ELAPSED=0
+until kubectl -n infra get svc "${GW_SVC}" >/dev/null 2>&1; do
+  if [ "${ELAPSED}" -ge 180 ]; then
+    echo "✗ Gateway Service ${GW_SVC} not created by Cilium after 180s" >&2
+    exit 1
+  fi
+  sleep 5; ELAPSED=$((ELAPSED + 5))
+done
+CURRENT_NP=$(kubectl -n infra get svc "${GW_SVC}" -o jsonpath='{.spec.ports[0].nodePort}')
+if [ "${CURRENT_NP}" != "${GATEWAY_NODEPORT}" ]; then
+  kubectl -n infra patch svc "${GW_SVC}" --type=json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/ports/0/nodePort\",\"value\":${GATEWAY_NODEPORT}}]"
+fi
+FINAL_NP=$(kubectl -n infra get svc "${GW_SVC}" -o jsonpath='{.spec.ports[0].nodePort}')
+[ "${FINAL_NP}" = "${GATEWAY_NODEPORT}" ] || { echo "✗ Gateway NodePort is ${FINAL_NP}, want ${GATEWAY_NODEPORT}" >&2; exit 1; }
+log "✓ Gateway infra/shared-gw applied — NodePort deterministic at ${GATEWAY_NODEPORT} (NLB is the public entry)"
 
 log "Step 6/12: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg

@@ -96,3 +96,13 @@ variable "capacity_type" {
     error_message = "Capacity type must be either 'spot' or 'on-demand'"
   }
 }
+
+variable "gateway_nodeport" {
+  description = "Deterministic NodePort of the Gateway Service — the only application port the workers expose, and only to the NLB's SG"
+  type        = number
+}
+
+variable "nlb_security_group_id" {
+  description = "SG of the application NLB — sole allowed source for the Gateway NodePort. Inline rule on purpose: this SG is inline-managed and mixing inline with standalone rules deletes rules on apply (INCIDENTS #6)"
+  type        = string
+}

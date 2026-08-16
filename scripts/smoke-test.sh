@@ -824,5 +824,104 @@ ARCHIVING=$(kubectl -n data get cluster logistics-pg \
 [ "${ARCHIVING}" = "True" ] || FAIL "ContinuousArchiving condition is '${ARCHIVING}', expected True"
 OK "CNPG: first base backup completed + WAL archiving (ContinuousArchiving=True) → s3://${BACKUP_BUCKET}/cnpg/"
 
+# ── 13. NLB — the single public APPLICATION entry (S2 piece 2) ───────────────
+GATEWAY_NODEPORT="${GATEWAY_NODEPORT:-30443}"
+NLB_NAME="${CLUSTER_NAME}-gw-nlb"
+
+# 13a. NLB active, TCP/443 listener
+NLB_JSON=$(aws elbv2 describe-load-balancers --names "${NLB_NAME}" --region "${AWS_REGION}" 2>/dev/null) \
+  || FAIL "NLB ${NLB_NAME} not found"
+read -r NLB_ARN NLB_DNS NLB_STATE NLB_SG <<< "$(echo "${NLB_JSON}" | python3 -c '
+import json,sys
+lb=json.load(sys.stdin)["LoadBalancers"][0]
+print(lb["LoadBalancerArn"], lb["DNSName"], lb["State"]["Code"], lb["SecurityGroups"][0])')"
+[ "${NLB_STATE}" = "active" ] || FAIL "NLB state is ${NLB_STATE}, want active"
+aws elbv2 describe-listeners --load-balancer-arn "${NLB_ARN}" --region "${AWS_REGION}" \
+  --query 'Listeners[0].[Port,Protocol]' --output text | grep -q "^443	TCP$" \
+  || FAIL "NLB listener is not TCP/443"
+OK "NLB active with TCP/443 listener (${NLB_DNS})"
+
+# 13b. Target set == EXACTLY the worker instance IDs, and ALL healthy.
+# Runs AFTER the platform install by design: the NLB is born unhealthy
+# during tofu apply (the NodePort only answers once Cilium programs the
+# Gateway) — that ordering is expected, not a failure.
+TG_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn "${NLB_ARN}" --region "${AWS_REGION}" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+TG_PORT=$(aws elbv2 describe-target-groups --target-group-arns "${TG_ARN}" --region "${AWS_REGION}" \
+  --query 'TargetGroups[0].Port' --output text)
+WORKER_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Role,Values=worker" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
+HEALTH_ELAPSED=0
+until TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --region "${AWS_REGION}") \
+  && [ "$(echo "${TARGETS_JSON}" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)["TargetHealthDescriptions"]
+print("ok" if t and all(d["TargetHealth"]["State"]=="healthy" for d in t) else "no")')" = "ok" ]; do
+  if [ "${HEALTH_ELAPSED}" -ge 300 ]; then
+    echo "${TARGETS_JSON}" | python3 -c 'import json,sys; [print(" ", d["Target"]["Id"], d["TargetHealth"]["State"]) for d in json.load(sys.stdin)["TargetHealthDescriptions"]]' || true
+    FAIL "NLB targets not ALL healthy after 300s"
+  fi
+  sleep 15; HEALTH_ELAPSED=$((HEALTH_ELAPSED + 15))
+done
+TARGET_IDS=$(echo "${TARGETS_JSON}" | python3 -c '
+import json,sys
+print("\n".join(sorted(d["Target"]["Id"] for d in json.load(sys.stdin)["TargetHealthDescriptions"])))')
+[ "${TARGET_IDS}" = "${WORKER_IDS}" ] || FAIL "target set differs from worker instance set"
+OK "NLB targets: exactly the $(echo "${WORKER_IDS}" | wc -l | tr -d ' ') workers, ALL healthy"
+
+# 13c. Port coherence: Service == target group == worker SG rule (from the
+# NLB's SG only). Drift in any of the three is a broken entrance.
+SVC_NP=$(kubectl -n infra get svc cilium-gateway-shared-gw -o jsonpath='{.spec.ports[0].nodePort}')
+[ "${SVC_NP}" = "${GATEWAY_NODEPORT}" ] || FAIL "Gateway Service nodePort is ${SVC_NP}, want ${GATEWAY_NODEPORT}"
+[ "${TG_PORT}" = "${GATEWAY_NODEPORT}" ] || FAIL "target group port is ${TG_PORT}, want ${GATEWAY_NODEPORT}"
+WORKER_SG=$(aws ec2 describe-security-groups --region "${AWS_REGION}" \
+  --filters "Name=group-name,Values=${CLUSTER_NAME}-worker-sg" \
+  --query 'SecurityGroups[0].GroupId' --output text)
+aws ec2 describe-security-group-rules --region "${AWS_REGION}" \
+  --filters "Name=group-id,Values=${WORKER_SG}" \
+  --query 'SecurityGroupRules[?IsEgress==`false`]' --output json | NLB_SG="${NLB_SG}" NP="${GATEWAY_NODEPORT}" python3 -c '
+import json,sys,os
+rules=json.load(sys.stdin)
+np=int(os.environ["NP"]); nlb=os.environ["NLB_SG"]
+assert any(r.get("FromPort")==np and r.get("ToPort")==np
+           and (r.get("ReferencedGroupInfo") or {}).get("GroupId")==nlb for r in rules), \
+  "no worker-SG rule for the NodePort from the NLB SG"
+assert not any(r.get("FromPort")==30000 and r.get("ToPort")==32767 for r in rules), \
+  "legacy 30000-32767 NodePort range rule still present"
+' || FAIL "worker SG / NodePort coherence broken"
+OK "port coherence: Service=${SVC_NP} · target group=${TG_PORT} · worker SG accepts it from the NLB SG only"
+
+# 13d. NEGATIVE test: the NodePort must NOT answer from outside on ANY
+# worker public IP — one closed door proves nothing about the other two.
+W_PUB_IPS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Role,Values=worker" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].PublicIpAddress' --output text | tr '\t' '\n')
+for W_PUB_IP in ${W_PUB_IPS}; do
+  if curl -sk --max-time 6 "https://${W_PUB_IP}:${GATEWAY_NODEPORT}/" -o /dev/null 2>/dev/null; then
+    FAIL "NodePort ${GATEWAY_NODEPORT} answers on worker public IP ${W_PUB_IP} — the SG should close it"
+  fi
+done
+OK "negative proof: NodePort closed on EVERY worker public IP (NLB is the only application door)"
+
+# 13e. POSITIVE e2e THROUGH the NLB: TLS pinned to the live Gateway cert.
+# 200 or 404 both prove the full datapath (world→NLB→NodePort→Gateway);
+# 404 simply means the app's HTTPRoute is not deployed yet (Repo 2's job).
+GW_PIN=$(kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' \
+  | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary | base64)
+E2E_CODE=$(curl -sk --max-time 20 --pinnedpubkey "sha256//${GW_PIN}" \
+  --connect-to "shipments.logistics.lab:443:${NLB_DNS}:443" \
+  -o /dev/null -w '%{http_code}' "https://shipments.logistics.lab/") \
+  || FAIL "TLS through the NLB failed (pin mismatch or datapath broken)"
+case "${E2E_CODE}" in
+  200|404) OK "e2e through the NLB: TLS pinned to the Gateway cert, HTTP ${E2E_CODE} (datapath complete)";;
+  *) FAIL "unexpected HTTP ${E2E_CODE} through the NLB";;
+esac
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract and backups are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups and NLB entry are healthy"

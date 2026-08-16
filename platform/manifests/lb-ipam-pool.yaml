@@ -9,7 +9,9 @@
 # The CIDR is deliberately OUTSIDE the VPC (10.0.0.0/16): these are virtual
 # LoadBalancer IPs that are assigned but NOT announced externally (no BGP, no
 # L2 announcements, no AWS routes — a real NLB is the Sprint 2 ingress
-# decision). External access remains via the Service's NodePorts.
+# decision). External access is the internet-facing NLB (S2-2): TCP/443
+# passthrough to the deterministic NodePort, which only answers to the
+# NLB's security group.
 #
 # serviceSelector scopes the pool to LoadBalancer Services in the infra
 # namespace (matched via Cilium's reserved io.kubernetes.service.namespace

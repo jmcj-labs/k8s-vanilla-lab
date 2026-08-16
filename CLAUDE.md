@@ -256,7 +256,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - EC2 instances (t3.medium Spot by default)
-- Security group (SSH, kubelet API, NodePorts, pod networking)
+- Security group (SSH, kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
 - `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/CNI components at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
@@ -338,7 +338,7 @@ Validated end-to-end in the 2026-08 manual sprint (see `docs/INCIDENTS.md`).
   helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.6 \
     --set ipam.mode=kubernetes --set kubeProxyReplacement=true \
     --set k8sServiceHost=<CP private IP> --set k8sServicePort=6443 \
-    --set gatewayAPI.enabled=true --set hubble.relay.enabled=true --set hubble.ui.enabled=true
+    --set gatewayAPI.enabled=true --set gatewayAPI.externalTrafficPolicy=Cluster --set hubble.relay.enabled=true --set hubble.ui.enabled=true
   ```
 - `k8sServiceHost`/`k8sServicePort` MUST stay wired: without them the agent cannot reach the
   API server before Service routing exists (the historical bootstrap deadlock, see ADR-003)
@@ -440,7 +440,8 @@ without opening another file:
   so `hostname -i` gives the private IP): `helm upgrade --install cilium cilium/cilium
   --namespace kube-system --version 1.19.6 --set ipam.mode=kubernetes
   --set kubeProxyReplacement=true --set k8sServiceHost=$(hostname -i | awk '{print $1}')
-  --set k8sServicePort=6443 --set gatewayAPI.enabled=true --set hubble.relay.enabled=true
+  --set k8sServicePort=6443 --set gatewayAPI.enabled=true
+  --set gatewayAPI.externalTrafficPolicy=Cluster --set hubble.relay.enabled=true
   --set hubble.ui.enabled=true`.
 - **IMDS from pods**: needs `http_put_response_hop_limit = 3` — Cilium's tunnel routing adds
   one routing hop on the return path, so the container-standard 2 is one short (root cause
@@ -450,7 +451,10 @@ without opening another file:
   exclusion — deny is not compensable in Cilium). Never remove it.
 - **Gateway `Programmed`**: requires an address on its LoadBalancer Service. No cloud LB here —
   Cilium LB-IPAM (`platform/manifests/lb-ipam-pool.yaml`, virtual IPs, ns `infra` only)
-  provides it. External access is via NodePort until the Sprint 2 NLB decision.
+  provides it. External application access is the internet-facing NLB (S2-2):
+  TCP/443 passthrough to the deterministic NodePort 30443, which only
+  answers to the NLB's security group. Grafana is reached via
+  `kubectl port-forward` (NodePorts are closed to the outside).
 - **providerID**: never remove the kubelet `--provider-id` step in `bootstrap/common.yaml`;
   without it the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
 - **Spot worker disappeared**: auto-restarts within 5-10 min

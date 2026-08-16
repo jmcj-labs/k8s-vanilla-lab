@@ -28,7 +28,12 @@ EBS cifrado.
 **Red**: VPC dedicada `10.0.0.0/16`, subred pública `10.0.1.0/24` (sin NAT
 por coste) · pods `10.244.0.0/16` · services `10.96.0.0/12` · **sin
 kube-proxy** — Cilium en strict kube-proxy replacement (routing en modo
-tunnel, masquerade iptables).
+tunnel, masquerade iptables). **Entrada de aplicación: NLB internet-facing
+(S2-2)** — TCP/443 en passthrough hacia el NodePort determinista **30443**
+del Gateway (fuente de verdad en Tofu, `gateway_nodeport`); el SG de
+workers solo acepta ese puerto desde el SG del NLB. SSH (`my_ip`) y API
+:6443 mantienen su régimen. DNS del NLB nuevo en cada apply (output
+`nlb_dns_name`), sin Route53 hasta post-S4.
 
 **Versiones** (las series sin pin se resuelven en cada bootstrap):
 
@@ -53,7 +58,8 @@ tunnel, masquerade iptables).
 ClusterIssuer `selfsigned`, gateway-shim activado) → pool LB-IPAM + Gateway
 `shared-gw` (HTTPS :443, `*.logistics.lab`, TLS de cert-manager, rutas solo
 desde ns `logistics`) → CNPG → Strimzi → kube-prometheus-stack (Grafana
-NodePort, Alertmanager off). Solo operators: los clusters PG/Kafka son de la
+type NodePort pero inaccesible desde fuera — acceso por port-forward,
+Alertmanager off). Solo operators: los clusters PG/Kafka son de la
 app.
 
 **Backups** (S2 pieza 1 — "sin restore probado no es backup"): bucket S3
@@ -97,6 +103,11 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | PodMonitor genérico de app en plataforma | Selecciona por `app.kubernetes.io/part-of: logistics-lab`; Repo 2 solo pone el label y el puerto `metrics` | brief 3b |
 | **Contrato de pods de Repo 2** (lo exige `make smoke-app-contract`) | Cada Deployment lleva `app.kubernetes.io/name=<servicio>`; el container principal se llama **exactamente** `<servicio>`; cada servicio expone en el puerto `metrics` la métrica `logistics_service_info{service="<servicio>"} 1` | brief 3b |
 | Proyección de secrets a `logistics` (no acceso a `data`) | El developer no lee Secrets en `data`; se proyecta el mínimo (PG app + Kafka `ca.crt`) sin metadata del origen | brief 3b |
+| **NLB en L4 puro (TLS passthrough)** | Terminar en el NLB no rompería gRPC (ALPN existe) — rompería el diseño TLS/SNI del Gateway con cert-manager; TCP/443 → TCP conserva la terminación donde está | brief S2-2 |
+| **Targets `instance` sobre NodePort determinista 30443** | IP targets descartados por diseño: VIP LB-IPAM no anunciada, pods inalcanzables en tunnel mode, acoplamiento a direcciones | brief S2-2 |
+| **Sin Proxy Protocol v2** | En Cilium es global por Gateway: rompería el acceso in-cluster directo a la VIP y los health checks; la IP de cliente se preserva nativa (instance+TCP) y viaja en X-Forwarded-For | brief S2-2 |
+| **Health check TCP (no HTTPS) + fail-open asumido** | HTTPS sin SNI daría falsos negativos; TCP prueba datapath, el e2e prueba semántica. El NLB hace fail-open con todo unhealthy → **la seguridad descansa en los SG, nunca en el health state** | brief S2-2 |
+| **Cross-zone OFF explícito** | Una sola AZ hoy: el NLB no añade resiliencia zonal y fingirlo en config sería mentir — eso es la pieza 3 | brief S2-2 |
 | Bucket de backups único y **persistente** (stack propio, manual) | Los backups deben sobrevivir a cualquier destroy del cluster; consumo por variable, no remote state — grafos desacoplados | brief S2-1, `tofu/envs/persistent` |
 | etcd backup con **instance role** vs barman con **usuario IAM** | El CronJob es hostNetwork en el CP (IMDS le funciona sin tocar la CCNP); los pods CNPG están tras el deny de IMDS que NO se agujerea — credencial estática mínima, acotada a `cnpg/*` | brief S2-1 |
 | Snapshots etcd write-only desde el CP (`s3:PutObject` a `etcd/*`, nada más) | Un CP comprometido no puede leer ni borrar los backups existentes | brief S2-1 |
@@ -129,8 +140,10 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
 - Break-glass: `make kubeconfig` → cert admin de kubeadm desde SSM (ADR-004).
   Solo si el authenticator no responde.
 - `make ssh-cp` / `make ssh-worker`
-- Grafana: `kubectl -n infra get svc kube-prometheus-stack-grafana` →
-  `http://<ip-worker>:<nodeport>` (password en el secret
+- Grafana — **por port-forward** (S2-2 cerró los NodePort al exterior; no
+  abrir otro puerto ni regla):
+  `kubectl port-forward -n infra svc/kube-prometheus-stack-grafana 3000:80`
+  → `http://localhost:3000` (password en el secret
   `kube-prometheus-stack-grafana`)
 
 **Qué login necesita cada target de make** — el Makefile defaultea
@@ -160,13 +173,14 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   excepto el EBS CSI (`platform/policies/`), verificada en el smoke con
   drops de Hubble — incluida la comprobación anti-falso-negativo de la
   excepción (caché STS ~1h).
-- **Exposición del Gateway por NodePort** (IP LB virtual, no anunciada) —
-  hasta el NLB de Sprint 2.
+- ~~Exposición del Gateway por NodePort~~ **CERRADA (2026-08-16, S2-2)**:
+  NLB internet-facing en passthrough, NodePort 30443 solo desde el SG del
+  NLB, prueba negativa en el smoke. Nota vigente: **sin resiliencia zonal**
+  (una AZ, cross-zone off) hasta la pieza 3; Grafana pasó a port-forward.
 - ~~Ingreso sin e2e probado~~ **CERRADA (2026-08-15)**: e2e exterior en la
   coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
   desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
-  evidencia en [HANDOFF.md](HANDOFF.md). La *exposición* sigue por NodePort
-  hasta el NLB de S2.
+  evidencia en [HANDOFF.md](HANDOFF.md). La exposición es el NLB desde S2-2.
 - **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
   ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
 - **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el

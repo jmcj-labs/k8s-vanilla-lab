@@ -84,9 +84,12 @@ El orden interno importa:
   ejecutan y cronometran con el cluster levantado; la pieza corona cuando
   ambos testigos vuelven (ConfigMap + `CORONATION-001`).
 
-### 2. LB de entrada real
+### 2. LB de entrada real — 🔨 EN CURSO (16-ago, brief #S2-2 ratificado)
 - NLB delante del Gateway (target group a los workers)
 - Sustituye la decisión provisional de exposición del Sprint 1
+- Implementación: passthrough L4 puro, targets instance sobre NodePort
+  determinista 30443, sin PPv2, health TCP + seguridad en SG (fail-open
+  asumido), cross-zone off explícito, NLB en el ciclo destroy/apply
 
 ### 3. HA del control plane
 - 3 CPs con etcd en quórum (tolera caída de 1)

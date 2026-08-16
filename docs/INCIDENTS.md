@@ -128,7 +128,7 @@ Service has an address.
 scoped to namespace `infra` — Cilium LB-IPAM assigns a virtual IP
 (`172.20.255.0/24`, not announced externally) and the Gateway programs.
 External access remains via NodePort until the Sprint 2 ingress decision
-(NLB).
+(NLB — shipped in S2-2: the NLB is now the public application entry).
 
 ## 8. A deny-only Cilium policy blacked out the whole cluster's egress
 

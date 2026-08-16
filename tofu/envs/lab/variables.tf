@@ -113,3 +113,9 @@ variable "backup_bucket_name" {
   type        = string
   default     = ""
 }
+
+variable "gateway_nodeport" {
+  description = "Deterministic NodePort of the Gateway Service — single source of truth (Tofu). install.sh reconciles the live Service to it; the NLB target group and the worker SG rule consume it. Change here and everything follows."
+  type        = number
+  default     = 30443
+}

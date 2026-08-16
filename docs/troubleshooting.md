@@ -31,6 +31,7 @@ helm upgrade --install cilium cilium/cilium \
   --set k8sServiceHost=$(hostname -i | awk '{print $1}') \
   --set k8sServicePort=6443 \
   --set gatewayAPI.enabled=true \
+  --set gatewayAPI.externalTrafficPolicy=Cluster \
   --set hubble.relay.enabled=true \
   --set hubble.ui.enabled=true
 ```
