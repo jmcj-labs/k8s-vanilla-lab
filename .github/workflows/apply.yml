@@ -61,6 +61,14 @@ jobs:
       - name: OpenTofu Init
         run: tofu init -backend-config=backend.hcl
 
+      # HARD STOP if the state still holds the pre-HA singleton control
+      # plane: cloud-init is first-boot only, so that node would survive the
+      # apply carrying the OLD endpoint while the new CPs anchor to the NLB
+      # (ADR-007). The only valid path is destroy → apply from empty.
+      - name: Guard against in-place HA migration
+        working-directory: .
+        run: bash scripts/guard-legacy-cp-state.sh
+
       # New workers joining a LIVE cluster need a valid bootstrap token, but
       # the join-command in SSM carries the one minted at kubeadm init
       # (TTL 24h). If the cluster already exists (kubeconfig in SSM), mint a
@@ -328,8 +336,16 @@ jobs:
             --query 'length(Reservations[].Instances[])' \
             --output text \
             --region "${AWS_REGION}" 2>/dev/null || echo "2")
-          # 3 control planes since S2 piece 3 (HA, stacked etcd)
-          NODE_COUNT=$((WORKER_COUNT + 3))
+          # Control planes are 3 since S2 piece 3 (HA, stacked etcd) — read
+          # from the live inventory, not assumed, so the report cannot drift
+          CP_COUNT=$(aws ec2 describe-instances \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+                      "Name=tag:Role,Values=control-plane" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'length(Reservations[].Instances[])' \
+            --output text \
+            --region "${AWS_REGION}" 2>/dev/null || echo "3")
+          NODE_COUNT=$((WORKER_COUNT + CP_COUNT))
 
           INSTANCE_TYPES=$(aws ec2 describe-instances \
             --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
@@ -338,9 +354,13 @@ jobs:
             --output json \
             --region "${AWS_REGION}" | jq -r 'if length==0 then "unknown" else group_by(.) | map("\(.[0]) x\(length)") | join(", ") end')
 
+          # Instance rates × the LIVE counts, plus the NLB's hourly charge
+          # (S2 pieces 2+3). Excludes public IPv4 and EBS — CLUSTER.md
+          # §FinOps holds the measured all-in number.
           CONTROL_PLANE_RATE=0.038
           WORKER_SPOT_RATE=0.0055
-          HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", ${CONTROL_PLANE_RATE} + (${WORKER_COUNT} * ${WORKER_SPOT_RATE})}")
+          NLB_RATE=0.0225
+          HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", (${CP_COUNT} * ${CONTROL_PLANE_RATE}) + (${WORKER_COUNT} * ${WORKER_SPOT_RATE}) + ${NLB_RATE}}")
           EPOCH=$(date +%s)
 
           echo "api_endpoint=${API_ENDPOINT}" >> "${GITHUB_OUTPUT}"

@@ -4,7 +4,7 @@
 #          install Cilium in strict kube-proxy replacement mode, publish the
 #          join data + control-plane join material (SSM cp/ path) and open
 #          the sequential-join gate for CP-1/CP-2 (control-plane-join.yaml).
-# Variables: cluster_name, aws_region, pod_cidr, service_cidr, api_endpoint_dns, ssm_parameter_path
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, api_endpoint_dns, api_target_group_arn, ssm_parameter_path
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
@@ -110,6 +110,38 @@ until getent hosts "${api_endpoint_dns}" >/dev/null 2>&1; do
 done
 log "✓ NLB DNS resolves"
 
+# ...but RESOLVING IS NOT ROUTING. A name that answers proves the NLB
+# exists, not that traffic to it can ever reach THIS node. If kubeadm init
+# ran before tofu registered this instance in the API target group, the
+# cluster would come up with an endpoint that black-holes its own API —
+# including the readiness checks kubeadm itself performs against it.
+# Gate on the registration fact: this instance ID present in the target
+# group (any health state; "healthy" is impossible before the API exists).
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $(curl -s -X PUT \
+  'http://169.254.169.254/latest/api/token' \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+[ -n "$${INSTANCE_ID}" ] || { log "✗ ERROR: could not read own instance-id from IMDSv2"; exit 1; }
+
+TG_ELAPSED=0
+until aws elbv2 describe-target-health \
+        --target-group-arn "${api_target_group_arn}" \
+        --region ${aws_region} \
+        --query 'TargetHealthDescriptions[].Target.Id' \
+        --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$${INSTANCE_ID}"; do
+  if [ $${TG_ELAPSED} -ge 600 ]; then
+    log "✗ ERROR: $${INSTANCE_ID} not registered in the API target group after 600s"
+    log "  the API endpoint would black-hole this node — refusing to run kubeadm init"
+    exit 1
+  fi
+  if [ $((TG_ELAPSED % 120)) -eq 0 ] && [ $${TG_ELAPSED} -gt 0 ]; then
+    log "Waiting for target-group registration... ($${TG_ELAPSED}s)"
+  fi
+  sleep 15
+  TG_ELAPSED=$((TG_ELAPSED + 15))
+done
+log "✓ Registered in the API target group ($${INSTANCE_ID}) — the endpoint routes here"
+
 cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
@@ -155,9 +187,18 @@ cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
 # Step 3: Initialize control plane with kubeadm
 log "Step 3/9: Running kubeadm init (this takes 2-5 minutes)"
 
+# NOTE on --upload-certs: deliberately ABSENT. Passing it here would upload
+# the certs under a key kubeadm prints mid-log and this script never
+# captures — a second, unmanaged copy of control-plane-grade material with
+# its own 2h life. Step 7 runs `init phase upload-certs` explicitly and
+# captures the key it returns: ONE publication, one owner, one TTL.
+#
+# Expect noisy retries during the wait-control-plane phase: admin.conf
+# points at the NLB and, while every CP is still unhealthy, the NLB fails
+# OPEN across all three targets, so some polls hit nodes with nothing
+# listening (fast RST, not a hang). kubeadm retries; this is expected.
 kubeadm init \
   --config /tmp/kubeadm-config.yaml \
-  --upload-certs \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 if [ $? -ne 0 ]; then
@@ -335,9 +376,11 @@ aws ssm put-parameter \
   --region ${aws_region} \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
-# Store certificate-key under the cp/ subpath — readable by the CP role
-# ONLY (the worker role enumerates exact ARNs and never sees cp/*): with
-# it, anyone holding the join token could elevate to control plane.
+# Store certificate-key under the cp/ subpath — EXCLUDED FROM THE WORKER
+# ROLE (which enumerates exact ARNs and never sees cp/*): with it, anyone
+# holding the join token could elevate to control plane. Not "CP-only":
+# the CI/OIDC role reads /k8s/* and already holds the admin kubeconfig, a
+# strictly higher privilege — see ADR-007.
 aws ssm put-parameter \
   --name "${ssm_parameter_path}/cp/certificate-key" \
   --value "$${CERT_KEY}" \

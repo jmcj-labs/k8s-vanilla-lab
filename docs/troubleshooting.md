@@ -89,7 +89,9 @@ make ssh-worker
 sudo tail -100 /var/log/k8s-worker-bootstrap.log
 ```
 
-Look for `connection refused` or timeout errors pointing at the control plane private IP.
+Look for `connection refused` or timeout errors pointing at the API endpoint
+(the NLB's DNS since ADR-007 — never a node IP; a worker log showing a
+`10.x.x.x` endpoint is joining with stale SSM data).
 
 **Step 3: Token expired (24h TTL)**
 
@@ -153,10 +155,11 @@ run `make apply`.
 
 ```bash
 grep server: ~/.kube/k8s-vanilla-lab.conf
-# Should show: server: https://PUBLIC_IP:6443
+# Should show the NLB DNS: server: https://<cluster>-gw-nlb-....elb.<region>.amazonaws.com:6443
 ```
 
-If it shows a private IP (`10.x.x.x`), re-fetch:
+If it shows a node IP (private `10.x.x.x` or a public one), the kubeconfig is
+from a pre-ADR-007 incarnation — re-fetch:
 
 ```bash
 make kubeconfig
@@ -166,8 +169,9 @@ Other causes:
 
 | Cause | Fix |
 |-------|-----|
-| Port 6443 blocked by security group | Verify `my_ip` in `terraform.tfvars` covers your current IP; `make apply` to update |
-| Control plane not running | Check instance state in AWS console; `make ssh-cp` then `sudo systemctl status kubelet` |
+| Stale NLB DNS from a previous incarnation | The name changes with every destroy/apply: `make kubeconfig` again, and refresh `K8S_SERVER` in Repo 2 (`docs/RUNBOOK-post-apply.md`) |
+| API targets unhealthy | `aws elbv2 describe-target-health --target-group-arn $(aws elbv2 describe-target-groups --names "$CLUSTER_NAME-api-tg" --query 'TargetGroups[0].TargetGroupArn' --output text)` — the NLB fails OPEN when all are unhealthy, so `:6443` may answer from a node whose API is down |
+| Control planes not running | Check instance state in AWS console; `make ssh-cp` (`CP_INDEX=1|2` for the others) then `sudo systemctl status kubelet` |
 
 ---
 

@@ -115,12 +115,15 @@ data "cloudinit_config" "control_plane" {
   part {
     content_type = "text/x-shellscript"
     content = count.index == 0 ? templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
-      cluster_name       = var.cluster_name
-      aws_region         = var.aws_region
-      pod_cidr           = local.pod_cidr
-      service_cidr       = local.service_cidr
-      api_endpoint_dns   = module.nlb.dns_name
-      ssm_parameter_path = local.ssm_parameter_base
+      cluster_name = var.cluster_name
+      aws_region   = var.aws_region
+      pod_cidr     = local.pod_cidr
+      service_cidr = local.service_cidr
+      # Both the name AND the target group: resolving proves the NLB exists,
+      # registration proves the endpoint can route back to this node.
+      api_endpoint_dns     = module.nlb.dns_name
+      api_target_group_arn = module.nlb.api_target_group_arn
+      ssm_parameter_path   = local.ssm_parameter_base
       }) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
       cluster_name       = var.cluster_name
       aws_region         = var.aws_region

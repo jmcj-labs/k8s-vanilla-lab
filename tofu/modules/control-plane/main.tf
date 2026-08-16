@@ -193,6 +193,30 @@ resource "aws_iam_role_policy" "control_plane_ssm" {
   })
 }
 
+# Target-group registration gate (S2 piece 3): CP-0 refuses to run
+# `kubeadm init` until it sees ITSELF registered in the API target group —
+# a resolving DNS name proves the NLB exists, not that the endpoint routes
+# back here. DescribeTargetHealth is read-only and, like every ELBv2
+# Describe* action, does NOT support resource-level permissions (AWS
+# service authorization reference) — hence Resource "*" with the action
+# narrowed to exactly this one call.
+resource "aws_iam_role_policy" "control_plane_tg_gate" {
+  name = "${var.name}-cp-tg-gate"
+  role = aws_iam_role.control_plane.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadOwnTargetRegistration"
+        Effect   = "Allow"
+        Action   = "elasticloadbalancing:DescribeTargetHealth"
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # etcd backups (S2 piece 1): the backup CronJob runs hostNetwork on this
 # node, so the instance role IS its identity — IMDS works without touching
 # the IMDS CCNP or its exception. Write-only to the etcd/ prefix: a

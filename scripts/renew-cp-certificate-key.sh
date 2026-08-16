@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# Renew the kubeadm certificate-key (control-plane join material).
+# Renew the FULL control-plane join material: certificate-key (2h) AND
+# bootstrap token (24h). A CP join needs BOTH — renewing one alone leaves
+# the replacement stuck on the other, which is the whole failure this
+# ceremony exists to prevent.
 #
 # WHY: `kubeadm init phase upload-certs` encrypts the CP certificates into
 # the kubeadm-certs Secret with a key whose TTL is 2h — after that, BOTH
 # the Secret and the key are useless. A replacement CP arriving later than
 # 2h after the last upload cannot join until a SURVIVING CP re-uploads the
 # certs and publishes the fresh key. Keeping the old key in SSM would NOT
-# help: the Secret itself is gone; re-upload is the only cure (ADR-007,
+# help: the Secret itself is gone; re-upload is the only cure. The join
+# token in `join-command` expires at 24h with the same effect (ADR-007,
 # docs/RUNBOOK-renew-cp-certkey.md).
+#
+# NOTE: the CI apply workflow already mints a fresh token before every
+# apply on a live cluster ("Preflight join token"), so a replacement driven
+# by Apply gets its token automatically — this script covers the manual
+# path and makes the precondition explicit instead of implicit.
 #
 # HOW: privileged nsenter Job pinned to a Ready control plane (the house's
 # no-SSH pattern). The key NEVER leaves the node in logs: the Job itself
@@ -72,7 +81,25 @@ spec:
                 --type SecureString \
                 --overwrite \
                 --region "${AWS_REGION}" >/dev/null
-              echo "certificate-key renewed and published to SSM (never logged); kubeadm-certs TTL restarted (2h)"
+
+              # The 24h bootstrap token is the OTHER half of the join
+              # material: rebuild join-command preserving the endpoint and
+              # CA hash already published (kubeadm token create prints only
+              # the token).
+              OLD_JOIN=\$(aws ssm get-parameter --name "/k8s/${CLUSTER_NAME}/join-command" \
+                --with-decryption --query Parameter.Value --output text --region "${AWS_REGION}")
+              ENDPOINT=\$(echo "\$OLD_JOIN" | awk '{print \$3}')
+              CA_HASH=\$(echo "\$OLD_JOIN" | grep -o 'sha256:[a-f0-9]*')
+              [ -n "\$ENDPOINT" ] && [ -n "\$CA_HASH" ] || { echo "could not parse join-command" >&2; exit 1; }
+              TOKEN=\$(kubeadm token create --ttl 24h)
+              echo "\$TOKEN" | grep -Eq '^[a-z0-9]{6}\.[a-z0-9]{16}\$' || { echo "invalid token" >&2; exit 1; }
+              aws ssm put-parameter \
+                --name "/k8s/${CLUSTER_NAME}/join-command" \
+                --value "kubeadm join \$ENDPOINT --token \$TOKEN --discovery-token-ca-cert-hash \$CA_HASH" \
+                --type SecureString \
+                --overwrite \
+                --region "${AWS_REGION}" >/dev/null
+              echo "join material renewed (never logged): certificate-key TTL 2h + bootstrap token TTL 24h; endpoint \$ENDPOINT preserved"
 JOB
 
 kubectl -n kube-system wait --for=condition=complete job/renew-cp-certkey --timeout=180s >/dev/null \

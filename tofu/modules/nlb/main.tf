@@ -36,7 +36,7 @@ terraform {
 # NLB after the fact). No inline rules — INCIDENTS #6.
 resource "aws_security_group" "nlb" {
   name        = "${var.name}-nlb-sg"
-  description = "Internet ingress for the application NLB (TCP/443 only)"
+  description = "Internet ingress for the cluster NLB (TCP/443 app + TCP/6443 API)"
   vpc_id      = var.vpc_id
 
   revoke_rules_on_delete = true
@@ -66,10 +66,13 @@ resource "aws_vpc_security_group_egress_rule" "to_nodeport" {
 }
 
 # AVD-AWS-0053 warns against ACCIDENTAL public exposure. This exposure is
-# the deliverable: an internet-facing ingress NLB (brief #S2-2), TCP/443
-# only, backed by SG scoping on both sides (world→443 here; NodePort only
-# from this SG on the workers) and TLS terminating at the Gateway. No exp
-# date: an ingress LB is public by definition — not a decision to revisit.
+# the deliverable: an internet-facing NLB carrying the application entry
+# (TCP/443, brief #S2-2) and the Kubernetes API endpoint (TCP/6443, brief
+# #S2-3 — public by design since ADR-004), backed by SG scoping on both
+# sides (world→443/6443 here; NodePort only from this SG on the workers,
+# 6443 only from this SG on the control planes) with TLS terminating at
+# the Gateway and cert/IAM auth at the API. No exp date: a public ingress
+# LB is public by definition — not a decision to revisit.
 #trivy:ignore:AVD-AWS-0053
 resource "aws_lb" "gateway" {
   name               = "${var.name}-gw-nlb"
@@ -79,7 +82,8 @@ resource "aws_lb" "gateway" {
   security_groups    = [aws_security_group.nlb.id]
 
   # One AZ, one subnet: cross-zone is meaningless today and OFF on purpose
-  # so the (non-)decision is visible. Zonal resilience is piece 3.
+  # so the (non-)decision is visible. Piece 3 added NODE HA (3 CPs in this
+  # same AZ) — zonal resilience remains declared post-S2 debt.
   enable_cross_zone_load_balancing = false
 
   tags = merge(var.tags, {

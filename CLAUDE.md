@@ -317,7 +317,7 @@ kubeadm certificate-key — a privilege boundary (it elevates to control plane).
 | `/k8s/${cluster_name}/join-command` | CP-0 bootstrap | worker bootstrap, CP join bootstrap |
 | `/k8s/${cluster_name}/ca-cert-hash` | CP-0 bootstrap | worker bootstrap |
 | `/k8s/${cluster_name}/kubeconfig` | CP-0 bootstrap | `make kubeconfig`, `make smoke-test`, CI apply workflow |
-| `/k8s/${cluster_name}/cp/certificate-key` | CP-0 bootstrap, renewal ceremony | CP join bootstrap ONLY (CP role; workers enumerate exact ARNs and never see `cp/*`) |
+| `/k8s/${cluster_name}/cp/certificate-key` | CP-0 bootstrap, renewal ceremony | CP join bootstrap (CP role). EXCLUDED from the worker role — workers enumerate exact ARNs. The CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig |
 | `/k8s/${cluster_name}/cp/joined-count` (String) | each CP after joining | next CP's join gate (sequential joins) |
 
 All parameters are deleted by a destroy-time provisioner on `tofu destroy`. NEVER widen the

@@ -47,12 +47,27 @@ internet-facing NLB (S2 piece 2, application entry).
    **sequentially** (kubeadm HA guide requirement), serialized through the SSM
    gate `cp/joined-count`.
 6. **CP join material is a security boundary**: `cp/certificate-key` lives in
-   an SSM subpath readable by the **CP instance role only**; the worker role
-   enumerates exact ARNs (`join-command`, `ca-cert-hash`) — a compromised
-   worker holding the certificate-key could elevate itself to control plane
-   (Codex finding). The key's 2h TTL is handled by a renewal ceremony
-   (`scripts/renew-cp-certificate-key.sh` + runbook): a surviving CP re-runs
-   `upload-certs` and publishes a fresh key; replacements re-fetch on retry.
+   an SSM subpath **excluded from the worker role**, which enumerates exact
+   ARNs (`join-command`, `ca-cert-hash`) — a compromised worker holding the
+   certificate-key could elevate itself to control plane (Codex finding).
+   Honest scope: this is *not* "CP-role-only" — the CI/OIDC role reads
+   `/k8s/*` and already custodies the admin kubeconfig, a strictly higher
+   privilege, so narrowing it would buy nothing. Both join materials expire
+   (key 2h, bootstrap token 24h) and the renewal ceremony
+   (`scripts/renew-cp-certificate-key.sh` + runbook) renews **both**;
+   replacements re-fetch on retry. Replacements are performed **one at a
+   time** — with 3 members the quorum tolerates losing one, never two.
+
+7. **Two gates protect the bootstrap from lying to itself**: CP-0 waits until
+   it sees its own instance registered in the API target group before
+   `kubeadm init` (a resolving DNS name proves the NLB exists, not that the
+   endpoint routes back), and the join script is **reentrant** — if the node
+   is already a healthy CP it exits 0 without ever reaching the `kubeadm
+   reset` retry branch, which would otherwise wipe a live etcd member.
+   Certificates are uploaded exactly once, by the explicit `init phase
+   upload-certs` whose key this bootstrap captures (`--upload-certs` is
+   deliberately absent from `kubeadm init`: it would create a second,
+   unmanaged copy under a key nobody owns).
 
 ## Consequences
 
@@ -67,6 +82,14 @@ internet-facing NLB (S2 piece 2, application entry).
 ### Negative / accepted
 
 - **Declared coupling**: NLB mutations affect app AND API (lab-acceptable).
+- **No in-place migration**: because cloud-init is first-boot only, an
+  existing singleton CP would survive an apply carrying the old endpoint.
+  The valid operation is destroy → apply from empty, enforced by
+  `scripts/guard-legacy-cp-state.sh` (run by `make apply` and by CI before
+  every apply) so it cannot be forgotten.
+- **Noisy init**: while all three targets are unhealthy the NLB fails open,
+  so kubeadm's endpoint polls hit nodes with nothing listening (fast RST).
+  kubeadm retries; expected, documented in the bootstrap.
 - **+~2.7–2.9 $/day** (2 extra on-demand CPs, 2 public IPv4, 60 GiB gp3) —
   real number to be fixed from Cost Explorer after first apply (CLUSTER.md
   §FinOps).

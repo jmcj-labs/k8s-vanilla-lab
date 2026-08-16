@@ -78,6 +78,7 @@ plan: ## Show execution plan (requires init)
 	cd $(TOFU_DIR) && tofu plan
 
 apply: ## Apply infrastructure changes (auto-approve)
+	@TOFU_DIR=$(TOFU_DIR) bash scripts/guard-legacy-cp-state.sh
 	cd $(TOFU_DIR) && tofu apply -auto-approve
 
 destroy: ## Destroy all infrastructure (auto-approve)
