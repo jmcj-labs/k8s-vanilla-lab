@@ -247,7 +247,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - 3× EC2 instances (t3.medium On-Demand, `count = control_plane_count`, auto-assigned public IPs — NO EIP anymore)
-- Security group (SSH from `my_ip`; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
+- Security group (NO inbound SSH — access is SSM, INCIDENTS #16; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
 - IAM role with SSM write permissions (`/k8s/${cluster_name}/*` — includes the `cp/` subpath, which the WORKER role is excluded from; the CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig)
 
 **Key Pattern**: NLB-first (replaced the historical EIP-first):
@@ -396,7 +396,7 @@ before the IAM role is removed.
 ```bash
 # Copy and configure
 cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
-# Edit: my_ip, ssh_key_name, aws_region
+# Edit: ssh_key_name, aws_region (my_ip ya no existe: sin SSH entrante)
 cp tofu/envs/lab/backend.hcl.example tofu/envs/lab/backend.hcl
 # Edit: bucket, region, dynamodb_table
 

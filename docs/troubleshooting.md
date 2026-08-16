@@ -51,7 +51,7 @@ Other causes:
 
 | Cause | Fix |
 |-------|-----|
-| `my_ip` doesn't match your current IP | `curl ifconfig.me` → update `terraform.tfvars` → `make apply` |
+| The node is not registered in SSM | `aws ssm describe-instance-information` — if absent, restart the agent (`snap restart amazon-ssm-agent`) |
 | Session does not open | `session-manager-plugin` missing locally, or the node is not `Online` in SSM (`aws ssm describe-instance-information`) |
 
 ```bash

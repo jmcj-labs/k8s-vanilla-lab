@@ -59,12 +59,31 @@ trap 'echo; echo "interrupted — cancelling in-flight commands"; ssm_cancel_inf
 
 phase_done() { aws ssm put-parameter --name "${PHASE_PARAM}" --type String --overwrite \
                  --value "$1" --region "${AWS_REGION}" >/dev/null; }
-phase_get()  { aws ssm get-parameter --name "${PHASE_PARAM}" --query Parameter.Value \
-                 --output text --region "${AWS_REGION}" 2>/dev/null || echo "none"; }
 state_put()  { aws ssm put-parameter --name "${STATE_PARAM}" --type String --overwrite \
                  --value "$1" --region "${AWS_REGION}" >/dev/null; }
-state_get()  { aws ssm get-parameter --name "${STATE_PARAM}" --query Parameter.Value \
-                 --output text --region "${AWS_REGION}" 2>/dev/null || echo ""; }
+
+# ssm_param_get <name> <default-when-absent>
+# FAIL CLOSED (INCIDENTS #17, committed inside this very script before Codex
+# caught it): `|| echo none` turned expired credentials, a throttle or a
+# network blip into "no progress recorded" — which here means "start from
+# scratch" on a cluster that may be halfway through a restore. Only
+# ParameterNotFound is an absence; everything else aborts.
+ssm_param_get() {
+  local name="$1" absent_default="$2" out rc
+  set +e
+  out=$(aws ssm get-parameter --name "${name}" --query Parameter.Value \
+        --output text --region "${AWS_REGION}" 2>&1)
+  rc=$?
+  set -e
+  if [ ${rc} -eq 0 ]; then printf '%s' "${out}"; return 0; fi
+  if printf '%s' "${out}" | grep -q "ParameterNotFound"; then
+    printf '%s' "${absent_default}"; return 0
+  fi
+  FAIL "could not read ${name} (rc=${rc}): ${out}
+  Refusing to guess the ceremony's progress — fix the cause and re-run."
+}
+phase_get()  { ssm_param_get "${PHASE_PARAM}" "none"; }
+state_get()  { ssm_param_get "${STATE_PARAM}" ""; }
 
 # Phases in order. `after <phase>` answers "is that phase already complete?"
 # and MUST be an index comparison: an earlier attempt walked the list setting
@@ -92,18 +111,35 @@ after() {
 }
 
 # ── Acquire the lock (atomic: put-parameter without --overwrite) ────────────
+# The lock must EXCLUDE, not merely announce. Two rules learned the hard way:
+#   - a failed put-parameter is only "someone holds it" when the error is
+#     ParameterAlreadyExists; any other failure is unknown, and unknown must
+#     never become "carry on".
+#   - a held lock is NOT self-evidence of a resume. Inferring "this must be
+#     my own interrupted run" from the presence of a phase marker would let
+#     two concurrent ceremonies both proceed. Resuming is an explicit,
+#     deliberate act: RESUME=1.
 LOCK_OWNER="$(whoami)@$(hostname)-$$"
-if ! aws ssm put-parameter --name "${LOCK_PARAM}" --type String \
-       --value "${LOCK_OWNER} started $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-       --region "${AWS_REGION}" >/dev/null 2>&1; then
-  HOLDER=$(aws ssm get-parameter --name "${LOCK_PARAM}" --query Parameter.Value \
-             --output text --region "${AWS_REGION}" 2>/dev/null || echo "unknown")
-  if [ "${DONE_PHASE}" = "none" ]; then
-    FAIL "another HA restore is in flight: ${HOLDER}
-  If it died before doing anything, release it:
+RESUME="${RESUME:-0}"
+set +e
+LOCK_OUT=$(aws ssm put-parameter --name "${LOCK_PARAM}" --type String \
+  --value "${LOCK_OWNER} started $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --region "${AWS_REGION}" 2>&1)
+LOCK_RC=$?
+set -e
+if [ ${LOCK_RC} -ne 0 ]; then
+  printf '%s' "${LOCK_OUT}" | grep -q "ParameterAlreadyExists" \
+    || FAIL "could not acquire the ceremony lock (rc=${LOCK_RC}): ${LOCK_OUT}
+  Refusing to start without proven exclusivity."
+  HOLDER=$(ssm_param_get "${LOCK_PARAM}" "<vanished between the two calls>")
+  [ "${RESUME}" = "1" ] || FAIL "the ceremony lock is held: ${HOLDER}
+  If this is YOUR interrupted run and you mean to continue it:
+    RESUME=1 bash $0
+  If it is abandoned, release it deliberately:
     aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}"
-  fi
-  log "RESUMING an interrupted ceremony (lock: ${HOLDER}, last completed phase: ${DONE_PHASE})"
+  [ "${DONE_PHASE}" != "none" ] || FAIL "RESUME=1 was given but no phase has ever completed —
+  there is nothing to resume. Release the lock instead."
+  log "RESUMING deliberately (lock: ${HOLDER}, last completed phase: ${DONE_PHASE})"
 fi
 LOCK_HELD="yes"
 
@@ -302,10 +338,35 @@ done
 RECOVERED=$(kubectl get configmap ha-restore-witness -o jsonpath='{.data.ts}')
 [ "${RECOVERED}" = "${STAMP}" ] || FAIL "witness timestamp mismatch (${RECOVERED} != ${STAMP})"
 OK "THE WITNESS IS BACK (ts=${RECOVERED})"
-if kubectl get configmap ha-restore-antiwitness >/dev/null 2>&1; then
-  FAIL "the ANTI-WITNESS survived — etcd did not rewind; investigate before trusting this restore"
-fi
-OK "the anti-witness is GONE — etcd genuinely rewound to the snapshot"
+# THE ANTI-WITNESS CHECK IS THE PROOF, so it may not guess. The previous
+# version read `if kubectl get ...; then FAIL; fi` — any failure (Forbidden
+# while RBAC settles after the rewind, a timeout, an API still coming up)
+# fell through to "it is gone" and PASSED the drill. That is INCIDENTS #17
+# committed inside the script that documents it, and it is exactly what
+# happened by hand: the first manual check returned Forbidden, not NotFound.
+# Only the unambiguous NotFound counts as absence.
+ANTI_VERDICT=""
+for attempt in $(seq 1 12); do
+  set +e
+  ANTI_OUT=$(kubectl get configmap ha-restore-antiwitness 2>&1)
+  ANTI_RC=$?
+  set -e
+  if [ ${ANTI_RC} -eq 0 ]; then
+    ANTI_VERDICT="present"; break
+  fi
+  if printf '%s' "${ANTI_OUT}" | grep -q "NotFound"; then
+    ANTI_VERDICT="absent"; break
+  fi
+  log "  anti-witness check inconclusive (attempt ${attempt}/12): $(printf '%s' "${ANTI_OUT}" | head -1)"
+  sleep 10
+done
+case "${ANTI_VERDICT}" in
+  absent) OK "the anti-witness is GONE (NotFound) — etcd genuinely rewound to the snapshot" ;;
+  present) FAIL "the ANTI-WITNESS SURVIVED — etcd did not rewind. Do NOT trust this restore." ;;
+  *) FAIL "could not determine whether the anti-witness exists after 12 attempts.
+  Last answer: $(printf '%s' "${ANTI_OUT}" | head -2)
+  An inconclusive proof is a failed proof — investigate before declaring this drill passed." ;;
+esac
 
 MEMBERS=$(ssm_run "${CP_ID[0]}" "${ETCDCTL} member list -w json" | python3 -c '
 import json,sys
@@ -314,6 +375,32 @@ print(len([x for x in m if x.get("clientURLs")]), len(m))')
 [ "${MEMBERS}" = "3 3" ] || FAIL "etcd is not 3/3 (got ${MEMBERS})"
 ssm_run "${CP_ID[0]}" "${ETCDCTL} endpoint health --cluster" >/dev/null || FAIL "etcd endpoint health failed"
 OK "etcd: 3/3 members started and all endpoints healthy"
+
+# The API's view lags the facts: right after a rewind an etcd pod reads
+# Pending, then 0/1, while etcdctl already reports it healthy in ~20ms. That
+# was a footnote in the runbook; a footnote is not a guarantee. The ceremony
+# now WAITS for the whole picture to agree, bounded, so nobody has to hold a
+# terminal and squint at it.
+SETTLE_DEADLINE=$(( $(date -u +%s) + 300 ))
+API_TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-api-tg" \
+  --region "${AWS_REGION}" --query 'TargetGroups[0].TargetGroupArn' --output text)
+EXPECTED_NODES_TOTAL="${EXPECTED_NODES_TOTAL:-6}"
+while true; do
+  ETCD_READY=$(kubectl -n kube-system get pods -l component=etcd --no-headers 2>/dev/null \
+    | awk '$2=="1/1" && $3=="Running"' | grep -c . || true)
+  NODES_READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | grep -c . || true)
+  TG_HEALTHY=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" \
+    --region "${AWS_REGION}" --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+    --output text 2>/dev/null || echo 0)
+  if [ "${ETCD_READY}" = "3" ] && [ "${NODES_READY}" = "${EXPECTED_NODES_TOTAL}" ] && [ "${TG_HEALTHY}" = "3" ]; then
+    break
+  fi
+  [ "$(date -u +%s)" -lt "${SETTLE_DEADLINE}" ] \
+    || FAIL "the cluster did not settle within 300s of the restore:
+  etcd pods 1/1: ${ETCD_READY}/3 · nodes Ready: ${NODES_READY}/${EXPECTED_NODES_TOTAL} · API targets healthy: ${TG_HEALTHY}/3"
+  sleep 10
+done
+OK "settled: 3/3 etcd pods 1/1 · ${EXPECTED_NODES_TOTAL}/${EXPECTED_NODES_TOTAL} nodes Ready · 3/3 API targets healthy"
 phase_done verified
 
 T1=$(date -u +%s)
@@ -322,7 +409,15 @@ log "=== DRILL PASSED: the cluster was rebuilt from its backup ==="
 log "total $((T1-T0))s — record the phase timings in docs/RUNBOOK-restore-etcd-ha.md"
 log "old data dirs kept as /var/lib/etcd.pre-restore-${STAMP} on the 3 CPs (clean up when satisfied)"
 kubectl delete configmap ha-restore-witness --ignore-not-found >/dev/null 2>&1 || true
-aws ssm delete-parameter --name "${LOCK_PARAM}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
-aws ssm delete-parameter --name "${PHASE_PARAM}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
-aws ssm delete-parameter --name "${STATE_PARAM}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
-LOCK_HELD=""
+for P in "${LOCK_PARAM}" "${PHASE_PARAM}" "${STATE_PARAM}"; do
+  aws ssm delete-parameter --name "${P}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+done
+# Only claim the lock is released after PROVING it: silently clearing
+# LOCK_HELD on a failed delete would leave the next ceremony blocked by a
+# lock this run believes it removed.
+if [ "$(ssm_param_get "${LOCK_PARAM}" "__absent__")" = "__absent__" ]; then
+  LOCK_HELD=""
+else
+  log "⚠ the ceremony lock could NOT be removed — release it before the next run:"
+  log "    aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}"
+fi

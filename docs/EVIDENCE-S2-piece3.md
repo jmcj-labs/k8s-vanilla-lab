@@ -1,7 +1,7 @@
 # Evidencia de coronación — S2 pieza 3 (HA del control plane)
 
 **Fecha**: 2026-08-16 · **ADR**: [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) ·
-**PR**: #65 (5 cruces de Codex) · **SHA revisado**: `7956236` · **Merge**: `032d865`
+**PRs**: #65 (5 cruces, merge `032d865`) + **#66** (cierre: acceso OOB + evidencia, 2 cruces)
 
 Criterio de coronación del brief #S2-3, con la evidencia de cada punto.
 Los apartados marcados **PENDIENTE** se rellenan al ejecutarlos.
@@ -319,9 +319,21 @@ real**: un restore que cree que los data dirs ya están apartados es un
 restore que nunca ocurre sobre un cluster que sí está parado. Reescrito como
 comparación de índices y **probado con una tabla de verdad**.
 
-## 7. Segundo apply con plan vacío
+## 7. Segundo apply con plan vacío — **CERRADO**
 
-PENDIENTE
+Tras aplicar la retirada de los outputs `ssh_*` (que el cambio de acceso dejó
+huérfanos en el state), el plan siguiente es literal:
+
+```
+No changes. Your infrastructure matches the configuration.
+
+OpenTofu has compared your real infrastructure against your configuration and
+found no differences, so no changes are needed.
+```
+
+Idempotencia probada **después** de un ciclo que incluyó destroy completo,
+apply desde cero, tres paradas/arranques del drill de pérdida, un reemplazo
+de nodo con `-replace` y un restore total de etcd.
 
 ## 8. Coste real medido
 

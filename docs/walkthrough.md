@@ -32,7 +32,6 @@ cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
 Required fields:
 
 ```hcl
-my_ip        = "203.0.113.42/32"   # curl ifconfig.me
 ssh_key_name = "k8s-vanilla-lab"   # AWS key pair name
 aws_region   = "eu-west-1"
 cluster_name = "k8s-vanilla-lab"

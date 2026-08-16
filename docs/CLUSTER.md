@@ -25,7 +25,7 @@ ADR-007** — HA de nodo: sobrevive a perder un CP; **una sola AZ**, no es HA
 zonal) · 3 workers t3.medium spot (3, no 2: anti-affinity real para la
 topología de datos de fase 2 — CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS ·
 IMDSv2 obligatorio con hop limit 3 · EBS cifrado. El EIP del CP **ya no
-existe**: IPs públicas auto-asignadas solo para SSH/egress; ningún consumidor
+existe**: IPs públicas auto-asignadas solo para egress; ningún consumidor
 ancla a IPs de nodo.
 
 **Red**: VPC dedicada `10.0.0.0/16`, subred pública `10.0.1.0/24` (sin NAT
@@ -40,7 +40,7 @@ endpoint del API (S2-3, ADR-007)**: listener TCP/6443 → TG propio hacia los
 los tiene como targets, hairpin), `controlPlaneEndpoint` de kubeadm = DNS
 del NLB, y el SG de CPs solo acepta 6443 desde el SG del NLB (murió
 `0.0.0.0/0:6443`). Acoplamiento app/API en un recurso: **declarado y
-aceptado en lab**. SSH (`my_ip`) mantiene su régimen. DNS del NLB nuevo en
+aceptado en lab**. No hay SSH entrante (acceso por SSM, INCIDENTS #16). DNS del NLB nuevo en
 cada apply (output `nlb_dns_name`) — **el refresh de `K8S_SERVER` sigue
 vivo** —, sin Route53 hasta post-S4.
 
@@ -100,7 +100,7 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | `controller.region` explícito en el EBS CSI | Defensa en profundidad: no depender de IMDS para descubrir la región | [INCIDENTS #4](INCIDENTS.md) |
 | Gateway API CRDs **antes** del helm install de Cilium | El operator solo habilita su controller de Gateway API si las CRDs ya existen | `bootstrap/control-plane.yaml` |
 | Pool LB-IPAM (`172.20.255.0/24`, solo ns `infra`) | Sin cloud-controller nadie asigna IP al Service del Gateway y `Programmed` nunca llega; la IP es virtual, no anunciada | [INCIDENTS #7](INCIDENTS.md) |
-| API server público **por el NLB** (los CPs solo aceptan 6443 del SG del NLB) | Los runners de CI (IPs dinámicas) ejecutan platform+smoke vía kubeconfig; TLS + certificados/IAM como control de acceso, SSH sigue cerrado a `my_ip`. El acceso directo a las IPs de CP murió en S2-3 | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) + [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
+| API server público **por el NLB** (los CPs solo aceptan 6443 del SG del NLB) | Los runners de CI (IPs dinámicas) ejecutan platform+smoke vía kubeconfig; TLS + certificados/IAM como control de acceso. El acceso directo a las IPs de CP murió en S2-3, y el SSH entrante en el cierre de la pieza | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) + [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
 | `user_data_base64` (nunca `user_data`) | cloud-init va gzip+base64; el contrato del provider lo exige y su violación rompe updates in-place | [INCIDENTS #5](INCIDENTS.md) |
 | SG del CP sin reglas inline (todo standalone) | Mezclar inline + standalone borra reglas ajenas en cada apply | [INCIDENTS #6](INCIDENTS.md) |
 | Acceso diario vía IAM (aws-iam-authenticator, backend DynamicFile) | Credenciales STS efímeras por identidad, revocación = membresía de grupo en Identity Center; el kubeconfig admin queda solo como break-glass | [ADR-005](decisions/ADR-005-iam-access.md) |
@@ -322,5 +322,5 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 
 ## 6. Historial de incidencias
 
-Ver [INCIDENTS.md](INCIDENTS.md) — 7 incidencias con causa raíz y fix (4 del
+Ver [INCIDENTS.md](INCIDENTS.md) — 17 incidencias con causa raíz y fix (4 del
 montaje manual, 3 de la automatización).

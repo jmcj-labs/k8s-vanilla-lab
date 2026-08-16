@@ -564,6 +564,27 @@ failure, not a pass.** Concretely:
 - Prove the decision table, do not read it. The phase-marker bug survived
   review and died to a four-row truth table.
 
+### The fifth face: inside the script that documents this
+
+Codex found it **in this very entry's own enforcement list**. The HA restore
+drill — the file cited below as an example of failing closed — had:
+
+- the **anti-witness check** reading `if kubectl get …; then FAIL; fi`, so a
+  `Forbidden` while RBAC settled after the rewind, a timeout, or an API still
+  coming up all fell through to "it is gone" and PASSED the proof. The exact
+  trap that had to be dodged by hand minutes earlier.
+- `phase_get` / `state_get` back on `|| echo none` — expired credentials or a
+  throttle read as "no progress recorded", i.e. "start from scratch" on a
+  cluster possibly halfway through a restore.
+- a lock that treated **any** put-parameter failure as "someone holds it" and
+  then inferred a resume from the presence of a phase marker, so two
+  concurrent ceremonies could both proceed.
+
+**Writing the rule in prose does not install it in the artefact.** The lesson
+had been documented for a day and was still being committed. That is why the
+enforcement list below is a list of *files*, checked one by one, rather than a
+claim about having learnt something.
+
 ### Where it is enforced
 
 `scripts/guard-legacy-cp-state.sh`, `bootstrap/control-plane.yaml` (genesis
