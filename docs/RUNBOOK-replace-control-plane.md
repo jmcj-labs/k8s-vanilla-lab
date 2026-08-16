@@ -31,17 +31,41 @@ export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
 bash scripts/replace-control-plane.sh <índice>     # 0, 1 o 2
 ```
 
-1. **Un solo reemplazo**: aborta si hay más de un CP no-Ready (con 3 miembros
-   el quorum tolera exactamente uno; dos es un restore, no un reemplazo).
+0. **Lock atómico** (`ConfigMap cp-replacement-lock` en `kube-system`): dos
+   ceremonias no pueden solaparse — `kubectl create` sobre un objeto que ya
+   existe falla, y esa exclusión la arbitra el API server, no la shell. Sin
+   él, dos ejecuciones podrían ver un cluster sano cada una y retirar **dos**
+   miembros. Se libera con `trap` incluso si el script aborta; si quedó
+   huérfano: `kubectl -n kube-system delete configmap cp-replacement-lock`.
+1. **Precondición ligada al índice** — solo dos formas son seguras:
+   - **3/3 sanos** → reemplazo *planificado* de cualquier índice.
+   - **exactamente 2/3 sanos y el índice pedido ES la baja** (Node NotReady
+     o máquina ausente) → reemplazo de *recuperación*.
+
+   Cualquier otra combinación aborta: dos bajas ya no es un reemplazo
+   (es un restore), y pedir sustituir un nodo **sano** mientras otro está
+   caído dejaría el cluster en 1/3.
 2. **Identifica el nodo** por `providerID` → instance-id (el mapeo fiable;
-   los hostnames varían), incluso si la instancia ya está terminada.
+   los hostnames varían), desde EC2 y, si la instancia ya no existe, **desde
+   el state de Tofu**. Nunca continúa sin saber a qué miembro entierra: si el
+   Node ya no está registrado, localiza al huérfano *por eliminación* (el
+   miembro etcd cuyo nombre no corresponde a ningún Node vivo) y aborta si
+   hay más de uno.
 3. **Renueva el material de join** (certificate-key 2h + token 24h) desde un
    superviviente — salvo `SKIP_RENEW=1`, que existe para el drill.
 4. **Retira el miembro etcd muerto** (`etcdctl member remove`) y **borra el
    Node** viejo.
-5. **Recrea la instancia** con `tofu apply -replace=module.control_plane.aws_instance.control_plane[N]`.
-6. **Cierra con capacidad restaurada**: espera 3/3 nodos Ready, 3/3 miembros
-   etcd *started* y 3/3 targets healthy en el TG del API.
+5. **Plan guardado, inspeccionado y aplicado**: `tofu plan -replace=<addr>
+   -out=…`, se comprueba sobre el JSON que **ninguna otra instancia** se
+   destruye o reemplaza, y se aplica **ese** plan. Un `apply -replace` a
+   pelo arrastraría cualquier otro cambio pendiente o derivado.
+6. **Vuelve a borrar el Node viejo** tras el apply: entre el primer borrado y
+   la terminación real de la máquina, su kubelet puede re-registrarlo.
+7. **Cierra con capacidad restaurada y conjuntos EXACTOS** (las invariantes
+   del smoke §14, no meros conteos): exactamente 3 Nodes de control plane y
+   los 3 Ready · exactamente 3 miembros etcd y los 3 *started* ·
+   `etcdctl endpoint health --cluster` sano · y el conjunto de targets
+   healthy **igual** al de instance-ids vivos.
 
 ## El índice 0 no es especial (ya no)
 
@@ -61,23 +85,43 @@ Consecuencias que conviene tener presentes:
   `/etc/kubernetes/manifests/kube-apiserver.yaml` — así el índice 0 recién
   inicializado no intenta unirse a sí mismo.
 
-## Drill de aceptación (pieza 3)
+## Drill de aceptación (pieza 3) — **necesita DOS terminales**
 
-Demuestra la ruta de caducidad end-to-end:
+El paso 2 **se queda esperando** hasta 30 minutos a que el reemplazo se una;
+la renovación del paso 3 tiene que ocurrir **mientras tanto**, no después. La
+ventana es de **6 reintentos separados 120s** (~12 min desde el primer fallo
+de join): renovar dentro de esa ventana y el reintento en curso recoge la
+clave fresca; fuera de ella, el bootstrap se rinde y hay que repetir.
+
+**Terminal A** — deja el reemplazo corriendo y bloqueado a la espera:
 
 ```bash
-# 1. Deja caducar la clave (>2h desde el bootstrap) o invalida el Secret:
+export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+# 1. Invalida el material de CP (equivale a haber pasado las 2h)
 kubectl -n kube-system delete secret kubeadm-certs
 
-# 2. Reemplaza SIN renovar — el join debe fallar y reintentar
+# 2. Reemplaza SIN renovar — el join fallará y reintentará
 SKIP_RENEW=1 bash scripts/replace-control-plane.sh 0
-#    (en el nodo nuevo: /var/log/k8s-cp-bootstrap.log → "Join attempt N/6 ... failed")
+```
+
+**Terminal B** — vigila el fallo y renueva dentro de la ventana:
+
+```bash
+export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+# Espera a ver el primer fallo en el nodo nuevo
+make ssh-cp CP_INDEX=0        # sudo tail -f /var/log/k8s-cp-bootstrap.log
+#   → "Join attempt 1/6 ... failed" · "retrying in 120s (re-fetching certificate-key)"
 
 # 3. Renueva: el reintento en curso recoge la clave fresca (≤120s)
 bash scripts/renew-cp-certificate-key.sh
+```
 
-# 4. Cierre: 3/3 nodos, 3/3 etcd, 3/3 targets
-bash scripts/smoke-test.sh      # o make smoke-test
+De vuelta en **Terminal A**: la ceremonia continúa sola y cierra con los
+conjuntos exactos. Después, la verificación independiente:
+
+```bash
+# 4. Cierre completo del cluster, no solo del reemplazo
+make smoke-test
 ```
 
 ## Tiempos (drill del AAAA-MM-DD — pendiente de ejecución)
@@ -98,3 +142,11 @@ bash scripts/smoke-test.sh      # o make smoke-test
   `etcdctl member remove` desde un superviviente y volver a comprobar.
 - **Dos o más CPs caídos**: esto ya no es un reemplazo —
   [restore HA](RUNBOOK-restore-etcd-ha.md).
+- **"another control-plane replacement is in flight"**: hay una ceremonia
+  viva (el mensaje dice quién y desde cuándo) o murió dejando el lock. Si se
+  confirma que no hay ninguna corriendo:
+  `kubectl -n kube-system delete configmap cp-replacement-lock`.
+- **"plan inspection refused this plan"**: el plan tocaba otras instancias —
+  **no se aplicó nada**. Revisar el `tofu plan` completo a mano: normalmente
+  significa que hay cambios pendientes sin relación con el reemplazo, y esos
+  deben aplicarse (o revertirse) por separado antes de repetir la ceremonia.

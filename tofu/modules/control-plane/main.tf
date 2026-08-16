@@ -169,7 +169,7 @@ resource "aws_iam_role" "control_plane" {
 #
 # SECURITY SPLIT (S2 piece 3, Codex finding): the wildcard below covers the
 # whole cluster path INCLUDING the cp/ subpath (control-plane join command +
-# kubeadm certificate-key). That subpath must be readable by THIS role only:
+# kubeadm certificate-key). That subpath is EXCLUDED FROM THE WORKER ROLE:
 # the worker role enumerates exact parameter ARNs instead of a wildcard —
 # a compromised worker holding the certificate-key could join itself as a
 # control plane. Never widen the worker policy back to the wildcard.

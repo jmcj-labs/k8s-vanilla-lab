@@ -11,17 +11,11 @@
 # threshold to 3: the NEXT single failure then takes the cluster down. The
 # Node object of the old machine lingers too, NotReady, holding its taints.
 #
-# The ceremony therefore:
-#   1. Verifies at most ONE control plane is missing/unhealthy (never
-#      replace two: with 3 members the quorum tolerates exactly one).
-#   2. Renews the join material (certificate-key 2h + token 24h) unless
-#      SKIP_RENEW=1 — the drill sets it to prove the expiry path.
-#   3. Removes the dead etcd member and deletes the stale Node.
-#   4. Recreates exactly that instance with `tofu apply -replace=...`
-#      (NOT -target: a targeted apply would skip the target-group
-#      attachment and leave the new node unregistered in the API endpoint).
-#   5. Waits for the node to rejoin and closes with etcd 3/3 and API
-#      targets 3/3 — capability restored, not merely survived.
+# INVARIANT: exactly ONE control plane is replaced, and it is the one the
+# operator named. Enforced by (a) an ATOMIC cluster-wide lock so two
+# ceremonies cannot interleave, (b) an index-bound precondition, and (c) a
+# SAVED PLAN that is inspected before being applied — never a bare
+# `apply -replace`, which would also carry along whatever else was pending.
 #
 # Requires: kubectl (admin kubeconfig), AWS credentials for the lab, and
 # the tofu working dir initialised (make init).
@@ -32,6 +26,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 TOFU_DIR="${TOFU_DIR:-tofu/envs/lab}"
 SKIP_RENEW="${SKIP_RENEW:-0}"
+LOCK_CM="cp-replacement-lock"
 
 log()  { echo "[$(date -u +'%H:%M:%SZ')] $*"; }
 FAIL() { echo "✗ $*" >&2; exit 1; }
@@ -42,45 +37,100 @@ case "${CP_INDEX}" in ''|*[!0-9]*) FAIL "index must be a number (0..N)";; esac
 T0=$(date -u +%s)
 log "=== Replacing control plane index ${CP_INDEX} (cluster ${CLUSTER_NAME}) ==="
 
-# ── 1. Only ONE replacement at a time ───────────────────────────────────────
-# Count control-plane Nodes that are NOT Ready. Zero is fine (planned
-# replacement of a healthy node); more than one means the quorum is already
-# at its limit and adding churn would destroy it.
-NOT_READY=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers \
-  | awk '$2 != "Ready" {n++} END {print n+0}')
-CP_TOTAL=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers | wc -l | tr -d ' ')
-log "control planes: ${CP_TOTAL} registered, ${NOT_READY} not Ready"
-[ "${NOT_READY}" -le 1 ] || FAIL "${NOT_READY} control planes are not Ready — replacing now would break the quorum. Recover to 2/3 healthy first, or restore (docs/RUNBOOK-restore-etcd-ha.md)"
+# ── 0. ATOMIC LOCK ──────────────────────────────────────────────────────────
+# `kubectl create` on an existing object fails — the API server makes this
+# mutually exclusive across shells, hosts and operators. Without it, two
+# ceremonies could each observe a healthy cluster and each remove a member.
+LOCK_OWNER="$(whoami)@$(hostname)-$$"
+if ! kubectl -n kube-system create configmap "${LOCK_CM}" \
+      --from-literal=owner="${LOCK_OWNER}" \
+      --from-literal=index="${CP_INDEX}" \
+      --from-literal=started="$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1; then
+  HOLDER=$(kubectl -n kube-system get configmap "${LOCK_CM}" \
+    -o jsonpath='{.data.owner} (index {.data.index}, since {.data.started})' 2>/dev/null || echo "unknown")
+  FAIL "another control-plane replacement is in flight: ${HOLDER}
+  If it died, release the lock deliberately:
+    kubectl -n kube-system delete configmap ${LOCK_CM}"
+fi
+release_lock() { kubectl -n kube-system delete configmap "${LOCK_CM}" --ignore-not-found >/dev/null 2>&1 || true; }
+trap release_lock EXIT
+log "✓ ceremony lock acquired (${LOCK_OWNER})"
 
-# ── 2. Identify the node being replaced, via providerID → instance id ───────
-# providerID is the only reliable index→Node mapping (hostnames vary, tags
-# live in EC2). The instance may already be terminated: query without a
-# state filter so a shutting-down/terminated machine is still found.
+# ── 1. Inventory: what SHOULD exist, what does, and in what shape ───────────
+EXPECTED=$(cd "${TOFU_DIR}" && tofu output -json cluster_info 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["control_plane_count"])' 2>/dev/null || echo 3)
+[ "${CP_INDEX}" -lt "${EXPECTED}" ] || FAIL "index ${CP_INDEX} is out of range (cluster has ${EXPECTED} control planes)"
+
+# Registered control-plane Nodes, with the instance id carried in providerID
+NODES_JSON=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o json)
+NODE_TABLE=$(echo "${NODES_JSON}" | python3 -c '
+import json,sys
+for n in json.load(sys.stdin)["items"]:
+    name=n["metadata"]["name"]
+    pid=n["spec"].get("providerID","")
+    inst=pid.rsplit("/",1)[-1] if pid else ""
+    ready="Ready" if any(c["type"]=="Ready" and c["status"]=="True" for c in n["status"]["conditions"]) else "NotReady"
+    print(f"{name}\t{inst}\t{ready}")')
+NODE_TOTAL=$(echo "${NODE_TABLE}" | grep -c . || true)
+NODE_READY=$(echo "${NODE_TABLE}" | awk -F'\t' '$3=="Ready"' | grep -c . || true)
+log "control-plane Nodes: ${NODE_TOTAL} registered, ${NODE_READY} Ready (expected ${EXPECTED})"
+
+# The instance currently carrying this index, from EC2 (terminated ones are
+# still listed for a while) and, failing that, from the tofu state — the
+# ceremony must KNOW which member it is burying, never skip it silently.
 OLD_INSTANCE=$(aws ec2 describe-instances --region "${AWS_REGION}" \
   --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
             "Name=tag:Role,Values=control-plane" \
             "Name=tag:CPIndex,Values=${CP_INDEX}" \
   --query 'sort_by(Reservations[].Instances[], &LaunchTime)[-1].InstanceId' \
   --output text 2>/dev/null || echo "None")
-log "instance carrying CPIndex=${CP_INDEX}: ${OLD_INSTANCE}"
+if [ "${OLD_INSTANCE}" = "None" ] || [ -z "${OLD_INSTANCE}" ]; then
+  OLD_INSTANCE=$(cd "${TOFU_DIR}" && tofu show -json 2>/dev/null | IDX="${CP_INDEX}" python3 -c '
+import json,os,sys
+idx=int(os.environ["IDX"]); addr=f"module.control_plane.aws_instance.control_plane[{idx}]"
+try: st=json.load(sys.stdin)
+except Exception: sys.exit(0)
+def walk(m):
+    for r in m.get("resources",[]):
+        if r.get("address")==addr: print(r["values"].get("id","")); return True
+    for c in m.get("child_modules",[]):
+        if walk(c): return True
+    return False
+walk(st.get("values",{}).get("root_module",{}))' || echo "")
+  [ -n "${OLD_INSTANCE}" ] && log "instance id recovered from tofu state: ${OLD_INSTANCE}"
+fi
+log "instance carrying CPIndex=${CP_INDEX}: ${OLD_INSTANCE:-<none found>}"
 
 OLD_NODE=""
-if [ "${OLD_INSTANCE}" != "None" ] && [ -n "${OLD_INSTANCE}" ]; then
-  OLD_NODE=$(kubectl get nodes -l node-role.kubernetes.io/control-plane \
-    -o jsonpath="{range .items[?(@.spec.providerID)]}{.metadata.name}{'\t'}{.spec.providerID}{'\n'}{end}" \
-    | grep "${OLD_INSTANCE}" | cut -f1 || true)
+OLD_NODE_STATE=""
+if [ -n "${OLD_INSTANCE}" ] && [ "${OLD_INSTANCE}" != "None" ]; then
+  OLD_NODE=$(echo "${NODE_TABLE}" | awk -F'\t' -v i="${OLD_INSTANCE}" '$2==i {print $1}')
+  OLD_NODE_STATE=$(echo "${NODE_TABLE}" | awk -F'\t' -v i="${OLD_INSTANCE}" '$2==i {print $3}')
 fi
-log "Node object for that instance: ${OLD_NODE:-<none registered>}"
+log "Node for that instance: ${OLD_NODE:-<not registered>} ${OLD_NODE_STATE}"
+
+# ── 2. Index-bound precondition ─────────────────────────────────────────────
+# Only two shapes are safe, and both are tied to the index REQUESTED:
+#   a) everything healthy (${EXPECTED}/${EXPECTED} Ready)  → planned replacement
+#   b) exactly one control plane missing or NotReady, AND it is this index
+# Everything else — two failures, or a request to replace a healthy node
+# while another one is already down — would take the quorum with it.
+UNHEALTHY=$(( EXPECTED - NODE_READY ))
+if [ "${NODE_TOTAL}" -eq "${EXPECTED}" ] && [ "${NODE_READY}" -eq "${EXPECTED}" ]; then
+  log "precondition: ${EXPECTED}/${EXPECTED} healthy — PLANNED replacement of index ${CP_INDEX}"
+elif [ "${UNHEALTHY}" -eq 1 ]; then
+  # The single casualty must be exactly the index we were asked to replace:
+  # either its Node is NotReady, or it has no Node at all (machine gone).
+  if [ "${OLD_NODE_STATE}" = "Ready" ]; then
+    FAIL "one control plane is down, but index ${CP_INDEX} is HEALTHY. Replacing it would leave the cluster with 1/${EXPECTED} — recover or replace the failed one instead"
+  fi
+  log "precondition: ${NODE_READY}/${EXPECTED} healthy and index ${CP_INDEX} is the casualty — RECOVERY replacement"
+else
+  FAIL "${UNHEALTHY} control planes are unhealthy/absent (expected at most 1). Replacing now would break the quorum — recover to ${EXPECTED}/${EXPECTED} or restore (docs/RUNBOOK-restore-etcd-ha.md)"
+fi
 
 # A healthy CP to run etcdctl from — never the one being replaced.
-SURVIVOR=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o json | python3 -c "
-import json,sys
-old='''${OLD_NODE}'''.strip()
-for n in json.load(sys.stdin)['items']:
-    name=n['metadata']['name']
-    if name==old: continue
-    if any(c['type']=='Ready' and c['status']=='True' for c in n['status']['conditions']):
-        print(name); break")
+SURVIVOR=$(echo "${NODE_TABLE}" | awk -F'\t' -v old="${OLD_NODE}" '$3=="Ready" && $1!=old {print $1; exit}')
 [ -n "${SURVIVOR}" ] || FAIL "no healthy control plane other than the one being replaced"
 log "etcd operations will run on the survivor: ${SURVIVOR}"
 
@@ -91,6 +141,7 @@ etcdctl_on_survivor() {
     --key /etc/kubernetes/pki/etcd/server.key \
     "$@"
 }
+etcd_members_json() { etcdctl_on_survivor member list -w json 2>/dev/null; }
 
 # ── 3. Renew join material (unless the drill wants the expiry path) ─────────
 if [ "${SKIP_RENEW}" = "1" ]; then
@@ -101,69 +152,144 @@ else
     bash "$(dirname "$0")/renew-cp-certificate-key.sh" "${SURVIVOR}"
 fi
 
-# ── 4. Remove the dead etcd member and the stale Node ───────────────────────
-# The member to remove is the one whose name matches the old Node. If the
-# replacement is planned (node still healthy) it is removed anyway: the
-# machine is about to disappear, and a member that never comes back is
-# exactly what we are avoiding.
+# ── 4. Bury the dead: etcd member + Node ────────────────────────────────────
+# The member is identified by name when the Node is known; when the Node is
+# already gone, by ELIMINATION — the member whose name matches no current
+# control-plane Node. More than one orphan is a multi-failure scenario, not
+# a replacement, and aborts.
+LIVE_NODE_NAMES=$(echo "${NODE_TABLE}" | cut -f1)
+MEMBER_ID=""
+MEMBER_NAME=""
 if [ -n "${OLD_NODE}" ]; then
-  MEMBER_ID=$(etcdctl_on_survivor member list -w json 2>/dev/null | OLD="${OLD_NODE}" python3 -c "
-import json,os,sys
-old=os.environ['OLD']
-for m in json.load(sys.stdin)['members']:
-    if m.get('name')==old:
-        print(format(m['ID'],'x')); break")
-  if [ -n "${MEMBER_ID}" ]; then
-    log "Removing etcd member ${OLD_NODE} (id ${MEMBER_ID})"
-    etcdctl_on_survivor member remove "${MEMBER_ID}" >/dev/null
-    log "✓ etcd member removed — membership is now $(etcdctl_on_survivor member list -w json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["members"]))')"
-  else
-    log "No etcd member named ${OLD_NODE} (already removed)"
-  fi
-  log "Deleting stale Node object ${OLD_NODE}"
-  kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null
+  MEMBER_NAME="${OLD_NODE}"
 else
-  log "No Node object to clean up (instance never registered, or already deleted)"
+  ORPHANS=$(etcd_members_json | LIVE="${LIVE_NODE_NAMES}" python3 -c '
+import json,os,sys
+live={l.strip() for l in os.environ["LIVE"].splitlines() if l.strip()}
+for m in json.load(sys.stdin)["members"]:
+    if m.get("name") and m["name"] not in live: print(m["name"])')
+  ORPHAN_COUNT=$(echo "${ORPHANS}" | grep -c . || true)
+  if [ "${ORPHAN_COUNT}" -gt 1 ]; then
+    FAIL "more than one etcd member has no Node (${ORPHANS//$'\n'/, }) — this is a multi-failure, not a replacement"
+  fi
+  MEMBER_NAME=$(echo "${ORPHANS}" | head -1)
+  [ -n "${MEMBER_NAME}" ] && log "orphan etcd member identified by elimination: ${MEMBER_NAME}"
 fi
 
-# ── 5. Recreate exactly that instance ───────────────────────────────────────
-# -replace, NOT -target: a full plan with one resource replaced also
-# rebuilds the target-group attachment (its target_id changes), so the new
-# node is registered in the API endpoint. A -target apply would not.
-ADDR="module.control_plane.aws_instance.control_plane[${CP_INDEX}]"
-log "Recreating ${ADDR} (tofu apply -replace)"
-( cd "${TOFU_DIR}" && tofu apply -auto-approve -replace="${ADDR}" ) \
-  || FAIL "tofu apply -replace failed"
-NEW_INSTANCE=$(aws ec2 describe-instances --region "${AWS_REGION}" \
-  --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
-            "Name=tag:CPIndex,Values=${CP_INDEX}" \
-            "Name=instance-state-name,Values=running" \
-  --query 'Reservations[].Instances[].InstanceId' --output text)
-log "✓ new instance: ${NEW_INSTANCE}"
+if [ -n "${MEMBER_NAME}" ]; then
+  MEMBER_ID=$(etcd_members_json | NAME="${MEMBER_NAME}" python3 -c '
+import json,os,sys
+name=os.environ["NAME"]
+for m in json.load(sys.stdin)["members"]:
+    if m.get("name")==name: print(format(m["ID"],"x")); break')
+fi
+if [ -n "${MEMBER_ID}" ]; then
+  log "Removing etcd member ${MEMBER_NAME} (id ${MEMBER_ID})"
+  etcdctl_on_survivor member remove "${MEMBER_ID}" >/dev/null
+  log "✓ membership now: $(etcd_members_json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["members"]))') members"
+else
+  log "No etcd member to remove for index ${CP_INDEX} (already removed, or never joined)"
+fi
+if [ -n "${OLD_NODE}" ]; then
+  log "Deleting stale Node ${OLD_NODE}"
+  kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null
+fi
 
-# ── 6. Wait for capability to be RESTORED (not merely for the box to boot) ──
+# ── 5. SAVED PLAN, inspected, then applied ──────────────────────────────────
+# `apply -replace` would also carry along anything else pending in the
+# working tree or drifted in the cloud. Plan → inspect → apply THAT plan:
+# no other control plane (and no worker) may be destroyed or replaced.
+ADDR="module.control_plane.aws_instance.control_plane[${CP_INDEX}]"
+PLAN_FILE=$(mktemp -u)/tfplan
+mkdir -p "$(dirname "${PLAN_FILE}")"
+log "Planning the replacement of ${ADDR}"
+( cd "${TOFU_DIR}" && tofu plan -input=false -replace="${ADDR}" -out="${PLAN_FILE}" >/dev/null ) \
+  || FAIL "tofu plan failed"
+
+( cd "${TOFU_DIR}" && tofu show -json "${PLAN_FILE}" ) | ADDR="${ADDR}" python3 -c '
+import json,os,sys
+target=os.environ["ADDR"]
+plan=json.load(sys.stdin)
+bad=[]; expected=False
+for c in plan.get("resource_changes",[]):
+    actions=c.get("change",{}).get("actions",[])
+    destructive = "delete" in actions
+    addr = c["address"]
+    if addr==target:
+        expected = destructive and "create" in actions
+        continue
+    if destructive and c["type"] == "aws_instance":
+        bad.append(addr + ": " + ",".join(actions))
+if bad:
+    print("PLAN TOUCHES OTHER INSTANCES:")
+    for b in bad: print("   ", b)
+    sys.exit(2)
+if not expected:
+    print("plan does NOT replace " + target)
+    sys.exit(3)
+print("plan verified: only the target control plane is replaced")' \
+  || FAIL "plan inspection refused this plan (see above) — nothing was applied"
+log "✓ plan inspected: only ${ADDR} is replaced"
+
+( cd "${TOFU_DIR}" && tofu apply -input=false "${PLAN_FILE}" ) || FAIL "tofu apply failed"
+rm -f "${PLAN_FILE}"
+
+# The old kubelet can re-register its Node between our delete and the actual
+# termination of the machine — delete again now that the instance is gone.
+if [ -n "${OLD_NODE}" ]; then
+  kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null 2>&1 || true
+fi
+
+# ── 6. Close on capacity RESTORED, with EXACT sets (smoke §14 invariants) ───
 log "Waiting for the replacement to join (bootstrap takes 8-12 min)..."
-DEADLINE=$(( $(date -u +%s) + 1500 ))
-until [ "$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null \
-           | awk '$2 == "Ready" {n++} END {print n+0}')" -eq 3 ] \
-   && [ "$(etcdctl_on_survivor member list -w json 2>/dev/null \
-           | python3 -c 'import json,sys; m=json.load(sys.stdin)["members"]; print(len([x for x in m if x.get("clientURLs")]))' 2>/dev/null || echo 0)" -eq 3 ]; do
-  [ "$(date -u +%s)" -lt "${DEADLINE}" ] || FAIL "replacement did not reach 3/3 nodes + 3/3 etcd members in 25 min (check /var/log/k8s-cp-bootstrap.log on ${NEW_INSTANCE})"
+DEADLINE=$(( $(date -u +%s) + 1800 ))
+while true; do
+  NT=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | grep -c . || true)
+  NR=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | awk '$2=="Ready"' | grep -c . || true)
+  MEM=$(etcd_members_json | python3 -c '
+import json,sys
+m=json.load(sys.stdin)["members"]
+started=[x for x in m if x.get("clientURLs")]
+print(len(m), len(started))' 2>/dev/null || echo "0 0")
+  MEM_TOTAL=${MEM% *}; MEM_STARTED=${MEM#* }
+  if [ "${NT}" -eq "${EXPECTED}" ] && [ "${NR}" -eq "${EXPECTED}" ] \
+     && [ "${MEM_TOTAL}" -eq "${EXPECTED}" ] && [ "${MEM_STARTED}" -eq "${EXPECTED}" ]; then
+    break
+  fi
+  [ "$(date -u +%s)" -lt "${DEADLINE}" ] \
+    || FAIL "not restored in 30 min (Nodes ${NR}/${NT}, etcd ${MEM_STARTED}/${MEM_TOTAL}) — check /var/log/k8s-cp-bootstrap.log on the new instance"
   sleep 30
 done
-log "✓ 3/3 control planes Ready · 3/3 etcd members started"
+log "✓ exactly ${EXPECTED} control-plane Nodes, all Ready · exactly ${EXPECTED} etcd members, all started"
 
-# Fresh deadline: the node-level wait may have consumed the previous one,
-# and target health lags a joining node by a couple of health-check cycles.
-TG_DEADLINE=$(( $(date -u +%s) + 300 ))
+# etcd endpoint health across the whole cluster, not just membership shape
+etcdctl_on_survivor endpoint health --cluster >/dev/null 2>&1 \
+  || FAIL "etcd endpoint health failed after the replacement"
+log "✓ etcd endpoint health: all endpoints healthy"
+
+# API target set must equal EXACTLY the live control-plane instance IDs
 API_TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-api-tg" \
   --region "${AWS_REGION}" --query 'TargetGroups[0].TargetGroupArn' --output text)
-until [ "$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}" \
-          | python3 -c 'import json,sys; t=json.load(sys.stdin)["TargetHealthDescriptions"]; print(len([d for d in t if d["TargetHealth"]["State"]=="healthy"]))')" -eq 3 ]; do
-  [ "$(date -u +%s)" -lt "${TG_DEADLINE}" ] || FAIL "API target group did not reach 3/3 healthy in 5 min"
+CP_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=tag:Role,Values=control-plane" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
+TG_DEADLINE=$(( $(date -u +%s) + 600 ))
+while true; do
+  TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}")
+  HEALTHY_IDS=$(echo "${TARGETS_JSON}" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)["TargetHealthDescriptions"]
+print("\n".join(sorted(d["Target"]["Id"] for d in t if d["TargetHealth"]["State"]=="healthy")))')
+  [ "${HEALTHY_IDS}" = "${CP_IDS}" ] && break
+  [ "$(date -u +%s)" -lt "${TG_DEADLINE}" ] \
+    || FAIL "API target group healthy set != live control planes after 10 min
+  healthy: ${HEALTHY_IDS//$'\n'/ }
+  live:    ${CP_IDS//$'\n'/ }"
   sleep 15
 done
 T1=$(date -u +%s)
-log "✓ API target group: 3/3 healthy"
+log "✓ API target group: healthy set == exactly the ${EXPECTED} live control planes"
 log "=== Replacement complete in $((T1-T0))s — HA capacity RESTORED ==="
 log "record the timing in docs/RUNBOOK-replace-control-plane.md"

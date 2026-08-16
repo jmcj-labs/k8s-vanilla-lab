@@ -22,18 +22,33 @@ log "=== Starting Control Plane bootstrap (founder path) ==="
 # cp/joined-count: the founder publishes it and `tofu destroy` deletes the
 # whole /k8s/<cluster>/ prefix, so on a genuinely fresh apply it is absent.
 #
-# FAIL CLOSED toward NOT initialising: if the parameter exists (even if the
-# API is currently unreachable), this is a replacement — never a genesis.
-# The join script rendered as the next cloud-init part takes over.
-if aws ssm get-parameter \
-     --name "${ssm_parameter_path}/cp/joined-count" \
-     --region ${aws_region} >/dev/null 2>&1; then
+# FAIL CLOSED toward NOT initialising. `if aws ssm get-parameter; then` would
+# treat EVERY failure as "no cluster" — AccessDenied, IMDS credentials not
+# ready yet, an SSM timeout or a network blip would all authorise a second
+# `kubeadm init` on top of a live cluster. Only ONE error means genesis:
+# ParameterNotFound. Parameter present ⇒ replacement; anything else ⇒ abort.
+set +e
+SSM_OUT=$(aws ssm get-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --region ${aws_region} 2>&1)
+SSM_RC=$?
+set -e
+
+if [ $${SSM_RC} -eq 0 ]; then
   log "cp/joined-count exists — a cluster is already running."
   log "This node is a REPLACEMENT of index 0, not the founder: skipping kubeadm init."
   log "The control-plane JOIN script (next cloud-init part) will join it."
   exit 0
 fi
-log "No cluster registered in SSM — this is the genesis of the cluster"
+
+if ! echo "$${SSM_OUT}" | grep -q "ParameterNotFound"; then
+  log "✗ ERROR: could not determine whether a cluster already exists (SSM rc=$${SSM_RC})"
+  log "  $${SSM_OUT}"
+  log "  Refusing to run kubeadm init: an unreadable answer cannot prove this is a genesis,"
+  log "  and initialising on top of a live cluster would create a second, irreconcilable one."
+  exit 1
+fi
+log "ParameterNotFound for cp/joined-count — this is the genesis of the cluster"
 
 # Step 1: Wait for common.yaml bootstrap to complete
 log "Step 1/9: Waiting for common bootstrap to complete"

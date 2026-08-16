@@ -95,6 +95,11 @@ Look for `connection refused` or timeout errors pointing at the API endpoint
 
 **Step 3: Token expired (24h TTL)**
 
+> **Procedimiento manual de último recurso.** La vía normal es el Apply
+> (acuña token fresco y reescribe `join-command` en SSM antes de aplicar) o,
+> para control planes, `scripts/renew-cp-certificate-key.sh`. Los comandos de
+> abajo son para diagnosticar a mano cuando esas vías no están disponibles.
+
 Bootstrap tokens expire after 24 hours. If a worker needs to rejoin after that window:
 
 ```bash
