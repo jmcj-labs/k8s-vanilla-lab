@@ -1,3 +1,14 @@
+terraform {
+  required_version = ">= 1.6"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+  }
+}
+
 # Internet-facing NLB in front of the shared Gateway — S2 piece 2.
 #
 # Decisions ratified in brief #S2-2 (all closed, do not re-litigate):

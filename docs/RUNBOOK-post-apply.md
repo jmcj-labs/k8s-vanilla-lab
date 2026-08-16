@@ -77,7 +77,7 @@ grpcurl -insecure -authority routing.logistics.lab "${NLB_DNS}:443" \
   list logistics.routing.v1.RoutingService
 ```
 
-Grafana ya **no** tiene NodePort: 
+Grafana ya **no** tiene NodePort:
 `kubectl port-forward -n infra svc/kube-prometheus-stack-grafana 3000:80`.
 
 ## 3. Deploy y verificación
