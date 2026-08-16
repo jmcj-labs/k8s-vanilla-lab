@@ -49,9 +49,11 @@ run() {
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BACKUP_BUCKET="${BACKUP_BUCKET:-${CLUSTER_NAME}-backups-${ACCOUNT_ID}}"
 
-# CP inventory by INDEX (0 = founder) from the tofu outputs
-mapfile -t CP_PUB < <(cd "${TOFU_DIR}" && tofu output -json control_plane_public_ips | jq -r '.[]')
-mapfile -t CP_PRIV < <(cd "${TOFU_DIR}" && tofu output -json control_plane_private_ips | jq -r '.[]')
+# CP inventory by INDEX (0 = founder) from the tofu outputs.
+# Word-splitting on purpose (IPs carry no spaces): macOS ships bash 3.2,
+# which has no mapfile.
+CP_PUB=($(cd "${TOFU_DIR}" && tofu output -json control_plane_public_ips | jq -r '.[]'))
+CP_PRIV=($(cd "${TOFU_DIR}" && tofu output -json control_plane_private_ips | jq -r '.[]'))
 [ "${#CP_PUB[@]}" -eq 3 ] || FAIL "expected 3 CP public IPs from tofu output, got ${#CP_PUB[@]}"
 declare -a CP_NAME
 for i in 0 1 2; do
