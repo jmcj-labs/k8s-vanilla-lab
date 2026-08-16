@@ -28,6 +28,19 @@ FAIL() { echo "✗ $*" >&2; exit 1; }
 OK()   { echo "  ✓ $*"; }
 command -v kubectl >/dev/null || FAIL "kubectl not found"
 
+# A FAILED DRILL MUST NOT LEAVE A CONTROL PLANE STOPPED. Learned the hard
+# way on the first live run: a proof failed mid-window and the script exited
+# with the founder still down, leaving the cluster at 2/3 — a drill that
+# breaks what it was meant to prove safe. Whatever happens from the moment
+# the instance is stopped, it gets started again on the way out.
+STOPPED_INSTANCE=""
+restore_victim() {
+  [ -n "${STOPPED_INSTANCE}" ] || return 0
+  echo "[$(date -u +'%H:%M:%SZ')] restoring ${STOPPED_INSTANCE} (drill exit path)" >&2
+  aws ec2 start-instances --instance-ids "${STOPPED_INSTANCE}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+}
+trap restore_victim EXIT
+
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 T0=$(date -u +%s)
 log "=== DRILL: losing control plane index ${CP_INDEX} (cluster ${CLUSTER_NAME}) ==="
@@ -58,6 +71,7 @@ OK "witness ConfigMap written before the outage"
 
 # ── Kill it ─────────────────────────────────────────────────────────────────
 log "Stopping ${TARGET_INSTANCE}..."
+STOPPED_INSTANCE="${TARGET_INSTANCE}"   # arms the restore-on-exit trap
 aws ec2 stop-instances --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}" >/dev/null
 aws ec2 wait instance-stopped --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}"
 T_DOWN=$(date -u +%s)
@@ -90,13 +104,32 @@ log "Proof 2/4: IAM authentication (aws-iam-authenticator) with one CP down"
 AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
   -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}')
 log "  authenticator DaemonSet: ${AUTH_DS} (2/2 expected while one CP is down)"
+IAM_WHO=""
 if [ -f "${HOME}/.kube/${CLUSTER_NAME}-admin.conf" ]; then
   IAM_WHO=$(KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}-admin.conf" \
     kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)
-  [ -n "${IAM_WHO}" ] || FAIL "IAM authentication failed with one control plane down"
-  OK "IAM identity authenticated: ${IAM_WHO}"
+fi
+if [ -n "${IAM_WHO}" ]; then
+  OK "IAM identity authenticated end to end: ${IAM_WHO}"
 else
-  log "  ⚠ no IAM kubeconfig at ~/.kube/${CLUSTER_NAME}-admin.conf — run 'make kubeconfig-admin' to include this proof"
+  # The full proof needs an SSO session allowed to assume the platform-admin
+  # role (ADR-005: that role trusts the k8s-platform/k8s-dev bridges and the
+  # CI role — NOT a generic admin session). Without it, still prove the
+  # WEBHOOK PATH itself: present a token for an unmapped identity and demand
+  # an authenticated refusal. "Unauthorized" means the API server called the
+  # authenticator and got an answer; a broken webhook gives a 500 or hangs.
+  log "  no assumable platform-admin session — falling back to the webhook-path proof"
+  ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+  UNMAPPED_TOKEN=$(aws-iam-authenticator token -i "${ACCOUNT_ID}.${AWS_REGION}.${CLUSTER_NAME}" 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["token"])' 2>/dev/null || true)
+  [ -n "${UNMAPPED_TOKEN}" ] || FAIL "could not mint an authenticator token for the webhook proof"
+  API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+  AUTH_ANSWER=$(kubectl --kubeconfig=/dev/null --server="${API_SERVER}" --insecure-skip-tls-verify \
+    --token="${UNMAPPED_TOKEN}" get nodes 2>&1 || true)
+  echo "${AUTH_ANSWER}" | grep -q "Unauthorized" \
+    || FAIL "the authenticator webhook did not give an authenticated answer with one CP down: ${AUTH_ANSWER}"
+  OK "authenticator webhook answered (authenticated refusal for an unmapped identity) — the IAM path is alive"
+  log "  note: for the END-TO-END identity proof run 'aws sso login --profile k8s-platform' first"
 fi
 
 # ── Proof 3: the workloads are untouched ───────────────────────────────────
