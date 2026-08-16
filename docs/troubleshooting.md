@@ -17,10 +17,13 @@ kubectl logs -n kube-system -l app.kubernetes.io/part-of=cilium --tail=20
 ```
 
 If Cilium pods are in `CrashLoopBackOff`, re-apply manually (run on the control
-plane, where `hostname -i` resolves to the CP private IP — Cilium runs in strict
-kube-proxy replacement mode and needs the API server address explicitly):
+plane — Cilium runs in strict kube-proxy replacement mode and needs the API
+server address explicitly. Since ADR-007 that address is the **NLB DNS**
+(`controlPlaneEndpoint`), never a node IP — read it from admin.conf):
 
 ```bash
+K8S_HOST=$(kubectl --kubeconfig /etc/kubernetes/admin.conf config view \
+  -o jsonpath='{.clusters[0].cluster.server}' | sed -E 's|https://(.*):6443|\1|')
 helm repo add cilium https://helm.cilium.io/
 helm repo update
 helm upgrade --install cilium cilium/cilium \
@@ -28,7 +31,7 @@ helm upgrade --install cilium cilium/cilium \
   --version 1.19.6 \
   --set ipam.mode=kubernetes \
   --set kubeProxyReplacement=true \
-  --set k8sServiceHost=$(hostname -i | awk '{print $1}') \
+  --set k8sServiceHost=${K8S_HOST} \
   --set k8sServicePort=6443 \
   --set gatewayAPI.enabled=true \
   --set gatewayAPI.externalTrafficPolicy=Cluster \

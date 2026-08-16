@@ -38,7 +38,7 @@ aunque el login de arriba haya ido bien (tabla completa en
 export AWS_PROFILE=k8s-vanilla-lab     # o direnv con .envrc
 make kubeconfig                        # → ~/.kube/k8s-vanilla-lab.conf
 export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
-kubectl get nodes                      # 4/4 Ready
+kubectl get nodes                      # 6/6 Ready (3 CPs + 3 workers desde S2-3)
 ```
 
 ## 2. Refresh de variables en logistics-lab (solo cambian 2)

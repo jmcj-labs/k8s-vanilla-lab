@@ -20,10 +20,13 @@ este documento no lo duplica, lo referencia.
 
 ## 2. Arquitectura
 
-**Cómputo**: 1 control plane t3.medium on-demand (+EIP) · 3 workers t3.medium
-spot (3, no 2: anti-affinity real para la topología de datos de fase 2 —
-CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS · IMDSv2 obligatorio con hop limit 3 ·
-EBS cifrado.
+**Cómputo**: **3 control planes t3.medium on-demand con etcd stacked (S2-3,
+ADR-007** — HA de nodo: sobrevive a perder un CP; **una sola AZ**, no es HA
+zonal) · 3 workers t3.medium spot (3, no 2: anti-affinity real para la
+topología de datos de fase 2 — CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS ·
+IMDSv2 obligatorio con hop limit 3 · EBS cifrado. El EIP del CP **ya no
+existe**: IPs públicas auto-asignadas solo para SSH/egress; ningún consumidor
+ancla a IPs de nodo.
 
 **Red**: VPC dedicada `10.0.0.0/16`, subred pública `10.0.1.0/24` (sin NAT
 por coste) · pods `10.244.0.0/16` · services `10.96.0.0/12` · **sin
@@ -31,9 +34,15 @@ kube-proxy** — Cilium en strict kube-proxy replacement (routing en modo
 tunnel, masquerade iptables). **Entrada de aplicación: NLB internet-facing
 (S2-2)** — TCP/443 en passthrough hacia el NodePort determinista **30443**
 del Gateway (fuente de verdad en Tofu, `gateway_nodeport`); el SG de
-workers solo acepta ese puerto desde el SG del NLB. SSH (`my_ip`) y API
-:6443 mantienen su régimen. DNS del NLB nuevo en cada apply (output
-`nlb_dns_name`), sin Route53 hasta post-S4.
+workers solo acepta ese puerto desde el SG del NLB. **El MISMO NLB es el
+endpoint del API (S2-3, ADR-007)**: listener TCP/6443 → TG propio hacia los
+3 CPs (`preserve_client_ip=false` — los CPs son clientes del endpoint que
+los tiene como targets, hairpin), `controlPlaneEndpoint` de kubeadm = DNS
+del NLB, y el SG de CPs solo acepta 6443 desde el SG del NLB (murió
+`0.0.0.0/0:6443`). Acoplamiento app/API en un recurso: **declarado y
+aceptado en lab**. SSH (`my_ip`) mantiene su régimen. DNS del NLB nuevo en
+cada apply (output `nlb_dns_name`) — **el refresh de `K8S_SERVER` sigue
+vivo** —, sin Route53 hasta post-S4.
 
 **Versiones** (las series sin pin se resuelven en cada bootstrap):
 
@@ -107,7 +116,11 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | **Targets `instance` sobre NodePort determinista 30443** | IP targets descartados por diseño: VIP LB-IPAM no anunciada, pods inalcanzables en tunnel mode, acoplamiento a direcciones | brief S2-2 |
 | **Sin Proxy Protocol v2** | En Cilium es global por Gateway: rompería el acceso in-cluster directo a la VIP y los health checks; la IP de cliente se preserva nativa (instance+TCP) y viaja en X-Forwarded-For | brief S2-2 |
 | **Health check TCP (no HTTPS) + fail-open asumido** | HTTPS sin SNI daría falsos negativos; TCP prueba datapath, el e2e prueba semántica. El NLB hace fail-open con todo unhealthy → **la seguridad descansa en los SG, nunca en el health state** | brief S2-2 |
-| **Cross-zone OFF explícito** | Una sola AZ hoy: el NLB no añade resiliencia zonal y fingirlo en config sería mentir — eso es la pieza 3 | brief S2-2 |
+| **Cross-zone OFF explícito** | Una sola AZ hoy: el NLB no añade resiliencia zonal y fingirlo en config sería mentir. La pieza 3 entregó HA **de nodo** (3 CPs, misma AZ); la zonal queda como deuda consciente post-S2 | brief S2-2 corregido por S2-3 |
+| **API por el NLB, listener TCP/6443 y TG propio (`preserve_client_ip=false`)** | Endpoint estable que sobrevive a cualquier CP; hairpin CP→NLB→CP exige no preservar IP (AWS lo desaconseja con targets-clientes); el TG de aplicación conserva `true` — ambos explícitos | [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
+| **CP SG: 6443 solo desde el SG del NLB** | La API sigue pública por diseño (ADR-004) pero por la puerta única; prueba negativa sobre las 3 IPs públicas de CP en smoke §14 | ADR-007 |
+| **Join de CPs secuenciado por gate SSM (`cp/joined-count`)** | La guía HA de kubeadm exige joins de CP de uno en uno; el gate serializa sin lock server | ADR-007 |
+| **Path SSM `cp/` exclusivo del role de CP** | El certificate-key eleva a control plane a quien lo tenga; el role de worker enumera ARNs exactos y no lo ve (hallazgo Codex S2-3) | ADR-007 |
 | Bucket de backups único y **persistente** (stack propio, manual) | Los backups deben sobrevivir a cualquier destroy del cluster; consumo por variable, no remote state — grafos desacoplados | brief S2-1, `tofu/envs/persistent` |
 | etcd backup con **instance role** vs barman con **usuario IAM** | El CronJob es hostNetwork en el CP (IMDS le funciona sin tocar la CCNP); los pods CNPG están tras el deny de IMDS que NO se agujerea — credencial estática mínima, acotada a `cnpg/*` | brief S2-1 |
 | Snapshots etcd write-only desde el CP (`s3:PutObject` a `etcd/*`, nada más) | Un CP comprometido no puede leer ni borrar los backups existentes | brief S2-1 |
@@ -159,10 +172,14 @@ nombrando el perfil y el login exacto:
 
 Historia del cepo (`Token has expired` sin dueño): `docs/troubleshooting.md`.
 
-**FinOps**: ~$0.055/h (CP $0.038 + 3×spot $0.0055) ≈ **$1.3/día** si se deja
-encendido. El cron de destroy nocturno está **pausado** durante el sprint —
-el cluster no se apaga solo: destruir a mano al terminar el día. Slack
-notifica cada apply (coste/hora) y cada destroy (uptime y coste estimado).
+**FinOps**: con S2-3 el control plane pasa a 3× on-demand: CP 3×$0.038 +
+3×spot + NLB (~$0.55/día) + IPv4 públicas ≈ **~4,8–5 $/día encendido**
+(estimación del brief S2-3: +2,7–2,9 $/día sobre la pieza 2, que iba en
+~2,1 $/día). **Pendiente: fijar el número real con Cost Explorer tras el
+primer apply HA y anotarlo aquí.** El cron de destroy nocturno está
+**pausado** durante el sprint — el cluster no se apaga solo: destruir a
+mano al terminar el día. Slack notifica cada apply (coste/hora) y cada
+destroy (uptime y coste estimado).
 
 ## 5. Límites conocidos (deuda consciente)
 
@@ -175,14 +192,24 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   excepción (caché STS ~1h).
 - ~~Exposición del Gateway por NodePort~~ **CERRADA (2026-08-16, S2-2)**:
   NLB internet-facing en passthrough, NodePort 30443 solo desde el SG del
-  NLB, prueba negativa en el smoke. Nota vigente: **sin resiliencia zonal**
-  (una AZ, cross-zone off) hasta la pieza 3; Grafana pasó a port-forward.
+  NLB, prueba negativa en el smoke; Grafana pasó a port-forward.
+- **Sin resiliencia zonal** (una AZ, cross-zone off): la pieza 3 entregó HA
+  **de nodo** (3 CPs, etcd stacked, misma AZ) — perder la AZ sigue matando
+  el cluster (camino: restore HA desde S3, runbook probado). Deuda
+  consciente post-S2; el comentario que prometía "zonal en la pieza 3"
+  queda corregido (brief S2-3, decisión 5).
+- **Acoplamiento app/API en el NLB único** (ADR-007): una mutación mala del
+  NLB afecta a la entrada de aplicación Y al endpoint del API a la vez.
+  Declarado y aceptado en lab; un NLB dedicado por plano es el camino si
+  esto dejara de ser un lab.
 - ~~Ingreso sin e2e probado~~ **CERRADA (2026-08-15)**: e2e exterior en la
   coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
   desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
   evidencia en [HANDOFF.md](HANDOFF.md). La exposición es el NLB desde S2-2.
-- **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
-  ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
+- **API 6443 pública (por el NLB desde S2-3)** y **kubeconfig admin en SSM**
+  (ya solo break-glass, ADR-005) — aceptable en lab efímero, inaceptable en
+  cualquier otro contexto. Desde ADR-007 los CPs ya no exponen 6443 al mundo
+  (solo al SG del NLB); la puerta pública es el listener del NLB.
 - **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el
   tráfico a la LB del Gateway se redirige a Envoy (`to-proxy`) antes de la
   egress policy, así que una CNP de egress ni la puerta ni hace falta

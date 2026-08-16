@@ -1,8 +1,15 @@
 # ADR-004: Kubeconfig Distribution via SSM Parameter Store
 
-**Status**: Accepted  
+**Status**: Accepted — amended by [ADR-007](ADR-007-api-endpoint-nlb.md) (S2 piece 3)  
 **Date**: 2026-05-22  
 **Deciders**: Platform Engineering Team
+
+> **Amendment (2026-08-16, ADR-007)**: the `server:` URL stored in SSM is no
+> longer the control plane's EIP — it is the **NLB's DNS on TCP/6443**
+> (`controlPlaneEndpoint`; the EIP no longer exists). The API remains public
+> *by design* as stated below, but the door is the NLB: the CP security group
+> accepts 6443 **only from the NLB's SG**, and `api_server_allowed_cidrs` is
+> gone. Everything else in this ADR stands.
 
 ---
 
@@ -57,7 +64,7 @@ On `tofu destroy`, a `terraform_data` destroy-time provisioner deletes all param
 - **Admin credentials in SSM**: The stored kubeconfig grants full cluster-admin access. Acceptable for a short-lived lab cluster; unacceptable for long-lived or shared environments
 - **24h+ window**: Credentials persist in SSM until `tofu destroy` is run. A `--ttl` equivalent does not exist for SSM; the destroy-time provisioner is the cleanup mechanism
 - **Bootstrap failure leaves nothing**: If the control plane bootstrap fails after `kubeadm init` but before Step 7.5, the kubeconfig is not stored. CI must handle a missing parameter gracefully (fall back to skip or fail explicitly)
-- **API server must be publicly reachable**: using the kubeconfig from CI runners (dynamic IPs) requires 6443 open to 0.0.0.0/0 (`api_server_allowed_cidrs` default) — TLS + cert auth is the access control; SSH stays restricted to `my_ip`
+- **API server must be publicly reachable**: using the kubeconfig from CI runners (dynamic IPs) requires a public 6443 — TLS + cert auth is the access control; SSH stays restricted to `my_ip`. *Since ADR-007 the public 6443 lives on the NLB's SG; the CP nodes themselves only accept it from the NLB.*
 
 ---
 
