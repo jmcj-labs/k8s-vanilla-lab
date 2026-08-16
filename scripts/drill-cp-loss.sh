@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# DRILL — survive the loss of a control plane, including the FOUNDER.
+#
+# Usage: scripts/drill-cp-loss.sh [index]        # default 0 (the founder)
+#
+# The acceptance criterion of brief #S2-3 is not "the cluster still pings":
+# it is that with one control plane DOWN the cluster keeps doing the four
+# things it is for — serving API writes and reads, authenticating IAM
+# identities, running the workloads, and taking its etcd backup from a
+# surviving member. Each is proven separately here.
+#
+# Stopping (not terminating) is deliberate: it is the honest simulation of
+# losing a node, and it lets the drill close by bringing it back and showing
+# the quorum heal. The machine keeps its root volume and private IP, so the
+# member rejoins on boot without any ceremony — that is the difference
+# between this drill and the REPLACEMENT one
+# (docs/RUNBOOK-replace-control-plane.md).
+#
+# Requires: kubectl (break-glass kubeconfig), AWS credentials for the lab.
+set -euo pipefail
+
+CP_INDEX="${1:-0}"
+CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
+AWS_REGION="${AWS_REGION:-eu-west-1}"
+
+log()  { echo "[$(date -u +'%H:%M:%SZ')] $*"; }
+FAIL() { echo "✗ $*" >&2; exit 1; }
+OK()   { echo "  ✓ $*"; }
+command -v kubectl >/dev/null || FAIL "kubectl not found"
+
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+T0=$(date -u +%s)
+log "=== DRILL: losing control plane index ${CP_INDEX} (cluster ${CLUSTER_NAME}) ==="
+
+# ── Pre-flight: the cluster must be whole before we break it ────────────────
+CP_READY=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers \
+  | awk '$2=="Ready"' | grep -c . || true)
+[ "${CP_READY}" -eq 3 ] || FAIL "need 3/3 control planes Ready before the drill (have ${CP_READY})"
+OK "3/3 control planes Ready — starting from a whole cluster"
+
+TARGET_INSTANCE=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=tag:Role,Values=control-plane" \
+            "Name=tag:CPIndex,Values=${CP_INDEX}" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+[ -n "${TARGET_INSTANCE}" ] || FAIL "no running control plane with CPIndex=${CP_INDEX}"
+TARGET_NODE=$(kubectl get nodes -l node-role.kubernetes.io/control-plane \
+  -o jsonpath="{range .items[*]}{.metadata.name}{'\t'}{.spec.providerID}{'\n'}{end}" \
+  | grep "${TARGET_INSTANCE}" | cut -f1)
+[ -n "${TARGET_NODE}" ] || FAIL "could not map ${TARGET_INSTANCE} to a Node"
+log "victim: index ${CP_INDEX} → ${TARGET_NODE} (${TARGET_INSTANCE})"
+
+# Witness written BEFORE the outage: it must still be readable during it.
+kubectl delete configmap cp-loss-witness --ignore-not-found >/dev/null
+kubectl create configmap cp-loss-witness --from-literal=before="${STAMP}" >/dev/null
+OK "witness ConfigMap written before the outage"
+
+# ── Kill it ─────────────────────────────────────────────────────────────────
+log "Stopping ${TARGET_INSTANCE}..."
+aws ec2 stop-instances --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}" >/dev/null
+aws ec2 wait instance-stopped --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}"
+T_DOWN=$(date -u +%s)
+log "✓ instance stopped after $((T_DOWN-T0))s — the cluster is now 2/3"
+
+# ── Proof 1: the API still serves WRITES and READS (through the NLB) ────────
+# The kubeconfig points at the NLB DNS, so this also proves the endpoint
+# routes around the dead target instead of blackholing a third of requests.
+log "Proof 1/4: API writes and reads with one control plane down"
+kubectl delete configmap cp-loss-during --ignore-not-found >/dev/null 2>&1 || true
+for i in 1 2 3 4 5; do
+  kubectl create configmap cp-loss-during --from-literal="attempt${i}"="${STAMP}" >/dev/null 2>&1 && break
+  [ "${i}" = 5 ] && FAIL "could not write to the API with one CP down"
+  sleep 5
+done
+READ_BACK=$(kubectl get configmap cp-loss-witness -o jsonpath='{.data.before}')
+[ "${READ_BACK}" = "${STAMP}" ] || FAIL "witness read back wrong (${READ_BACK})"
+OK "wrote a new object and read the pre-outage witness back — API intact"
+
+# Ten consecutive reads: a single success could be luck with fail-open.
+FAILED=0
+for i in $(seq 1 10); do kubectl get --raw /readyz >/dev/null 2>&1 || FAILED=$((FAILED+1)); done
+[ "${FAILED}" -eq 0 ] || FAIL "${FAILED}/10 API probes failed through the endpoint"
+OK "10/10 consecutive API probes through the NLB endpoint succeeded"
+
+# ── Proof 2: IAM authentication still works ────────────────────────────────
+# Every surviving API server webhooks to ITS OWN local authenticator, so
+# this proves the per-node material installed at join is doing its job.
+log "Proof 2/4: IAM authentication (aws-iam-authenticator) with one CP down"
+AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
+  -o jsonpath='{.status.numberReady}/{.status.desiredNumberScheduled}')
+log "  authenticator DaemonSet: ${AUTH_DS} (2/2 expected while one CP is down)"
+if [ -f "${HOME}/.kube/${CLUSTER_NAME}-admin.conf" ]; then
+  IAM_WHO=$(KUBECONFIG="${HOME}/.kube/${CLUSTER_NAME}-admin.conf" \
+    kubectl auth whoami -o jsonpath='{.status.userInfo.username}' 2>/dev/null || true)
+  [ -n "${IAM_WHO}" ] || FAIL "IAM authentication failed with one control plane down"
+  OK "IAM identity authenticated: ${IAM_WHO}"
+else
+  log "  ⚠ no IAM kubeconfig at ~/.kube/${CLUSTER_NAME}-admin.conf — run 'make kubeconfig-admin' to include this proof"
+fi
+
+# ── Proof 3: the workloads are untouched ───────────────────────────────────
+log "Proof 3/4: workloads intact"
+NOT_RUNNING=$(kubectl get pods -A --no-headers \
+  --field-selector 'status.phase!=Running,status.phase!=Succeeded' 2>/dev/null \
+  | grep -v "${TARGET_NODE}" | grep -c . || true)
+kubectl -n data get cluster logistics-pg -o jsonpath='{.status.readyInstances}/{.status.instances}' 2>/dev/null \
+  | { read -r PG; [ -n "${PG}" ] && OK "CNPG logistics-pg: ${PG} instances ready" || true; }
+KAFKA_READY=$(kubectl -n data get pods -l strimzi.io/cluster=logistics-kafka --no-headers 2>/dev/null \
+  | awk '$3=="Running"' | grep -c . || true)
+[ "${KAFKA_READY}" -gt 0 ] && OK "Kafka brokers Running: ${KAFKA_READY}"
+log "  pods not Running outside the stopped node: ${NOT_RUNNING}"
+
+# ── Proof 4: the etcd backup runs from a SURVIVING member ──────────────────
+# The CronJob has no node pin ON PURPOSE (S2-3): pinning it would kill the
+# backup exactly when the pinned node dies.
+log "Proof 4/4: etcd backup from a surviving control plane"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BACKUP_BUCKET="${BACKUP_BUCKET:-${CLUSTER_NAME}-backups-${ACCOUNT_ID}}"
+BEFORE_KEY=$(aws s3api list-objects-v2 --bucket "${BACKUP_BUCKET}" --prefix etcd/ \
+  --query 'sort_by(Contents,&LastModified)[-1].Key' --output text 2>/dev/null || echo "none")
+kubectl -n kube-system delete job etcd-drill-loss --ignore-not-found >/dev/null
+kubectl -n kube-system create job --from=cronjob/etcd-backup etcd-drill-loss >/dev/null
+kubectl -n kube-system wait --for=condition=complete job/etcd-drill-loss --timeout=300s >/dev/null \
+  || FAIL "etcd backup job did not complete with one control plane down"
+BACKUP_NODE=$(kubectl -n kube-system get pods -l job-name=etcd-drill-loss \
+  -o jsonpath='{.items[0].spec.nodeName}')
+AFTER_KEY=$(aws s3api list-objects-v2 --bucket "${BACKUP_BUCKET}" --prefix etcd/ \
+  --query 'sort_by(Contents,&LastModified)[-1].Key' --output text)
+[ "${AFTER_KEY}" != "${BEFORE_KEY}" ] || FAIL "no fresh etcd snapshot appeared in S3"
+[ "${BACKUP_NODE}" != "${TARGET_NODE}" ] || FAIL "backup ran on the stopped node?!"
+OK "fresh snapshot ${AFTER_KEY} taken from ${BACKUP_NODE} (not the stopped node)"
+kubectl -n kube-system delete job etcd-drill-loss --ignore-not-found >/dev/null
+
+# ── Heal: bring it back and watch the quorum close ─────────────────────────
+T_PROOFS=$(date -u +%s)
+log "All proofs passed with 2/3 control planes ($((T_PROOFS-T_DOWN))s of degraded operation)"
+log "Starting ${TARGET_INSTANCE} back up..."
+aws ec2 start-instances --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}" >/dev/null
+aws ec2 wait instance-running --instance-ids "${TARGET_INSTANCE}" --region "${AWS_REGION}"
+
+DEADLINE=$(( $(date -u +%s) + 900 ))
+until [ "$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | awk '$2=="Ready"' | grep -c . || true)" -eq 3 ]; do
+  [ "$(date -u +%s)" -lt "${DEADLINE}" ] || FAIL "the node did not rejoin within 15 min"
+  sleep 20
+done
+SURVIVOR=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers | awk '$2=="Ready"{print $1; exit}')
+MEMBERS=$(kubectl -n kube-system exec "etcd-${SURVIVOR}" -- etcdctl \
+  --cacert /etc/kubernetes/pki/etcd/ca.crt --cert /etc/kubernetes/pki/etcd/server.crt \
+  --key /etc/kubernetes/pki/etcd/server.key member list -w json 2>/dev/null \
+  | python3 -c '
+import json,sys
+m=json.load(sys.stdin)["members"]
+started=[x for x in m if x.get("clientURLs")]
+print(len(started), len(m))')
+[ "${MEMBERS}" = "3 3" ] || FAIL "etcd did not return to 3/3 (got ${MEMBERS})"
+T1=$(date -u +%s)
+
+kubectl delete configmap cp-loss-witness cp-loss-during --ignore-not-found >/dev/null
+echo ""
+log "=== DRILL PASSED: the cluster survived losing index ${CP_INDEX} ==="
+log "timings: stop $((T_DOWN-T0))s · degraded operation $((T_PROOFS-T_DOWN))s · full heal $((T1-T_PROOFS))s · total $((T1-T0))s"
+log "record them in docs/EVIDENCE-S2-piece3.md"

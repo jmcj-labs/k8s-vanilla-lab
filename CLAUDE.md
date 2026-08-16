@@ -56,6 +56,7 @@ k8s-vanilla-lab/
 │   ├── guard-legacy-cp-state.sh    # Fail-closed: refuses apply over a pre-HA state (make apply + CI)
 │   ├── replace-control-plane.sh    # Ceremony: replace ONE CP (etcd member remove → -replace → 3/3)
 │   ├── renew-cp-certificate-key.sh # Ceremony: renew CP join material (key 2h + token 24h)
+│   ├── drill-cp-loss.sh            # Drill: survive losing a CP (API/IAM/workloads/backup proofs)
 │   ├── drill-restore-etcd-ha.sh    # Drill: HA etcd restore (logical cluster reconstruction)
 │   └── smoke-test.sh               # Cluster + platform verification (invoked by make smoke-test)
 ├── platform/
