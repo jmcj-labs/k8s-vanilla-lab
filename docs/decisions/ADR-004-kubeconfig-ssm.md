@@ -35,8 +35,10 @@ After `kubeadm init` completes, the bootstrap script stores a patched kubeconfig
 The server URL patch is applied inline with `sed` before the value is pushed:
 
 ```bash
+# Since ADR-007 the target is the NLB DNS (admin.conf already points there
+# via controlPlaneEndpoint — the sed is belt-and-braces normalization):
 KUBECONFIG_PATCHED=$(sed \
-  "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
+  "s|server: https://.*:6443|server: https://${api_endpoint_dns}:6443|" \
   /etc/kubernetes/admin.conf)
 aws ssm put-parameter \
   --name "${ssm_parameter_path}/kubeconfig" \

@@ -17,7 +17,7 @@
 ```yaml
 clusterName: ${cluster_name}
 region: ${aws_region}
-apiServer: ${control_plane_public_ip}:6443
+apiServer: ${api_endpoint_dns}:6443
 ```
 
 **These are replaced by OpenTofu BEFORE the file is passed to cloud-init.**
