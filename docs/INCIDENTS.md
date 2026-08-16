@@ -459,3 +459,54 @@ Two things the live run taught that the plan did not anticipate:
 proves the channel on every apply — exact inventory, all `Online`, a canary
 Run Command per node, the absence of inbound TCP/22, and (locally, where the
 plugin exists) an interactive shell that opens and runs a command.
+
+---
+
+## 17. The optimistic condition: four faces of one bug, in one piece
+
+**When**: 2026-08-16, S2 piece 3 (HA) and its closing deliverable.
+**Severity**: none reached production — every instance was caught by a cross
+review or by executing. That is the point of recording it.
+
+### The pattern
+
+Four times in one piece, a check that could not determine something decided
+**"fine, carry on"**:
+
+| Where | The optimistic condition | What it would have allowed |
+|---|---|---|
+| Recreate guard | `tofu state list 2>/dev/null \|\| true` | Any credential/backend/lock failure read as "empty state" → apply over the pre-HA singleton |
+| Founder autodetect | `if aws ssm get-parameter; then` | Any SSM error read as "no cluster" → a second `kubeadm init` on top of a live one |
+| Ceremony inventory | `tofu output ... \|\| echo 3` | An unreadable state read as "3 control planes" → destructive ceremony against an invented number |
+| Restore phase markers | flag set on meeting the completed phase | Every phase read as "already done" → a restore that skips the restore |
+
+Different files, different days, different reviewers catching them. Same
+shape: **the absence of an answer treated as a good answer.**
+
+### Why it keeps happening
+
+Shell makes the optimistic form the *shorter* one. `|| true`, `|| echo N`
+and `if cmd; then` are what fingers type; the fail-closed version always
+costs more lines — capture the exit code, capture stderr, name the ONE
+signature that legitimately means "nothing there", abort on everything else.
+The cheap form is also the one that reads fine in review, because it looks
+like it is handling the error.
+
+### The rule this leaves behind
+
+**In anything that guards a destructive action, "I could not tell" is a
+failure, not a pass.** Concretely:
+
+- Never `|| true` / `|| echo <default>` on a value a safety decision depends on.
+- Capture rc and stderr separately; enumerate the exact signature that means
+  "legitimately absent" (`ParameterNotFound`, `No state file was found`);
+  everything else aborts with the cause named.
+- Prove the decision table, do not read it. The phase-marker bug survived
+  review and died to a four-row truth table.
+
+### Where it is enforced
+
+`scripts/guard-legacy-cp-state.sh`, `bootstrap/control-plane.yaml` (genesis
+detection), `scripts/replace-control-plane.sh` (inventory), and
+`scripts/drill-restore-etcd-ha.sh` (`after()` plus the resume-without-state
+guard) all now fail closed and say why.
