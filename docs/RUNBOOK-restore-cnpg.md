@@ -93,4 +93,11 @@ kubectl -n data delete cluster logistics-pg-drill
 
 | Fecha | Base+WAL replay | Testigo verificado | Tamaño backup | Operador |
 |-------|-----------------|--------------------|---------------|----------|
-| _(pendiente de la primera ejecución con cluster vivo)_ | | | | |
+| 2026-08-16 | **121s** (gen `logistics-pg-20260816t091811z`, backup on-demand `20260816T101639` 16s antes) | ✅ **3/3 filas**: shipment `18aaa303-…` `CORONATION-002` + `shipment.created` (`3110416c-…`) + `route.calculated` (`01391ba9-…`) — event_ids idénticos al origen | base ~4 MB + WALs | jmcastellanojimenez + Claude Code |
+
+Primera ejecución real: el testigo `CORONATION-002` (creado por HTTPS a
+través del Gateway 40 segundos antes del backup) volvió íntegro — las 3
+filas con sus identificadores exactos — en un cluster nuevo levantado
+desde el object store en **121 segundos**. El backup on-demand corrió en
+standby (prefer-standby, INCIDENTS #13) con tráfico real y completó en
+16s.
