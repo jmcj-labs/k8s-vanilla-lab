@@ -17,7 +17,7 @@
 ```yaml
 clusterName: ${cluster_name}
 region: ${aws_region}
-apiServer: ${control_plane_public_ip}:6443
+apiServer: ${api_endpoint_dns}:6443
 ```
 
 **These are replaced by OpenTofu BEFORE the file is passed to cloud-init.**
@@ -31,8 +31,10 @@ apiServer: ${control_plane_public_ip}:6443
 ```bash
 JOIN_TOKEN=$$(kubeadm token create --ttl 24h)
 CA_CERT_HASH=$$(openssl x509 -pubkey ...)
-PRIVATE_IP=$$(hostname -i | awk '{print $$1}')
-API_ENDPOINT="$${PRIVATE_IP}:6443"
+PRIVATE_IP=$$(hostname -i | awk '{print $$1}')   # certSANs only — NEVER an endpoint
+# The API endpoint is an OpenTofu variable (the NLB's DNS, ADR-007), not a
+# shell-derived node address:
+API_ENDPOINT="${api_endpoint_dns}:6443"
 
 aws ssm put-parameter \
   --name "${ssm_parameter_path}/join-command" \

@@ -1,6 +1,10 @@
 from diagrams import Diagram, Cluster, Edge
 from diagrams.aws.compute import EC2, EC2SpotInstance
-from diagrams.aws.network import InternetGateway, PublicSubnet
+from diagrams.aws.network import (
+    ElbNetworkLoadBalancer,
+    InternetGateway,
+    PublicSubnet,
+)
 from diagrams.aws.storage import S3
 from diagrams.aws.database import Dynamodb
 from diagrams.aws.management import SystemsManagerParameterStore
@@ -47,11 +51,23 @@ with Diagram(
             igw = InternetGateway("Internet\nGateway")
 
             with Cluster("Public Subnet (10.0.1.0/24)"):
-                # EIP is an attribute of the control plane, not a network hop
-                cp = EC2("Control Plane\n(t3.medium · on-demand · EIP)")
+                # Single internet-facing NLB, two listeners: the application
+                # entry (TCP/443 → Gateway NodePort) and the Kubernetes API
+                # endpoint (TCP/6443 → control planes). Declared coupling,
+                # ADR-007. No EIP exists since S2 piece 3.
+                nlb = ElbNetworkLoadBalancer(
+                    "NLB (internet-facing)\n:443 app · :6443 API"
+                )
+                # 3 control planes, stacked etcd — node HA, single AZ
+                cps = [
+                    EC2("Control Plane 0\n(kubeadm init)"),
+                    EC2("Control Plane 1\n(join)"),
+                    EC2("Control Plane 2\n(join)"),
+                ]
                 workers = [
                     EC2SpotInstance("Worker 1\n(t3.medium · spot)"),
                     EC2SpotInstance("Worker 2\n(t3.medium · spot)"),
+                    EC2SpotInstance("Worker 3\n(t3.medium · spot)"),
                 ]
 
     # OIDC trust: GitHub Actions assumes CI role
@@ -61,22 +77,36 @@ with Diagram(
     ci_role >> Edge(style="dashed", color="gray") >> tf_state
     ci_role >> Edge(style="dashed", color="gray") >> tf_lock
 
-    # Internet access through IGW to control plane
-    igw >> Edge(label="public route") >> cp
+    # Public entry: everything from the internet lands on the NLB
+    igw >> Edge(label="public route") >> nlb
+
+    # NLB listeners: API to the control planes, application to the workers
+    for c in cps:
+        nlb >> Edge(label=":6443 API", color="firebrick") >> c
+    for w in workers:
+        nlb >> Edge(label=":443 → :30443", color="darkgreen") >> w
 
     # IAM instance profiles (undirected — association, not data flow)
-    cp - Edge(style="dashed", color="gray") - cp_role
+    for c in cps:
+        c - Edge(style="dashed", color="gray") - cp_role
     for w in workers:
         w - Edge(style="dashed", color="gray") - worker_role
 
-    # Bootstrap: CP publishes join data and kubeconfig to SSM
-    cp >> Edge(label="put join-command\nput kubeconfig") >> ssm
+    # Bootstrap: CP-0 publishes join data, join material and kubeconfig
+    cps[0] >> Edge(label="put join-command\nput cp/certificate-key\nput kubeconfig") >> ssm
 
-    # Bootstrap: workers poll SSM for join data
-    ssm >> Edge(label="poll join-command") >> workers
+    # Bootstrap: joining CPs and workers poll SSM
+    ssm >> Edge(label="poll join material\n(cp/joined-count gate)") >> cps[1]
+    ssm >> Edge(label="poll join-command") >> workers[0]
 
-    # K8s API plane (bidirectional between CP and workers)
-    cp >> Edge(label="K8s API") >> workers
+    # K8s API plane: every node reaches the API through the NLB endpoint,
+    # never through a node address (ADR-007). One representative edge —
+    # drawing it per node turns the graph into noise.
+    workers[0] >> Edge(
+        label="kubelets / kubectl\n→ :6443 endpoint",
+        style="dotted",
+        color="firebrick",
+    ) >> nlb
 
     # CI smoke test: reads kubeconfig from SSM post-apply (dashed = read-only)
     ci_role >> Edge(

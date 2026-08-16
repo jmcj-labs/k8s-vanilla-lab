@@ -77,7 +77,12 @@ Apply complete! Resources: 19 added, 0 changed, 0 destroyed.
 
 Outputs:
 
-control_plane_public_ip = "54.220.66.70"
+control_plane_public_ips = [
+  "54.220.66.70",
+  "54.220.66.71",
+  "54.220.66.72",
+]
+nlb_dns_name = "k8s-vanilla-lab-gw-nlb-xxxxxxxx.elb.eu-west-1.amazonaws.com"
 worker_public_ips = [
   "54.220.123.45",
   "54.220.123.46",

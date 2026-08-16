@@ -1,8 +1,10 @@
 #!/bin/bash
-# Control Plane bootstrap for Kubernetes (K8s 1.35.x)
-# Purpose: Initialize control plane with kubeadm (kube-proxy-free), install
-#          Cilium in strict kube-proxy replacement mode, store join data in SSM
-# Variables: cluster_name, aws_region, pod_cidr, service_cidr, control_plane_public_ip, ssm_parameter_path
+# Control Plane bootstrap — FOUNDER node (index 0) of the HA control plane.
+# Purpose: kubeadm init anchored to the NLB endpoint (kube-proxy-free),
+#          install Cilium in strict kube-proxy replacement mode, publish the
+#          join data + control-plane join material (SSM cp/ path) and open
+#          the sequential-join gate for CP-1/CP-2 (control-plane-join.yaml).
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, api_endpoint_dns, api_target_group_arn, ssm_parameter_path
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
@@ -11,10 +13,45 @@ log() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
-log "=== Starting Control Plane bootstrap ==="
+log "=== Starting Control Plane bootstrap (founder path) ==="
+
+# GENESIS OR REPLACEMENT? Index 0 renders this founder script statically at
+# plan time, so a REBUILT index 0 would land here too — and running
+# `kubeadm init` while CP-1/CP-2 still hold a live cluster would create a
+# second, irreconcilable one. The cluster's existence is decided by
+# cp/joined-count: the founder publishes it and `tofu destroy` deletes the
+# whole /k8s/<cluster>/ prefix, so on a genuinely fresh apply it is absent.
+#
+# FAIL CLOSED toward NOT initialising. `if aws ssm get-parameter; then` would
+# treat EVERY failure as "no cluster" — AccessDenied, IMDS credentials not
+# ready yet, an SSM timeout or a network blip would all authorise a second
+# `kubeadm init` on top of a live cluster. Only ONE error means genesis:
+# ParameterNotFound. Parameter present ⇒ replacement; anything else ⇒ abort.
+set +e
+SSM_OUT=$(aws ssm get-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --region ${aws_region} 2>&1)
+SSM_RC=$?
+set -e
+
+if [ $${SSM_RC} -eq 0 ]; then
+  log "cp/joined-count exists — a cluster is already running."
+  log "This node is a REPLACEMENT of index 0, not the founder: skipping kubeadm init."
+  log "The control-plane JOIN script (next cloud-init part) will join it."
+  exit 0
+fi
+
+if ! echo "$${SSM_OUT}" | grep -q "ParameterNotFound"; then
+  log "✗ ERROR: could not determine whether a cluster already exists (SSM rc=$${SSM_RC})"
+  log "  $${SSM_OUT}"
+  log "  Refusing to run kubeadm init: an unreadable answer cannot prove this is a genesis,"
+  log "  and initialising on top of a live cluster would create a second, irreconcilable one."
+  exit 1
+fi
+log "ParameterNotFound for cp/joined-count — this is the genesis of the cluster"
 
 # Step 1: Wait for common.yaml bootstrap to complete
-log "Step 1/8: Waiting for common bootstrap to complete"
+log "Step 1/9: Waiting for common bootstrap to complete"
 TIMEOUT=600  # 10 minutes
 ELAPSED=0
 INTERVAL=10
@@ -45,7 +82,7 @@ done
 # kubeadm init (the API server starts with the webhook flags pointing at
 # these files). If anything here fails, ABORT: continuing would produce a
 # cluster silently missing IAM auth.
-log "Step 1b/8: Installing aws-iam-authenticator v0.7.18 (server init)"
+log "Step 1b/9: Installing aws-iam-authenticator v0.7.18 (server init)"
 
 IAM_AUTH_VERSION="0.7.18"
 IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a5"
@@ -85,13 +122,60 @@ done
 log "✓ aws-iam-authenticator webhook material in place"
 
 # Step 2: Create kubeadm config file
-log "Step 2/8: Creating kubeadm configuration"
+log "Step 2/9: Creating kubeadm configuration"
 
-# CRITICAL: Use private IP for controlPlaneEndpoint so workers can join via internal network
-# Public IP is only added to certSANs for external kubectl access
+# controlPlaneEndpoint is the NLB's DNS (ADR-007): every consumer — CP
+# joins, worker joins, kubeconfigs, Cilium, kubelets — uses the same stable
+# endpoint, and losing this founder node no longer strands the cluster.
+# kubeadm puts the endpoint host into the API server cert SANs by itself.
 PRIVATE_IP=$(hostname -i | awk '{print $1}')
 log "Private IP: $${PRIVATE_IP}"
-log "Public IP: ${control_plane_public_ip}"
+log "API endpoint (NLB): ${api_endpoint_dns}:6443"
+
+# The NLB's DNS must resolve before kubeadm anchors to it (registration in
+# Route53 is fast but not instant after the NLB is created).
+DNS_ELAPSED=0
+until getent hosts "${api_endpoint_dns}" >/dev/null 2>&1; do
+  if [ $${DNS_ELAPSED} -ge 300 ]; then
+    log "✗ ERROR: NLB DNS ${api_endpoint_dns} does not resolve after 300s"
+    exit 1
+  fi
+  sleep 10
+  DNS_ELAPSED=$((DNS_ELAPSED + 10))
+done
+log "✓ NLB DNS resolves"
+
+# ...but RESOLVING IS NOT ROUTING. A name that answers proves the NLB
+# exists, not that traffic to it can ever reach THIS node. If kubeadm init
+# ran before tofu registered this instance in the API target group, the
+# cluster would come up with an endpoint that black-holes its own API —
+# including the readiness checks kubeadm itself performs against it.
+# Gate on the registration fact: this instance ID present in the target
+# group (any health state; "healthy" is impossible before the API exists).
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $(curl -s -X PUT \
+  'http://169.254.169.254/latest/api/token' \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+[ -n "$${INSTANCE_ID}" ] || { log "✗ ERROR: could not read own instance-id from IMDSv2"; exit 1; }
+
+TG_ELAPSED=0
+until aws elbv2 describe-target-health \
+        --target-group-arn "${api_target_group_arn}" \
+        --region ${aws_region} \
+        --query 'TargetHealthDescriptions[].Target.Id' \
+        --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$${INSTANCE_ID}"; do
+  if [ $${TG_ELAPSED} -ge 600 ]; then
+    log "✗ ERROR: $${INSTANCE_ID} not registered in the API target group after 600s"
+    log "  the API endpoint would black-hole this node — refusing to run kubeadm init"
+    exit 1
+  fi
+  if [ $((TG_ELAPSED % 120)) -eq 0 ] && [ $${TG_ELAPSED} -gt 0 ]; then
+    log "Waiting for target-group registration... ($${TG_ELAPSED}s)"
+  fi
+  sleep 15
+  TG_ELAPSED=$((TG_ELAPSED + 15))
+done
+log "✓ Registered in the API target group ($${INSTANCE_ID}) — the endpoint routes here"
 
 cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
 apiVersion: kubeadm.k8s.io/v1beta4
@@ -108,7 +192,7 @@ kind: ClusterConfiguration
 # Use the installed kubeadm version (latest 1.35.x from common bootstrap)
 kubernetesVersion: $(kubeadm version -o short)
 clusterName: ${cluster_name}
-controlPlaneEndpoint: "$${PRIVATE_IP}:6443"
+controlPlaneEndpoint: "${api_endpoint_dns}:6443"
 apiServer:
   # IAM auth: token webhook against the local aws-iam-authenticator.
   # v1beta4 extraArgs is a {name,value} LIST (not a map). The webhook
@@ -125,7 +209,6 @@ apiServer:
       readOnly: true
       pathType: Directory
   certSANs:
-    - ${control_plane_public_ip}
     - $${PRIVATE_IP}
     - $(hostname -f)
 networking:
@@ -137,11 +220,20 @@ log "✓ kubeadm config created at /tmp/kubeadm-config.yaml"
 cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
 
 # Step 3: Initialize control plane with kubeadm
-log "Step 3/8: Running kubeadm init (this takes 2-5 minutes)"
+log "Step 3/9: Running kubeadm init (this takes 2-5 minutes)"
 
+# NOTE on --upload-certs: deliberately ABSENT. Passing it here would upload
+# the certs under a key kubeadm prints mid-log and this script never
+# captures — a second, unmanaged copy of control-plane-grade material with
+# its own 2h life. Step 7 runs `init phase upload-certs` explicitly and
+# captures the key it returns: ONE publication, one owner, one TTL.
+#
+# Expect noisy retries during the wait-control-plane phase: admin.conf
+# points at the NLB and, while every CP is still unhealthy, the NLB fails
+# OPEN across all three targets, so some polls hit nodes with nothing
+# listening (fast RST, not a hang). kubeadm retries; this is expected.
 kubeadm init \
   --config /tmp/kubeadm-config.yaml \
-  --upload-certs \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 if [ $? -ne 0 ]; then
@@ -152,7 +244,7 @@ fi
 log "✓ kubeadm init completed successfully"
 
 # Step 4: Configure kubectl for root user
-log "Step 4/8: Configuring kubectl for root user"
+log "Step 4/9: Configuring kubectl for root user"
 mkdir -p /root/.kube
 cp -f /etc/kubernetes/admin.conf /root/.kube/config
 chown root:root /root/.kube/config
@@ -165,7 +257,7 @@ log "✓ kubectl configured for root user"
 # mechanism on all nodes, so no post-init patch is needed here.
 
 # Step 5: Install Cilium CNI in strict kube-proxy replacement mode
-log "Step 5/8: Installing Cilium CNI (kube-proxy replacement)"
+log "Step 5/9: Installing Cilium CNI (kube-proxy replacement)"
 
 # Install Helm if not present (required to install Cilium chart)
 if ! command -v helm >/dev/null 2>&1; then
@@ -218,7 +310,7 @@ helm upgrade --install cilium cilium/cilium \
   --version 1.19.6 \
   --set ipam.mode=kubernetes \
   --set kubeProxyReplacement=true \
-  --set k8sServiceHost="$${PRIVATE_IP}" \
+  --set k8sServiceHost="${api_endpoint_dns}" \
   --set k8sServicePort=6443 \
   --set gatewayAPI.enabled=true \
   --set gatewayAPI.externalTrafficPolicy=Cluster \
@@ -231,7 +323,7 @@ kubectl -n kube-system rollout status daemonset/cilium --timeout=300s \
 log "✓ Cilium CNI installed (kube-proxy replacement, Gateway API, Hubble)"
 
 # Step 6: Verify API server is responding
-log "Step 6/8: Verifying API server"
+log "Step 6/9: Verifying API server"
 TIMEOUT=120
 ELAPSED=0
 INTERVAL=5
@@ -255,7 +347,7 @@ while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
 done
 
 # Step 7: Generate and store join data in SSM Parameter Store
-log "Step 7/8: Generating join data and storing in SSM"
+log "Step 7/9: Generating join data and storing in SSM"
 
 # Generate bootstrap token with 24h TTL
 JOIN_TOKEN=$(kubeadm token create --ttl 24h)
@@ -268,17 +360,29 @@ CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
                sed 's/^.* //')
 log "✓ CA certificate hash extracted"
 
-# Get private IP for API endpoint (workers use private IP)
-PRIVATE_IP=$(hostname -i | awk '{print $1}')
-API_ENDPOINT="$${PRIVATE_IP}:6443"
+# API endpoint for every join is the NLB (ADR-007): workers and joining
+# control planes must not anchor to this node's IP — it can die.
+API_ENDPOINT="${api_endpoint_dns}:6443"
 
 # Construct full join command
 JOIN_COMMAND="kubeadm join $${API_ENDPOINT} --token $${JOIN_TOKEN} --discovery-token-ca-cert-hash sha256:$${CA_CERT_HASH}"
+
+# Control-plane join material: re-upload the certs Secret (kubeadm-certs)
+# and capture the fresh certificate-key deterministically — the phase
+# prints ONLY the key on its last line. 2h TTL: replacements arriving
+# later need the renewal ceremony (scripts/renew-cp-certificate-key.sh).
+CERT_KEY=$(kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
+if ! echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$'; then
+  log "✗ ERROR: could not capture a valid certificate-key from upload-certs"
+  exit 1
+fi
+log "✓ certificate-key captured (kubeadm-certs Secret TTL: 2h)"
 
 log "Storing parameters in SSM (region: ${aws_region}):"
 log "  - ${ssm_parameter_path}/join-command"
 log "  - ${ssm_parameter_path}/ca-cert-hash"
 log "  - ${ssm_parameter_path}/api-endpoint"
+log "  - ${ssm_parameter_path}/cp/certificate-key (path excluded from the worker role)"
 
 # Store join command (SecureString)
 aws ssm put-parameter \
@@ -307,6 +411,20 @@ aws ssm put-parameter \
   --region ${aws_region} \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
+# Store certificate-key under the cp/ subpath — EXCLUDED FROM THE WORKER
+# ROLE (which enumerates exact ARNs and never sees cp/*): with it, anyone
+# holding the join token could elevate to control plane. Not "CP-only":
+# the CI/OIDC role reads /k8s/* and already holds the admin kubeconfig, a
+# strictly higher privilege — see ADR-007.
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/cp/certificate-key" \
+  --value "$${CERT_KEY}" \
+  --type SecureString \
+  --overwrite \
+  --region ${aws_region} \
+  >/dev/null 2>&1 || { log "✗ ERROR: failed to store certificate-key"; exit 1; }
+log "✓ certificate-key stored (never logged)"
+
 if [ $? -eq 0 ]; then
   log "✓ Join data stored in SSM successfully"
 else
@@ -314,10 +432,12 @@ else
   exit 1
 fi
 
-# Step 8: Publish kubeconfig to SSM for CI smoke test
-log "Step 8/8: Publishing kubeconfig to SSM for CI smoke test"
+# Step 8: Publish kubeconfig to SSM for CI smoke test.
+# admin.conf already points at the NLB (controlPlaneEndpoint) — the sed is
+# a belt-and-braces normalization, no longer a private→public rewrite.
+log "Step 8/9: Publishing kubeconfig to SSM for CI smoke test"
 KUBECONFIG_PATCHED=$(sed \
-  "s|server: https://.*:6443|server: https://${control_plane_public_ip}:6443|" \
+  "s|server: https://.*:6443|server: https://${api_endpoint_dns}:6443|" \
   /etc/kubernetes/admin.conf)
 aws ssm put-parameter \
   --name "${ssm_parameter_path}/kubeconfig" \
@@ -328,6 +448,21 @@ aws ssm put-parameter \
   --region ${aws_region} \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 log "✓ Kubeconfig stored at ${ssm_parameter_path}/kubeconfig"
+
+# Step 9: Open the sequential-join gate for the other control planes.
+# LAST on purpose: CP-1 only starts joining once this founder is COMPLETE
+# (Cilium installed, join material published). The kubeadm HA guide
+# requires control-plane joins one at a time; CP-1 waits for count>=1,
+# CP-2 for count>=2 — each publishes its own increment after joining.
+log "Step 9/9: Opening control-plane join gate (cp/joined-count = 1)"
+aws ssm put-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --value "1" \
+  --type String \
+  --overwrite \
+  --region ${aws_region} \
+  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+log "✓ Join gate open"
 
 # Final status
 log "=== Control Plane bootstrap completed successfully ==="

@@ -86,9 +86,12 @@ bring-up end to end in a manual sprint. The bootstrap default is now:
 - `kubeadm init` with `skipPhases: [addon/kube-proxy]` (InitConfiguration v1beta4)
   — kube-proxy is never installed.
 - Cilium 1.19.6 with `kubeProxyReplacement=true` and explicit
-  `k8sServiceHost=<CP private IP>` / `k8sServicePort=6443`, which removes the
-  deadlock that motivated compatibility mode: the agent no longer depends on
-  Service routing to reach the API server.
+  `k8sServiceHost` / `k8sServicePort=6443`, which removes the deadlock that
+  motivated compatibility mode: the agent no longer depends on Service
+  routing to reach the API server. **Since ADR-007 (S2 piece 3)
+  `k8sServiceHost` is the NLB's DNS**, not a control-plane IP — with 3 CPs
+  no node address may be the endpoint, and an agent pinned to one node
+  would lose the API when that node dies.
 - Gateway API standard CRDs (v1.2.1) applied before the Cilium install, with
   `gatewayAPI.enabled=true`, plus Hubble relay/UI.
 

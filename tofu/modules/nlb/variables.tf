@@ -14,7 +14,7 @@ variable "vpc_cidr" {
 }
 
 variable "subnet_id" {
-  description = "Public subnet for the internet-facing NLB (single AZ today — piece 3 owns zonal resilience)"
+  description = "Public subnet for the internet-facing NLB (single AZ today — zonal resilience is declared post-S2 debt)"
   type        = string
 }
 
@@ -30,6 +30,16 @@ variable "worker_count" {
 
 variable "worker_instance_ids" {
   description = "Worker EC2 instance IDs to register as targets (values may be unknown at plan; only count may not)"
+  type        = list(string)
+}
+
+variable "control_plane_count" {
+  description = "STATIC control-plane count — drives the API target attachments' count (INCIDENTS #11 discipline)"
+  type        = number
+}
+
+variable "control_plane_instance_ids" {
+  description = "Control-plane EC2 instance IDs to register as API targets (values may be unknown at plan; only count may not)"
   type        = list(string)
 }
 

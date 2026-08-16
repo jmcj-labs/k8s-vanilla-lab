@@ -16,7 +16,7 @@ learning in public, not for production.
 4. **Modern Stack**: OpenTofu, Cilium CNI, OIDC, cloud-init automation
 
 **Not Goals**:
-- Production-ready cluster (no HA, no backups, spot workers)
+- Production-ready cluster (node HA only — single AZ, no zonal resilience; spot workers)
 - Managed Kubernetes (EKS, GKE, AKS)
 - Multi-cloud or on-prem support
 
@@ -53,6 +53,10 @@ k8s-vanilla-lab/
 ├── Makefile                         # Primary local interface — see §6 below
 ├── scripts/
 │   ├── bootstrap-aws.sh            # One-time AWS setup (S3, DynamoDB, OIDC, IAM)
+│   ├── guard-legacy-cp-state.sh    # Fail-closed: refuses apply over a pre-HA state (make apply + CI)
+│   ├── replace-control-plane.sh    # Ceremony: replace ONE CP (etcd member remove → -replace → 3/3)
+│   ├── renew-cp-certificate-key.sh # Ceremony: renew CP join material (key 2h + token 24h)
+│   ├── drill-restore-etcd-ha.sh    # Drill: HA etcd restore (logical cluster reconstruction)
 │   └── smoke-test.sh               # Cluster + platform verification (invoked by make smoke-test)
 ├── platform/
 │   ├── install.sh                  # Ordered, idempotent platform install (make platform)
@@ -60,7 +64,7 @@ k8s-vanilla-lab/
 │   └── manifests/                  # namespaces, gp3 SC, ClusterIssuer, shared Gateway
 ├── tofu/
 │   ├── modules/
-│   │   ├── control-plane/          # Control plane EC2, EIP, IAM, security groups
+│   │   ├── control-plane/          # 3× control plane EC2 (HA, stacked etcd), IAM, security groups
 │   │   └── worker/                 # Worker EC2 (spot), IAM, security groups
 │   └── envs/
 │       └── lab/                    # Main environment: VPC, subnets, IGW, module calls
@@ -68,7 +72,8 @@ k8s-vanilla-lab/
 │           └── terraform.tfvars.example
 ├── bootstrap/
 │   ├── common.yaml                 # Base: containerd, kubeadm, kubelet (no variables)
-│   ├── control-plane.yaml          # kubeadm init, SSM store join data + kubeconfig
+│   ├── control-plane.yaml          # FOUNDER: genesis check, kubeadm init, SSM join data + kubeconfig
+│   ├── control-plane-join.yaml     # EVERY CP index: sequential join (no-op if already a CP)
 │   └── worker.yaml                 # SSM fetch, kubeadm join
 ├── addons/
 │   ├── metrics-server/             # Metrics server manifests
@@ -86,7 +91,8 @@ k8s-vanilla-lab/
 │   │   ├── ADR-001-opentofu-vs-terraform.md
 │   │   ├── ADR-002-spot-workers-ondemand-cp.md
 │   │   ├── ADR-003-cilium-ebpf.md
-│   │   └── ADR-004-kubeconfig-ssm.md
+│   │   ├── ADR-004-kubeconfig-ssm.md
+│   │   └── ADR-007-api-endpoint-nlb.md   # HA control plane behind the NLB endpoint
 │   ├── bootstrap.md                # AWS one-time setup guide
 │   ├── development.md              # Pre-commit, tflint, trivy — local dev setup
 │   ├── INCIDENTS.md                # Findings from the 2026-08 manual platform sprint
@@ -179,7 +185,7 @@ If validation fails, fix immediately before proceeding.
 ### 5. Security Best Practices
 
 - SSH access: restricted to `var.my_ip` only
-- API server: restricted to `var.my_ip` by default (expandable via `api_server_allowed_cidrs`)
+- API server: public THROUGH THE NLB only (ADR-007) — the CP SG accepts 6443 solely from the NLB's SG; `api_server_allowed_cidrs` no longer exists
 - IAM policies: minimal scope (`/k8s/${cluster_name}/*` for SSM)
 - IMDSv2: enforced on all EC2 instances
 - EBS encryption: enabled by default
@@ -236,19 +242,18 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 ### tofu/modules/control-plane
 
-**Purpose**: Single control plane node with kubeadm
+**Purpose**: HA control plane — 3 nodes with stacked etcd (S2 piece 3, ADR-007)
 
 **Creates**:
-- EIP (created FIRST to avoid circular dependency with templatefile)
-- EC2 instance (t3.medium On-Demand)
-- Security group (SSH, K8s API, etcd, kubelet)
-- IAM role with SSM write permissions (`/k8s/${cluster_name}/*`)
+- 3× EC2 instances (t3.medium On-Demand, `count = control_plane_count`, auto-assigned public IPs — NO EIP anymore)
+- Security group (SSH from `my_ip`; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
+- IAM role with SSM write permissions (`/k8s/${cluster_name}/*` — includes the `cp/` subpath, which the WORKER role is excluded from; the CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig)
 
-**Key Pattern**: EIP-first pattern:
-1. `aws_eip.control_plane` (no instance dependency)
-2. Pass `aws_eip.control_plane.public_ip` to `templatefile()` for `control-plane.yaml`
-3. `aws_instance.control_plane` uses templated user_data
-4. `aws_eip_association.control_plane` associates EIP to instance
+**Key Pattern**: NLB-first (replaced the historical EIP-first):
+1. The NLB and its DNS depend on NO instance → created first
+2. `module.nlb.dns_name` is rendered into every CP/worker-relevant consumer via `templatefile()`
+3. Instances boot anchored to the NLB endpoint; index 0 renders `control-plane.yaml` (kubeadm init), indexes 1..N render `control-plane-join.yaml` (SEQUENTIAL control-plane joins, serialized via the SSM gate `cp/joined-count`)
+4. API target group attachments (in the NLB module) reference the instance IDs last — resource graph stays acyclic
 
 ### tofu/modules/worker
 
@@ -276,16 +281,14 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 - Calls control-plane and worker modules
 - Loads cloud-init templates via `templatefile()` and `file()`
 
-**Key Pattern**: Cloud-init DRY approach:
+**Key Pattern**: Cloud-init per CP index (NLB endpoint rendered in):
 ```hcl
-locals {
-  common_user_data = file("${path.module}/../../../bootstrap/common.yaml")
-
-  control_plane_user_data = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
-    cluster_name            = var.cluster_name
-    control_plane_public_ip = module.control_plane.public_ip
-    # ... more variables
-  })
+data "cloudinit_config" "control_plane" {
+  count = var.control_plane_count
+  # part 1: bootstrap/common.yaml (identical on every node)
+  # part 2: index 0 → control-plane.yaml (kubeadm init)
+  #         index 1..N → control-plane-join.yaml (sequential CP join)
+  # both templated with api_endpoint_dns = module.nlb.dns_name
 }
 ```
 
@@ -293,32 +296,39 @@ locals {
 
 ## Key Design Decisions
 
-### 1. EIP-First Pattern (Solves Circular Dependency)
+### 1. NLB-First Pattern (Stable API Endpoint, ADR-007)
 
-**Problem**: Control plane needs its EIP in cloud-init for kubeadm SAN, but EIP creation depends on instance ID.
+**Problem**: cloud-init needs a stable API endpoint for `controlPlaneEndpoint` before any
+instance exists — and with HA no node IP may ever be an endpoint.
 
-**Solution**:
-1. Create EIP without instance association
-2. Pass EIP public IP to templatefile
-3. Create instance with templated user_data
-4. Associate EIP to instance after creation
+**Solution** (replaced the historical EIP-first pattern; the EIP is gone):
+1. The NLB (and its DNS + SG) depends on no instance → created first
+2. `module.nlb.dns_name` is templated into every bootstrap consumer (kubeadm, Cilium
+   `k8sServiceHost`, join command, SSM kubeconfig)
+3. CP instances boot anchored to the endpoint; the API TG attachments reference the
+   instance IDs last (resource graph acyclic; count from STATIC vars — INCIDENTS #11)
 
-**Code**: `tofu/modules/control-plane/main.tf`
+**Code**: `tofu/modules/nlb/main.tf`, `tofu/modules/control-plane/main.tf`
 
 ### 2. SSM Parameter Store for Join Data and Kubeconfig
 
 **Why**: Workers need join token and CA cert hash from control plane. CI needs kubeconfig for a
-smoke test without opening port 22 to the runner.
+smoke test without opening port 22 to the runner. Joining CONTROL PLANES additionally need the
+kubeadm certificate-key — a privilege boundary (it elevates to control plane).
 
-**Parameters stored** (all `SecureString`, encrypted via KMS default key):
+**Parameters stored** (all `SecureString` except the join gate, KMS default key):
 
 | Parameter | Written by | Read by |
 |-----------|------------|---------|
-| `/k8s/${cluster_name}/join-command` | control plane bootstrap | worker bootstrap |
-| `/k8s/${cluster_name}/ca-cert-hash` | control plane bootstrap | worker bootstrap |
-| `/k8s/${cluster_name}/kubeconfig` | control plane bootstrap | `make kubeconfig`, `make smoke-test`, CI apply workflow |
+| `/k8s/${cluster_name}/join-command` | CP-0 bootstrap | worker bootstrap, CP join bootstrap |
+| `/k8s/${cluster_name}/ca-cert-hash` | CP-0 bootstrap | worker bootstrap |
+| `/k8s/${cluster_name}/kubeconfig` | CP-0 bootstrap | `make kubeconfig`, `make smoke-test`, CI apply workflow |
+| `/k8s/${cluster_name}/cp/certificate-key` | CP-0 bootstrap, renewal ceremony | CP join bootstrap (CP role). EXCLUDED from the worker role — workers enumerate exact ARNs. The CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig |
+| `/k8s/${cluster_name}/cp/joined-count` (String) | each CP after joining | next CP's join gate (sequential joins) |
 
-All parameters are deleted by a destroy-time provisioner on `tofu destroy`.
+All parameters are deleted by a destroy-time provisioner on `tofu destroy`. NEVER widen the
+worker SSM policy back to the `/k8s/${cluster_name}/*` wildcard — that hands workers the
+certificate-key (Codex finding, S2-3).
 
 **Token TTL**: `kubeadm token create --ttl 24h`. Workers that need to rejoin after 24h require a
 new token — see `docs/troubleshooting.md`.
@@ -337,7 +347,7 @@ Validated end-to-end in the 2026-08 manual sprint (see `docs/INCIDENTS.md`).
   ```bash
   helm upgrade --install cilium cilium/cilium --namespace kube-system --version 1.19.6 \
     --set ipam.mode=kubernetes --set kubeProxyReplacement=true \
-    --set k8sServiceHost=<CP private IP> --set k8sServicePort=6443 \
+    --set k8sServiceHost=<NLB DNS> --set k8sServicePort=6443 \
     --set gatewayAPI.enabled=true --set gatewayAPI.externalTrafficPolicy=Cluster --set hubble.relay.enabled=true --set hubble.ui.enabled=true
   ```
 - `k8sServiceHost`/`k8sServicePort` MUST stay wired: without them the agent cannot reach the
@@ -365,8 +375,8 @@ security group changes (or opening port 22 to a runner CIDR range).
 **Solution**: After `kubeadm init`, bootstrap stores a patched kubeconfig in SSM:
 - Path: `/k8s/${cluster_name}/kubeconfig`
 - Type: `SecureString` (KMS default key)
-- Content: `/etc/kubernetes/admin.conf` with `server:` URL rewritten from private IP to EIP
-  (applied inline with `sed` before `aws ssm put-parameter`)
+- Content: `/etc/kubernetes/admin.conf` with `server:` normalized to the NLB DNS
+  (`controlPlaneEndpoint` already points there since ADR-007 — the sed is belt-and-braces)
 
 Locally: `make kubeconfig` fetches it to `~/.kube/k8s-vanilla-lab.conf`.
 In CI: `make smoke-test` fetches to a temp file (not persisted to disk), runs
@@ -436,10 +446,12 @@ without opening another file:
   `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
 - **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
   re-execute bootstrap scripts. Only new instances run them.
-- **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply (from the CP,
-  so `hostname -i` gives the private IP): `helm upgrade --install cilium cilium/cilium
+- **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply (from any CP
+  as root; the endpoint is the NLB DNS — read it from admin.conf, NEVER a node IP):
+  `K8S_HOST=$(kubectl --kubeconfig /etc/kubernetes/admin.conf config view -o jsonpath='{.clusters[0].cluster.server}' | sed -E 's|https://(.*):6443|\1|')`
+  then `helm upgrade --install cilium cilium/cilium
   --namespace kube-system --version 1.19.6 --set ipam.mode=kubernetes
-  --set kubeProxyReplacement=true --set k8sServiceHost=$(hostname -i | awk '{print $1}')
+  --set kubeProxyReplacement=true --set k8sServiceHost=$K8S_HOST
   --set k8sServicePort=6443 --set gatewayAPI.enabled=true
   --set gatewayAPI.externalTrafficPolicy=Cluster --set hubble.relay.enabled=true
   --set hubble.ui.enabled=true`.

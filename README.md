@@ -18,8 +18,9 @@ Kubernetes 1.35 bootstrapped with kubeadm on AWS EC2, automated with OpenTofu an
 
 | Component | Role |
 |-----------|------|
-| Control plane (t3.medium, on-demand) | kubeadm init (kube-proxy-free), etcd, API server, Elastic IP |
-| Worker nodes × 2 (t3.medium, spot) | kubelet (with `--provider-id`), containerd, Cilium agent |
+| Control planes × 3 (t3.medium, on-demand) | HA with stacked etcd (node HA, single AZ — ADR-007); kubeadm init on CP-0, sequential control-plane joins |
+| Worker nodes × 3 (t3.medium, spot) | kubelet (with `--provider-id`), containerd, Cilium agent |
+| NLB (internet-facing, single door) | TCP/443 passthrough → Gateway NodePort AND TCP/6443 → API servers (`controlPlaneEndpoint`) |
 | Cilium (kube-proxy replacement) | eBPF datapath, Service routing (no kube-proxy), Gateway API, Hubble |
 | Platform layer (`platform/`) | EBS CSI + gp3 default SC, cert-manager, shared Gateway, CNPG + Strimzi operators, kube-prometheus-stack |
 | Internet Gateway + public subnet | Single public subnet, no NAT gateway |
@@ -27,9 +28,11 @@ Kubernetes 1.35 bootstrapped with kubeadm on AWS EC2, automated with OpenTofu an
 | GitHub Actions (OIDC) | Validate, apply (+ platform + smoke), destroy — no long-lived credentials |
 | S3 + DynamoDB | Remote state backend and lock table |
 
-Workers run on spot to keep monthly cost at ~$36. The control plane runs on-demand so the API
-server and etcd are never interrupted by spot reclamations. See
-[ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md) for the cost breakdown.
+Workers run on spot; the control planes run on-demand so the API servers and etcd quorum are
+never interrupted by spot reclamations. See
+[ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md) for the original cost rationale
+and [ADR-007](docs/decisions/ADR-007-api-endpoint-nlb.md) for the HA topology (~4.8–5 $/day
+running — CLUSTER.md §FinOps holds the measured number).
 
 ---
 
@@ -166,14 +169,15 @@ profiles, not people.
 
 ## Cost
 
-| Configuration | Monthly | Notes |
-|---------------|---------|-------|
-| Lab (default) | ~$36 | 1× On-Demand CP + 2× Spot workers |
-| All On-Demand | ~$92 | 2.6× cost, no spot interruptions |
-| All Spot | ~$28 | Risky — CP reclamation takes the whole cluster offline |
+| Configuration | Per day (running) | Notes |
+|---------------|-------------------|-------|
+| Lab since S2 piece 3 | ~$4.8–5 | 3× On-Demand CPs (HA) + 3× Spot workers + NLB + public IPv4s |
+| Pre-HA baseline (piece 2) | ~$2.1 | 1 CP + NLB — kept for comparison |
+| All Spot | rejected | CP reclamation would take etcd quorum offline |
 
-Based on t3.medium in eu-west-1, 730 hours/month. Destroy when not in use to pay only for hours
-used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md).
+Based on t3.medium in eu-west-1. Destroy when not in use to pay only for hours used; the real
+measured number after the first HA apply lives in `docs/CLUSTER.md` §FinOps. Original
+breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md).
 
 ---
 
@@ -185,13 +189,17 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
 | [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md) | Spot workers + On-Demand control plane | 60% cost reduction ($92 → $36/month) without compromising cluster availability |
 | [ADR-003](docs/decisions/ADR-003-cilium-ebpf.md) | Cilium as CNI (now strict kube-proxy replacement) | eBPF datapath; bootstrap wires `k8sServiceHost/Port` so no kube-proxy is ever installed |
 | [ADR-004](docs/decisions/ADR-004-kubeconfig-ssm.md) | Kubeconfig via SSM | CI smoke test without opening port 22 to runner CIDR |
+| [ADR-007](docs/decisions/ADR-007-api-endpoint-nlb.md) | HA control plane behind the NLB API endpoint | 3 CPs (stacked etcd) + stable endpoint on the existing NLB; 6443 only from the NLB's SG |
 
 ---
 
 ## Known limitations
 
-- **No high availability**: single control plane node; etcd data is lost on termination
-- **No backups**: cluster state is ephemeral by design
+- **Node HA, not zonal HA** (S2 piece 3): 3 control planes with stacked etcd survive losing
+  any CP, but everything lives in ONE AZ — an AZ outage kills the cluster (recovery path:
+  the drilled HA restore from S3, `docs/RUNBOOK-restore-etcd-ha.md`)
+- **Declared coupling**: the single NLB fronts both the application (:443) and the API
+  (:6443) — a bad NLB mutation affects both (accepted for the lab, ADR-007)
 - **Spot workers**: may be reclaimed with 2-minute notice; instances auto-restart
   (`instance_interruption_behavior = "stop"`) but there is a window where capacity is reduced
 - **Bootstrap token TTL**: 24 hours; workers that need to rejoin after the TTL require a new
@@ -202,9 +210,9 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
   `.trivyignore` (see `AVD-AWS-0164`)
 - **Admin kubeconfig in SSM**: full cluster-admin credentials persist until `make destroy`;
   acceptable for a short-lived lab, not for shared or long-lived environments
-- **K8s API open to 0.0.0.0/0** (`api_server_allowed_cidrs` default): required so CI runners
-  (dynamic IPs) can run platform install + smoke test via the SSM kubeconfig (ADR-004); the
-  API is TLS + cert-authenticated, and SSH remains restricted to `my_ip`
+- **K8s API public through the NLB** (ADR-004 + ADR-007): CI runners (dynamic IPs) need it
+  for platform install + smoke via the SSM kubeconfig; the API is TLS + cert-authenticated,
+  the CP nodes only accept 6443 from the NLB's SG, and SSH remains restricted to `my_ip`
 - **IMDS from pods: closed by policy** (2026-08-11): hop limit 3 is still required (EBS CSI,
   Cilium tunnel — INCIDENTS #4) but a clusterwide Cilium policy denies `169.254.169.254`
   to every pod except the EBS CSI (`platform/policies/`), verified by the smoke via

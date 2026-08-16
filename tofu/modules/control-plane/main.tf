@@ -42,15 +42,17 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   ip_protocol       = "tcp"
 }
 
-# Kubernetes API server - restricted by default to my_ip, expandable via variable
-resource "aws_vpc_security_group_ingress_rule" "api_server" {
-  for_each          = toset(length(var.api_server_allowed_cidrs) > 0 ? var.api_server_allowed_cidrs : [var.my_ip])
-  security_group_id = aws_security_group.control_plane.id
-  description       = "Kubernetes API"
-  cidr_ipv4         = each.value
-  from_port         = 6443
-  to_port           = 6443
-  ip_protocol       = "tcp"
+# Kubernetes API server — ONLY from the NLB's security group (S2 piece 3,
+# ADR-007). The old world-facing 6443 rule is gone: the API stays public by
+# design (ADR-004) but enters through the single door. The negative proof
+# (":6443 does not answer on any CP public IP") lives in smoke §14.
+resource "aws_vpc_security_group_ingress_rule" "api_from_nlb" {
+  security_group_id            = aws_security_group.control_plane.id
+  description                  = "Kubernetes API from the NLB only"
+  referenced_security_group_id = var.nlb_security_group_id
+  from_port                    = 6443
+  to_port                      = 6443
+  ip_protocol                  = "tcp"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "etcd" {
@@ -163,7 +165,14 @@ resource "aws_iam_role" "control_plane" {
   )
 }
 
-# IAM Policy for SSM Parameter Store (bootstrap token storage)
+# IAM Policy for SSM Parameter Store (bootstrap token storage).
+#
+# SECURITY SPLIT (S2 piece 3, Codex finding): the wildcard below covers the
+# whole cluster path INCLUDING the cp/ subpath (control-plane join command +
+# kubeadm certificate-key). That subpath is EXCLUDED FROM THE WORKER ROLE:
+# the worker role enumerates exact parameter ARNs instead of a wildcard —
+# a compromised worker holding the certificate-key could join itself as a
+# control plane. Never widen the worker policy back to the wildcard.
 resource "aws_iam_role_policy" "control_plane_ssm" {
   name = "${var.name}-cp-ssm-policy"
   role = aws_iam_role.control_plane.id
@@ -179,6 +188,30 @@ resource "aws_iam_role_policy" "control_plane_ssm" {
           "ssm:DeleteParameter"
         ]
         Resource = "arn:aws:ssm:*:*:parameter/k8s/${var.cluster_name}/*"
+      }
+    ]
+  })
+}
+
+# Target-group registration gate (S2 piece 3): CP-0 refuses to run
+# `kubeadm init` until it sees ITSELF registered in the API target group —
+# a resolving DNS name proves the NLB exists, not that the endpoint routes
+# back here. DescribeTargetHealth is read-only and, like every ELBv2
+# Describe* action, does NOT support resource-level permissions (AWS
+# service authorization reference) — hence Resource "*" with the action
+# narrowed to exactly this one call.
+resource "aws_iam_role_policy" "control_plane_tg_gate" {
+  name = "${var.name}-cp-tg-gate"
+  role = aws_iam_role.control_plane.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadOwnTargetRegistration"
+        Effect   = "Allow"
+        Action   = "elasticloadbalancing:DescribeTargetHealth"
+        Resource = "*"
       }
     ]
   })
@@ -227,25 +260,19 @@ resource "aws_iam_instance_profile" "control_plane" {
   )
 }
 
-# Elastic IP for Control Plane (created BEFORE instance to avoid circular dependency)
-resource "aws_eip" "control_plane" {
-  domain = "vpc"
-
-  tags = merge(
-    var.tags,
-    {
-      Name = "${var.name}-cp-eip"
-      Role = "control-plane"
-    }
-  )
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# Control Plane Instance
+# Control Plane Instances — 3 nodes, stacked etcd (S2 piece 3, ADR-007).
+#
+# The historical EIP-first pattern is GONE: the stable API endpoint is the
+# NLB's DNS (rendered into every node's user_data before instances exist —
+# same acyclic NLB-first ordering the application TG proved in piece 2).
+# Public IPs are auto-assigned by the subnet for egress + SSH only; nothing
+# anchors to them anymore.
+#
+# Index 0 runs `kubeadm init`; 1 and 2 join as control planes SEQUENTIALLY,
+# serialized through the SSM cp/ path (see bootstrap/control-plane-join.yaml).
 resource "aws_instance" "control_plane" {
+  count = var.control_plane_count
+
   ami                    = var.ami_id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id
@@ -255,7 +282,7 @@ resource "aws_instance" "control_plane" {
   # cloud-init is rendered gzip+base64 (cloudinit_config): the provider
   # contract requires user_data_base64 for pre-encoded data — plain
   # user_data corrupts it and breaks in-place instance updates.
-  user_data_base64 = var.user_data_base64
+  user_data_base64 = var.user_data_base64[count.index]
 
   root_block_device {
     volume_type           = var.root_volume_type
@@ -266,7 +293,7 @@ resource "aws_instance" "control_plane" {
     tags = merge(
       var.tags,
       {
-        Name = "${var.name}-cp-root"
+        Name = "${var.name}-cp-${count.index}-root"
         Role = "control-plane"
       }
     )
@@ -286,8 +313,9 @@ resource "aws_instance" "control_plane" {
   tags = merge(
     var.tags,
     {
-      Name                                        = "${var.name}-cp"
+      Name                                        = "${var.name}-cp-${count.index}"
       Role                                        = "control-plane"
+      CPIndex                                     = count.index
       "kubernetes.io/cluster/${var.cluster_name}" = "owned"
     }
   )
@@ -302,12 +330,6 @@ resource "aws_instance" "control_plane" {
       ami
     ]
   }
-}
-
-# EIP Association (after instance creation)
-resource "aws_eip_association" "control_plane" {
-  instance_id   = aws_instance.control_plane.id
-  allocation_id = aws_eip.control_plane.id
 }
 
 # Cleanup SSM parameters written by bootstrap (kubeconfig, join data).

@@ -23,8 +23,8 @@ terraform {
 #   Cilium it is global per Gateway and would break in-cluster VIP access
 #   and the health checks).
 # - Cross-zone OFF explicitly: one AZ today; the NLB adds no zonal
-#   resilience — that is piece 3's problem, and pretending otherwise in
-#   config would be a lie.
+#   resilience — piece 3 delivers NODE HA (3 CPs, one AZ), zonal stays
+#   declared post-S2 debt, and pretending otherwise in config would be a lie.
 # - Health check is TCP on the traffic port: HTTPS without SNI would give
 #   false negatives; TCP proves the datapath, the e2e proves semantics.
 #   Design note ON RECORD: NLB fails OPEN when every target is unhealthy —
@@ -36,7 +36,7 @@ terraform {
 # NLB after the fact). No inline rules — INCIDENTS #6.
 resource "aws_security_group" "nlb" {
   name        = "${var.name}-nlb-sg"
-  description = "Internet ingress for the application NLB (TCP/443 only)"
+  description = "Internet ingress for the cluster NLB (TCP/443 app + TCP/6443 API)"
   vpc_id      = var.vpc_id
 
   revoke_rules_on_delete = true
@@ -66,10 +66,13 @@ resource "aws_vpc_security_group_egress_rule" "to_nodeport" {
 }
 
 # AVD-AWS-0053 warns against ACCIDENTAL public exposure. This exposure is
-# the deliverable: an internet-facing ingress NLB (brief #S2-2), TCP/443
-# only, backed by SG scoping on both sides (world→443 here; NodePort only
-# from this SG on the workers) and TLS terminating at the Gateway. No exp
-# date: an ingress LB is public by definition — not a decision to revisit.
+# the deliverable: an internet-facing NLB carrying the application entry
+# (TCP/443, brief #S2-2) and the Kubernetes API endpoint (TCP/6443, brief
+# #S2-3 — public by design since ADR-004), backed by SG scoping on both
+# sides (world→443/6443 here; NodePort only from this SG on the workers,
+# 6443 only from this SG on the control planes) with TLS terminating at
+# the Gateway and cert/IAM auth at the API. No exp date: a public ingress
+# LB is public by definition — not a decision to revisit.
 #trivy:ignore:AVD-AWS-0053
 resource "aws_lb" "gateway" {
   name               = "${var.name}-gw-nlb"
@@ -79,7 +82,8 @@ resource "aws_lb" "gateway" {
   security_groups    = [aws_security_group.nlb.id]
 
   # One AZ, one subnet: cross-zone is meaningless today and OFF on purpose
-  # so the (non-)decision is visible. Zonal resilience is piece 3.
+  # so the (non-)decision is visible. Piece 3 added NODE HA (3 CPs in this
+  # same AZ) — zonal resilience remains declared post-S2 debt.
   enable_cross_zone_load_balancing = false
 
   tags = merge(var.tags, {
@@ -140,3 +144,85 @@ resource "aws_lb_target_group_attachment" "workers" {
 # The worker-SG side of the pairing (30443 from THIS SG only) lives as an
 # inline rule in the worker module: that SG is inline-managed and mixing
 # inline with standalone rules deletes rules on apply (INCIDENTS #6).
+
+# ── Kubernetes API endpoint — S2 piece 3 (ADR-007) ──────────────────────────
+#
+# The SAME NLB fronts the API server on TCP/6443 towards the 3 control
+# planes. Coupling application entry and control-plane endpoint in one
+# resource is DECLARED AND ACCEPTED in this lab (a bad NLB mutation affects
+# both) — see ADR-007 and CLUSTER.md §3/§5.
+#
+# The API was public by design (ADR-004: TLS + certificate auth, CI runners
+# with dynamic IPs); it stays public but now enters through the single door.
+# The CPs' own SG no longer accepts 6443 from the world — only from this SG.
+
+resource "aws_vpc_security_group_ingress_rule" "api_world" {
+  security_group_id = aws_security_group.nlb.id
+  description       = "Kubernetes API: public by design (ADR-004), now through the NLB only"
+  from_port         = 6443
+  to_port           = 6443
+  ip_protocol       = "tcp"
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+resource "aws_vpc_security_group_egress_rule" "to_api" {
+  security_group_id = aws_security_group.nlb.id
+  description       = "Forwarded API traffic + TCP health checks to the control planes"
+  from_port         = 6443
+  to_port           = 6443
+  ip_protocol       = "tcp"
+  cidr_ipv4         = var.vpc_cidr
+}
+
+resource "aws_lb_target_group" "api" {
+  name        = "${var.name}-api-tg"
+  port        = 6443
+  protocol    = "TCP"
+  vpc_id      = var.vpc_id
+  target_type = "instance"
+
+  # OPPOSITE of the application TG, on purpose: the CPs are CLIENTS of the
+  # endpoint that has them as TARGETS (kubeconfigs, Cilium agents, kubelets).
+  # Hairpin with client-IP preservation is explicitly discouraged by AWS
+  # (a target connecting to itself through the NLB sees its own IP as the
+  # source and the connection fails). preserve_client_ip=false makes the
+  # source the NLB's private IP and the hairpin safe. PPv2 stays off.
+  preserve_client_ip   = false
+  proxy_protocol_v2    = false
+  deregistration_delay = 10
+
+  health_check {
+    protocol = "TCP"
+    port     = "traffic-port"
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name}-api-tg"
+    Role = "nlb"
+  })
+}
+
+resource "aws_lb_listener" "api" {
+  load_balancer_arn = aws_lb.gateway.arn
+  port              = 6443
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api.arn
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name}-gw-nlb-6443"
+  })
+}
+
+# count on the STATIC control_plane_count — same INCIDENTS #11 discipline
+# as the worker attachments above.
+resource "aws_lb_target_group_attachment" "control_planes" {
+  count = var.control_plane_count
+
+  target_group_arn = aws_lb_target_group.api.arn
+  target_id        = var.control_plane_instance_ids[count.index]
+  port             = 6443
+}

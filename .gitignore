@@ -42,3 +42,7 @@ Thumbs.db
 
 # Claude Code local config (accidentally committed once; kept local)
 .claude/
+
+# Python bytecode (diagram.py renders locally)
+__pycache__/
+*.pyc

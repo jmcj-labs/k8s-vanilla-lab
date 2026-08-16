@@ -3,7 +3,7 @@ SHELL        := bash
 
 CLUSTER_NAME    ?= k8s-vanilla-lab
 AWS_REGION      ?= eu-west-1
-EXPECTED_NODES  ?= 4
+EXPECTED_NODES  ?= 6
 TOFU_DIR        := tofu/envs/lab
 KUBECONFIG_PATH ?= $(HOME)/.kube/k8s-vanilla-lab.conf
 SSH_KEY_PATH    ?= $(HOME)/.ssh/k8s-vanilla-lab.pem
@@ -78,6 +78,7 @@ plan: ## Show execution plan (requires init)
 	cd $(TOFU_DIR) && tofu plan
 
 apply: ## Apply infrastructure changes (auto-approve)
+	@TOFU_DIR=$(TOFU_DIR) bash scripts/guard-legacy-cp-state.sh
 	cd $(TOFU_DIR) && tofu apply -auto-approve
 
 destroy: ## Destroy all infrastructure (auto-approve)
@@ -151,9 +152,9 @@ smoke-app-contract: check-aws ## Verify the deployed app against the platform co
 	KUBECONFIG="$$KUBECONFIG_FILE" CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/smoke-app-contract.sh
 
-ssh-cp: ## SSH into the control plane node
+ssh-cp: ## SSH into the founder control plane (CP-0); CP_INDEX=1|2 for the others
 	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \
-	  $(SSH_USER)@$$(cd $(TOFU_DIR) && tofu output -raw control_plane_public_ip)
+	  $(SSH_USER)@$$(cd $(TOFU_DIR) && tofu output -json control_plane_public_ips | jq -r '.[$(or $(CP_INDEX),0)]')
 
 ssh-worker: ## SSH into the first worker node
 	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \

@@ -41,6 +41,10 @@ spec:
           restartPolicy: Never
           hostNetwork: true
           automountServiceAccountToken: false
+          # ANY healthy control plane, on purpose (S2-3): the scheduler picks
+          # a live member each run. NEVER pin to a nodeName — that would kill
+          # the backup exactly when that node dies, which is the one moment
+          # the backup matters.
           nodeSelector:
             node-role.kubernetes.io/control-plane: ""
           tolerations:

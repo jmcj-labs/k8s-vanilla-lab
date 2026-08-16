@@ -3,14 +3,14 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
-output "control_plane_public_ip" {
-  description = "Control plane public IP (Elastic IP)"
-  value       = module.control_plane.public_ip
+output "control_plane_public_ips" {
+  description = "Control plane public IPs by index (auto-assigned — SSH/egress only; the API endpoint is the NLB, ADR-007)"
+  value       = module.control_plane.public_ips
 }
 
-output "control_plane_private_ip" {
-  description = "Control plane private IP"
-  value       = module.control_plane.private_ip
+output "control_plane_private_ips" {
+  description = "Control plane private IPs by index"
+  value       = module.control_plane.private_ips
 }
 
 output "worker_public_ips" {
@@ -23,14 +23,12 @@ output "worker_private_ips" {
   value       = module.worker.private_ips
 }
 
-output "kubeconfig_command" {
-  description = "Command to extract kubeconfig from control plane"
-  value       = module.control_plane.kubeconfig_command
-}
-
-output "ssh_control_plane" {
-  description = "SSH command for control plane"
-  value       = "ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@${module.control_plane.public_ip}"
+output "ssh_control_planes" {
+  description = "SSH commands for the control planes (index 0 = kubeadm init node)"
+  value = [
+    for ip in module.control_plane.public_ips :
+    "ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@${ip}"
+  ]
 }
 
 output "ssh_workers" {
@@ -44,12 +42,13 @@ output "ssh_workers" {
 output "cluster_info" {
   description = "Cluster summary"
   value = {
-    cluster_name   = var.cluster_name
-    region         = var.aws_region
-    environment    = var.environment
-    worker_count   = var.worker_count
-    capacity_type  = var.worker_capacity_type
-    kubernetes_api = "https://${module.control_plane.public_ip}:6443"
+    cluster_name        = var.cluster_name
+    region              = var.aws_region
+    environment         = var.environment
+    control_plane_count = var.control_plane_count
+    worker_count        = var.worker_count
+    capacity_type       = var.worker_capacity_type
+    kubernetes_api      = "https://${module.nlb.dns_name}:6443"
   }
 }
 

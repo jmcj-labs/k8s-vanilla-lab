@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HA control plane (S2 piece 3, ADR-007)**: 3 control planes (t3.medium on-demand,
+  stacked etcd, one AZ — node HA); the API endpoint is the existing NLB (new TCP/6443
+  listener + dedicated target group with `preserve_client_ip=false`); `controlPlaneEndpoint`
+  = NLB DNS everywhere (kubeadm, worker/CP joins, SSM kubeconfig, Cilium `k8sServiceHost`);
+  CP SG accepts 6443 ONLY from the NLB's SG (the world-facing rule and
+  `api_server_allowed_cidrs` are gone, and so is the EIP — NLB-first replaces EIP-first);
+  sequential control-plane joins via the SSM gate `cp/joined-count`
+  (`bootstrap/control-plane-join.yaml`, with per-node aws-iam-authenticator material);
+  worker SSM policy narrowed to exact ARNs (the `cp/` subpath — certificate-key — is
+  excluded from the worker role); a fail-closed recreate guard
+  (`scripts/guard-legacy-cp-state.sh`, wired into `make apply` and CI);
+  ceremonies + runbooks: control-plane replacement
+  (`scripts/replace-control-plane.sh` — etcd member remove, one at a time,
+  `-replace` on a full plan, closes on 3/3 nodes/etcd/targets), join-material renewal
+  (`scripts/renew-cp-certificate-key.sh`) and HA etcd restore
+  (`scripts/drill-restore-etcd-ha.sh`, `etcdutl --bump-revision --mark-compacted`);
+  smoke §14 (3/3 CPs·etcd·API targets, negative :6443 on CP public IPs, endpoint
+  coherence, authenticator 3/3) and §13 listener/TG selection fixed for the second
+  listener; `docs/eks-contrast.md`
+
 - **Platform layer** (`platform/` + `make platform`, chained into the CI apply workflow):
   EBS CSI driver (chart 2.63.1, explicit `controller.region`), default `gp3` StorageClass
   (encrypted, WaitForFirstConsumer), namespaces `infra`/`data`/`logistics` (PSA baseline on

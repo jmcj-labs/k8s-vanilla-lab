@@ -24,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'apply'
     outputs:
-      cp_eip: ${{ steps.apply_outputs.outputs.cp_eip }}
       nlb_dns: ${{ steps.apply_outputs.outputs.nlb_dns }}
     defaults:
       run:
@@ -61,6 +60,14 @@ jobs:
 
       - name: OpenTofu Init
         run: tofu init -backend-config=backend.hcl
+
+      # HARD STOP if the state still holds the pre-HA singleton control
+      # plane: cloud-init is first-boot only, so that node would survive the
+      # apply carrying the OLD endpoint while the new CPs anchor to the NLB
+      # (ADR-007). The only valid path is destroy → apply from empty.
+      - name: Guard against in-place HA migration
+        working-directory: .
+        run: bash scripts/guard-legacy-cp-state.sh
 
       # New workers joining a LIVE cluster need a valid bootstrap token, but
       # the join-command in SSM carries the one minted at kubeadm init
@@ -134,13 +141,14 @@ jobs:
           TF_VAR_lab_account_id: ${{ vars.LAB_ACCOUNT_ID }}
         run: tofu apply -auto-approve -no-color
 
-      # The EIP is public data already in the tofu state — publishing it as a
-      # job output lets notify-slack report the endpoint without decrypting
-      # the admin kubeconfig SecureString (PLAN-SPRINTS S2 hygiene microcommit).
+      # The NLB DNS is public data already in the tofu state — publishing it
+      # as a job output lets notify-slack report both endpoints (app :443 and
+      # API :6443, same door since ADR-007) without decrypting the admin
+      # kubeconfig SecureString. The historical cp_eip output is GONE: no EIP
+      # exists anymore and no consumer may anchor to a node IP.
       - name: Publish apply outputs (non-sensitive)
         id: apply_outputs
         run: |
-          echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
           echo "nlb_dns=$(tofu output -raw nlb_dns_name)" >> "${GITHUB_OUTPUT}"
           echo "gateway_nodeport=$(tofu output -raw gateway_nodeport)" >> "${GITHUB_OUTPUT}"
 
@@ -313,13 +321,12 @@ jobs:
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
-          CP_EIP: ${{ needs.apply.outputs.cp_eip }}
           NLB_DNS: ${{ needs.apply.outputs.nlb_dns }}
         run: |
-          # The EIP arrives as a non-sensitive job output from the apply job
-          # (tofu output -raw) — this job no longer decrypts the admin
-          # kubeconfig SecureString to learn a public datum.
-          API_ENDPOINT="${CP_EIP:+${CP_EIP}:6443}"
+          # Since ADR-007 the API endpoint IS the NLB (TCP/6443) — same
+          # non-sensitive job output that already feeds the app entry; no
+          # node IP is an endpoint anymore.
+          API_ENDPOINT="${NLB_DNS:+${NLB_DNS}:6443}"
           API_ENDPOINT="${API_ENDPOINT:-unknown}"
 
           WORKER_COUNT=$(aws ec2 describe-instances \
@@ -329,7 +336,16 @@ jobs:
             --query 'length(Reservations[].Instances[])' \
             --output text \
             --region "${AWS_REGION}" 2>/dev/null || echo "2")
-          NODE_COUNT=$((WORKER_COUNT + 1))
+          # Control planes are 3 since S2 piece 3 (HA, stacked etcd) — read
+          # from the live inventory, not assumed, so the report cannot drift
+          CP_COUNT=$(aws ec2 describe-instances \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+                      "Name=tag:Role,Values=control-plane" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'length(Reservations[].Instances[])' \
+            --output text \
+            --region "${AWS_REGION}" 2>/dev/null || echo "3")
+          NODE_COUNT=$((WORKER_COUNT + CP_COUNT))
 
           INSTANCE_TYPES=$(aws ec2 describe-instances \
             --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
@@ -338,9 +354,15 @@ jobs:
             --output json \
             --region "${AWS_REGION}" | jq -r 'if length==0 then "unknown" else group_by(.) | map("\(.[0]) x\(length)") | join(", ") end')
 
-          CONTROL_PLANE_RATE=0.038
+          # eu-west-1 published rates (EC2 + ELB offer catalogues), applied
+          # to the LIVE counts. PARTIAL BY DESIGN: instances + the NLB's
+          # hourly base only — no public IPv4, EBS, NLCU or data transfer.
+          # The measured all-in figure lives in CLUSTER.md §FinOps, and the
+          # Slack field says "base" so nobody reads it as all-in.
+          CONTROL_PLANE_RATE=0.0456
           WORKER_SPOT_RATE=0.0055
-          HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", ${CONTROL_PLANE_RATE} + (${WORKER_COUNT} * ${WORKER_SPOT_RATE})}")
+          NLB_RATE=0.0252
+          HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", (${CP_COUNT} * ${CONTROL_PLANE_RATE}) + (${WORKER_COUNT} * ${WORKER_SPOT_RATE}) + ${NLB_RATE}}")
           EPOCH=$(date +%s)
 
           echo "api_endpoint=${API_ENDPOINT}" >> "${GITHUB_OUTPUT}"
@@ -386,7 +408,7 @@ jobs:
                     { type: "mrkdwn", text: ("*API endpoint:*\n" + $API_ENDPOINT) },
                     { type: "mrkdwn", text: ("*Entrada (NLB):*\n" + $NLB_DNS) },
                     { type: "mrkdwn", text: ("*Instancias:*\n" + $INSTANCE_TYPES) },
-                    { type: "mrkdwn", text: ("*Coste/hora:*\n~$" + $HOURLY_COST) }
+                    { type: "mrkdwn", text: ("*Coste base/hora (compute + NLB):*\n~$" + $HOURLY_COST) }
                   ]},
                   { type: "context", elements: [
                     { type: "mrkdwn", text: ("commit `" + $GIT_SHA + "` · por " + $ACTOR + " · <" + $RUN_URL + "|run> · <!date^" + $EPOCH + "^{date_short} {time}|now>") }

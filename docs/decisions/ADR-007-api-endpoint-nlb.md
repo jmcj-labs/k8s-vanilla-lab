@@ -1,0 +1,132 @@
+# ADR-007: HA Control Plane behind the NLB API Endpoint
+
+**Status**: Accepted (brief #S2-3, ratified by dirección + Codex structural review)  
+**Date**: 2026-08-16  
+**Deciders**: Platform Engineering Team
+
+---
+
+## Context
+
+Until S2 piece 3 the cluster had ONE control plane whose EIP was the API
+endpoint (EIP-first pattern), anchored everywhere: kubeadm's
+`controlPlaneEndpoint`, worker joins, the SSM kubeconfig, Cilium's
+`k8sServiceHost`, CI outputs and Slack. Losing that node meant losing the
+cluster — and made piece 4 (live upgrades) impossible.
+
+HA needs two things at once: **3 control planes** (stacked etcd, quorum) and a
+**stable API endpoint** that survives any single node. The lab already owns an
+internet-facing NLB (S2 piece 2, application entry).
+
+## Decision
+
+1. **The API endpoint is the existing NLB** — new TCP/6443 listener → own
+   target group → the 3 CPs as instance targets. kubeadm's
+   `controlPlaneEndpoint` is the NLB's DNS, so the API server certs carry that
+   SAN and every consumer (CP joins, worker joins, kubeconfigs — SSM and IAM —,
+   Cilium agents, kubelets) anchors to it. The app/control-plane **coupling in
+   one resource is declared and accepted in this lab**: a bad NLB mutation
+   takes both down.
+2. **API target group: `preserve_client_ip = false`, PPv2 off** — the CPs are
+   *clients* of the endpoint that has them as *targets* (hairpin). AWS
+   explicitly discourages client-IP preservation for that topology (a target
+   reaching itself sees its own IP as source and the connection fails). The
+   application TG keeps `preserve_client_ip = true`. Both are explicit config,
+   not defaults.
+3. **The CP SG's `0.0.0.0/0:6443` dies** — 6443 is accepted only from the
+   NLB's SG (SG→SG reference). The API stays public *by design* (ADR-004: TLS
+   + cert/IAM auth, CI runners with dynamic IPs) but on the NLB's SG. The
+   negative proof (":6443 answers on no CP public IP") is smoke §14d.
+   `api_server_allowed_cidrs` is removed; the EIP with it.
+4. **Expectation on record**: the NLB DNS is stable **per incarnation, not
+   across destroy/apply** — the `K8S_SERVER` refresh in the handoff runbook
+   stays alive alongside `K8S_CA_DATA`. This piece does not change that debt.
+5. **Topology: 3× t3.medium on-demand, stacked etcd, ONE AZ.** This is **node
+   HA, not zonal HA** — zonal resilience remains declared post-S2 debt. CP-0
+   runs `kubeadm init` (certs uploaded by the explicit phase afterwards, see
+   point 7); CP-1/2 join `--control-plane` **sequentially** (kubeadm HA guide
+   requirement), serialized through the SSM gate `cp/joined-count`. Which
+   node is the founder is decided AT RUNTIME, not at plan time: index 0
+   renders the founder script but skips it when `cp/joined-count` already
+   exists, so a REBUILT index 0 joins instead of initialising a second
+   cluster.
+6. **CP join material is a security boundary**: `cp/certificate-key` lives in
+   an SSM subpath **excluded from the worker role**, which enumerates exact
+   ARNs (`join-command`, `ca-cert-hash`) — a compromised worker holding the
+   certificate-key could elevate itself to control plane (Codex finding).
+   Honest scope: this is *not* "CP-role-only" — the CI/OIDC role reads
+   `/k8s/*` and already custodies the admin kubeconfig, a strictly higher
+   privilege, so narrowing it would buy nothing. Both join materials expire
+   (key 2h, bootstrap token 24h) and the renewal ceremony
+   (`scripts/renew-cp-certificate-key.sh` + runbook) renews **both**;
+   replacements re-fetch on retry.
+
+7. **Two gates protect the bootstrap from lying to itself**: CP-0 waits until
+   it sees its own instance registered in the API target group before
+   `kubeadm init` (a resolving DNS name proves the NLB exists, not that the
+   endpoint routes back), and the join script is **reentrant** — if the node
+   is already a healthy CP it exits 0 without ever reaching the `kubeadm
+   reset` retry branch, which would otherwise wipe a live etcd member.
+   Certificates are uploaded exactly once, by the explicit `init phase
+   upload-certs` whose key this bootstrap captures (`--upload-certs` is
+   deliberately absent from `kubeadm init`: it would create a second,
+   unmanaged copy under a key nobody owns).
+
+8. **Replacing a control plane is a CEREMONY, not an apply**
+   (`scripts/replace-control-plane.sh` + RUNBOOK-replace-control-plane.md).
+   Recreating the instance is the easy half: etcd remembers the dead member
+   forever, so without `member remove` the cluster ends with 4 members
+   (3 alive, 1 dead) — the quorum threshold rises to 3 and the NEXT single
+   failure kills it. The ceremony enforces ONE replacement at a time
+   (with 3 members the quorum tolerates losing one, never two), removes the
+   dead member and the stale Node, and recreates with `-replace` on a FULL
+   plan — `-target` would skip the target-group attachment and leave the new
+   node unregistered in the API endpoint. It closes on capacity RESTORED:
+   3/3 nodes, 3/3 etcd members, 3/3 healthy targets.
+
+## Consequences
+
+### Positive
+
+- The cluster survives losing any control plane, including the founder —
+  drilled as acceptance (loss drill, replacement drill, HA restore drill).
+- One public door for everything: app :443 and API :6443, both SG-scoped
+  end to end; no node IP is an endpoint anymore.
+- Prerequisite for piece 4 (live upgrades) is in place.
+
+### Negative / accepted
+
+- **Declared coupling**: NLB mutations affect app AND API (lab-acceptable).
+- **No in-place migration**: because cloud-init is first-boot only, an
+  existing singleton CP would survive an apply carrying the old endpoint.
+  The valid operation is destroy → apply from empty, enforced by
+  `scripts/guard-legacy-cp-state.sh` (run by `make apply` and by CI before
+  every apply) so it cannot be forgotten.
+- **Noisy init**: while all three targets are unhealthy the NLB fails open,
+  so kubeadm's endpoint polls hit nodes with nothing listening (fast RST).
+  kubeadm retries; expected, documented in the bootstrap.
+- **+~2.7–2.9 $/day** (2 extra on-demand CPs, 2 public IPv4, 60 GiB gp3) —
+  real number to be fixed from Cost Explorer after first apply (CLUSTER.md
+  §FinOps).
+- Node HA only: an AZ outage still kills the cluster (post-S2 debt).
+- etcd restore becomes a *logical cluster reconstruction*
+  (RUNBOOK-restore-etcd-ha.md, with `etcdutl --bump-revision
+  --mark-compacted` per etcd 3.6 guidance); the single-CP runbook is
+  historical.
+
+## Alternatives considered
+
+| Option | Decision | Reason |
+|--------|----------|--------|
+| Second, dedicated NLB for the API | Rejected | ~2× NLB cost for a lab; the coupling is acceptable and DECLARED instead |
+| Route53 + health-checked A records as endpoint | Rejected | Brief exclusion (no Route53); DNS TTL failover is slower and adds a zone to manage |
+| keepalived/kube-vip VIP on the CPs | Rejected | A VIP in a single subnet adds moving parts without removing the single-AZ limitation |
+| Keep 1 CP, snapshot-restore on loss | Rejected | That is piece 1's posture; it cannot host live upgrades (piece 4) and restore is minutes of downtime |
+| External etcd cluster | Rejected | 3 more instances and a second failure domain to operate; stacked is the kubeadm default and enough for the lab |
+
+## References
+
+- kubeadm HA topology & sequential joins: https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/
+- NLB client-IP preservation caveats (hairpin): https://docs.aws.amazon.com/elasticloadbalancing/latest/network/edit-target-group-attributes.html#client-ip-preservation
+- etcd 3.6 restore guidance (`--bump-revision`, `--mark-compacted`): https://etcd.io/docs/v3.6/op-guide/recovery/
+- ADR-004 (kubeconfig via SSM — amended), brief #S2-2 (NLB), INCIDENTS #6/#11

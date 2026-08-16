@@ -1,16 +1,16 @@
-output "instance_id" {
-  description = "Control plane instance ID"
-  value       = aws_instance.control_plane.id
+output "instance_ids" {
+  description = "Control plane instance IDs, by index (0 = kubeadm init node)"
+  value       = aws_instance.control_plane[*].id
 }
 
-output "public_ip" {
-  description = "Control plane Elastic IP (static public IP)"
-  value       = aws_eip.control_plane.public_ip
+output "public_ips" {
+  description = "Control plane public IPs (auto-assigned, SSH/egress only — the API endpoint is the NLB's DNS, ADR-007)"
+  value       = aws_instance.control_plane[*].public_ip
 }
 
-output "private_ip" {
-  description = "Control plane private IP"
-  value       = aws_instance.control_plane.private_ip
+output "private_ips" {
+  description = "Control plane private IPs, by index"
+  value       = aws_instance.control_plane[*].private_ip
 }
 
 output "security_group_id" {
@@ -21,9 +21,4 @@ output "security_group_id" {
 output "iam_role_arn" {
   description = "Control plane IAM role ARN"
   value       = aws_iam_role.control_plane.arn
-}
-
-output "kubeconfig_command" {
-  description = "Command to extract kubeconfig from control plane"
-  value       = "ssh -i ~/.ssh/YOUR_KEY.pem ubuntu@${aws_eip.control_plane.public_ip} 'sudo cat /etc/kubernetes/admin.conf' > ~/.kube/config && sed -i 's|server: https://.*:6443|server: https://${aws_eip.control_plane.public_ip}:6443|' ~/.kube/config"
 }

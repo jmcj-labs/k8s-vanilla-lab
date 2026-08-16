@@ -91,11 +91,23 @@ El orden interno importa:
   determinista 30443, sin PPv2, health TCP + seguridad en SG (fail-open
   asumido), cross-zone off explícito, NLB en el ciclo destroy/apply
 
-### 3. HA del control plane
-- 3 CPs con etcd en quórum (tolera caída de 1)
-- Endpoint estable del API (decidir: NLB interno vs alternativa) — necesario ANTES de unir el segundo CP
-- Rediseño de IaC: es un cambio estructural, no un add-on
-- Contraste honesto documentado con managed (EKS/GKE) — material Review EPO
+### 3. HA del control plane — EN CURSO (brief #S2-3 ratificado 16-ago, con las 5 correcciones de Codex)
+- 3 CPs t3.medium on-demand con etcd stacked (tolera caída de 1; **HA de nodo,
+  no zonal** — la zonal queda deuda post-S2)
+- Endpoint estable del API: **el NLB existente, listener TCP/6443** → TG propio
+  a los 3 CPs (`preserve_client_ip=false` por el hairpin); `controlPlaneEndpoint`
+  = DNS del NLB; el SG de CPs solo acepta 6443 del SG del NLB (ADR-007)
+- Rediseño de IaC ejecutado como recreate completo (NO migración in-place):
+  muere el patrón EIP-first (nace NLB-first), joins de CP secuenciados por gate
+  SSM, path `cp/` excluido del role de worker (cierre de seguridad de Codex)
+- Ceremonias nuevas: **reemplazo de un CP** (retira miembro etcd muerto +
+  Node, uno solo a la vez, `-replace` con plan completo, cierra en 3/3),
+  renovación del material de join (key 2h + token 24h) y **restore HA**
+  (reconstrucción de cluster lógico, `etcdutl --bump-revision --mark-compacted`)
+- Contraste honesto con EKS: `docs/eks-contrast.md`
+- Coronación: 3/3 CPs·etcd·targets + negativa 6443 en IPs de CP + drill de
+  pérdida de CP-0 + drill de reemplazo con key caducada + restore HA con
+  testigo + plan vacío en segundo apply + smoke completo
 
 ### 4. Upgrade del cluster en vivo (último — con HA ya no hay ventana de API caída)
 - `kubeadm upgrade` 1.35.x → siguiente minor disponible

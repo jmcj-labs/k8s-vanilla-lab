@@ -17,10 +17,13 @@ kubectl logs -n kube-system -l app.kubernetes.io/part-of=cilium --tail=20
 ```
 
 If Cilium pods are in `CrashLoopBackOff`, re-apply manually (run on the control
-plane, where `hostname -i` resolves to the CP private IP — Cilium runs in strict
-kube-proxy replacement mode and needs the API server address explicitly):
+plane — Cilium runs in strict kube-proxy replacement mode and needs the API
+server address explicitly. Since ADR-007 that address is the **NLB DNS**
+(`controlPlaneEndpoint`), never a node IP — read it from admin.conf):
 
 ```bash
+K8S_HOST=$(kubectl --kubeconfig /etc/kubernetes/admin.conf config view \
+  -o jsonpath='{.clusters[0].cluster.server}' | sed -E 's|https://(.*):6443|\1|')
 helm repo add cilium https://helm.cilium.io/
 helm repo update
 helm upgrade --install cilium cilium/cilium \
@@ -28,7 +31,7 @@ helm upgrade --install cilium cilium/cilium \
   --version 1.19.6 \
   --set ipam.mode=kubernetes \
   --set kubeProxyReplacement=true \
-  --set k8sServiceHost=$(hostname -i | awk '{print $1}') \
+  --set k8sServiceHost=${K8S_HOST} \
   --set k8sServicePort=6443 \
   --set gatewayAPI.enabled=true \
   --set gatewayAPI.externalTrafficPolicy=Cluster \
@@ -86,9 +89,16 @@ make ssh-worker
 sudo tail -100 /var/log/k8s-worker-bootstrap.log
 ```
 
-Look for `connection refused` or timeout errors pointing at the control plane private IP.
+Look for `connection refused` or timeout errors pointing at the API endpoint
+(the NLB's DNS since ADR-007 — never a node IP; a worker log showing a
+`10.x.x.x` endpoint is joining with stale SSM data).
 
 **Step 3: Token expired (24h TTL)**
+
+> **Procedimiento manual de último recurso.** La vía normal es el Apply
+> (acuña token fresco y reescribe `join-command` en SSM antes de aplicar) o,
+> para control planes, `scripts/renew-cp-certificate-key.sh`. Los comandos de
+> abajo son para diagnosticar a mano cuando esas vías no están disponibles.
 
 Bootstrap tokens expire after 24 hours. If a worker needs to rejoin after that window:
 
@@ -110,7 +120,9 @@ Then on the worker:
 ```bash
 make ssh-worker
 
-sudo kubeadm join 10.0.1.X:6443 \
+# The endpoint is the NLB's DNS (ADR-007) — never a node IP.
+# Read it from SSM: aws ssm get-parameter --name /k8s/<cluster>/api-endpoint --with-decryption --query Parameter.Value --output text
+sudo kubeadm join <cluster>-gw-nlb-xxxx.elb.<region>.amazonaws.com:6443 \
   --token YOUR_TOKEN \
   --discovery-token-ca-cert-hash sha256:YOUR_HASH \
   --cri-socket unix:///run/containerd/containerd.sock
@@ -150,10 +162,11 @@ run `make apply`.
 
 ```bash
 grep server: ~/.kube/k8s-vanilla-lab.conf
-# Should show: server: https://PUBLIC_IP:6443
+# Should show the NLB DNS: server: https://<cluster>-gw-nlb-....elb.<region>.amazonaws.com:6443
 ```
 
-If it shows a private IP (`10.x.x.x`), re-fetch:
+If it shows a node IP (private `10.x.x.x` or a public one), the kubeconfig is
+from a pre-ADR-007 incarnation — re-fetch:
 
 ```bash
 make kubeconfig
@@ -163,8 +176,9 @@ Other causes:
 
 | Cause | Fix |
 |-------|-----|
-| Port 6443 blocked by security group | Verify `my_ip` in `terraform.tfvars` covers your current IP; `make apply` to update |
-| Control plane not running | Check instance state in AWS console; `make ssh-cp` then `sudo systemctl status kubelet` |
+| Stale NLB DNS from a previous incarnation | The name changes with every destroy/apply: `make kubeconfig` again, and refresh `K8S_SERVER` in Repo 2 (`docs/RUNBOOK-post-apply.md`) |
+| API targets unhealthy | `aws elbv2 describe-target-health --target-group-arn $(aws elbv2 describe-target-groups --names "$CLUSTER_NAME-api-tg" --query 'TargetGroups[0].TargetGroupArn' --output text)` — the NLB fails OPEN when all are unhealthy, so `:6443` may answer from a node whose API is down |
+| Control planes not running | Check instance state in AWS console; `make ssh-cp` (`CP_INDEX=1|2` for the others) then `sudo systemctl status kubelet` |
 
 ---
 

@@ -5,7 +5,8 @@ This document defines the exact variables passed to each cloud-init template.
 ## Architecture: DRY Approach (Option B)
 
 - `common.yaml`: Loaded with `file()`, **no variables** (pure install script)
-- `control-plane.yaml`: Receives variables via `templatefile()`
+- `control-plane.yaml` (founder, index 0): Receives variables via `templatefile()`
+- `control-plane-join.yaml` (indexes 1..N, S2 piece 3): Receives variables via `templatefile()`
 - `worker.yaml`: Receives variables via `templatefile()`
 
 ---
@@ -27,9 +28,10 @@ This document defines the exact variables passed to each cloud-init template.
 
 ---
 
-## 2. control-plane.yaml
+## 2. control-plane.yaml (founder, index 0)
 
-**Purpose**: Initialize Kubernetes control plane with kubeadm
+**Purpose**: Initialize the Kubernetes control plane with kubeadm, anchored
+to the NLB endpoint (ADR-007 — the EIP no longer exists)
 
 **Variables**:
 ```yaml
@@ -37,26 +39,47 @@ cluster_name              # string, e.g., "k8s-vanilla-lab"
 aws_region                # string, e.g., "eu-west-1"
 pod_cidr                  # string, e.g., "10.244.0.0/16"
 service_cidr              # string, e.g., "10.96.0.0/12"
-kubernetes_version        # string, e.g., "1.35"
-control_plane_public_ip   # string, EIP from aws_eip.control_plane.public_ip
+api_endpoint_dns          # string, module.nlb.dns_name (NLB-first pattern)
 ssm_parameter_path        # string, e.g., "/k8s/k8s-vanilla-lab"
 ```
 
 **Key Operations**:
 1. Wait for common.yaml to complete (dependency)
-2. Run `kubeadm init` with:
-   - `--control-plane-endpoint` = `${control_plane_public_ip}:6443`
-   - `--apiserver-cert-extra-sans` = `${control_plane_public_ip}` (critical for EIP)
-   - `--pod-network-cidr` = `${pod_cidr}`
-   - `--service-cidr` = `${service_cidr}`
-3. Generate bootstrap token: `kubeadm token create --ttl 24h`
-4. Extract CA cert hash: `openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'`
-5. Store in SSM:
-   - `${ssm_parameter_path}/join-token` = bootstrap token
+2. aws-iam-authenticator install + `init` (webhook material BEFORE kubeadm)
+3. `kubeadm init --upload-certs` with `controlPlaneEndpoint` = `${api_endpoint_dns}:6443`
+4. Install Cilium (`k8sServiceHost` = `${api_endpoint_dns}`)
+5. Capture certificate-key (`upload-certs` phase, validated hex64)
+6. Store in SSM:
+   - `${ssm_parameter_path}/join-command` = full worker/CP join command (NLB endpoint)
    - `${ssm_parameter_path}/ca-cert-hash` = CA cert hash
-   - `${ssm_parameter_path}/control-plane-endpoint` = `${control_plane_public_ip}:6443`
-6. Configure kubectl for ubuntu user
-7. Mark as ready
+   - `${ssm_parameter_path}/api-endpoint` = `${api_endpoint_dns}:6443`
+   - `${ssm_parameter_path}/cp/certificate-key` = CP join material (path excluded from the worker role)
+   - `${ssm_parameter_path}/kubeconfig` = admin.conf (server = NLB)
+7. Open the sequential-join gate: `${ssm_parameter_path}/cp/joined-count` = 1
+
+---
+
+## 2b. control-plane-join.yaml (indexes 1..N)
+
+**Purpose**: Join an additional control plane (stacked etcd), strictly
+sequentially
+
+**Variables**:
+```yaml
+cluster_name              # string
+aws_region                # string
+api_endpoint_dns          # string, module.nlb.dns_name
+ssm_parameter_path        # string
+cp_index                  # number, this node's index (1..N)
+```
+
+**Key Operations**:
+1. Wait for common.yaml; authenticator install + `init` (per-node material)
+2. Wait for the gate: `cp/joined-count` >= `${cp_index}`
+3. Fetch `join-command` + `cp/certificate-key`
+4. `kubeadm join --control-plane --certificate-key ...` with retry +
+   key re-fetch (2h TTL → renewal ceremony republishes)
+5. Verify local etcd member Running, then publish `cp/joined-count` = index+1
 
 ---
 
@@ -116,9 +139,9 @@ ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 
 ## File References
 
-**Tofu Module**: `tofu/envs/lab/main.tf` lines 85-110 (locals block with templatefile calls)
+**Tofu Module**: `tofu/envs/lab/main.tf` (`data.cloudinit_config.control_plane`, one per CP index)
 
-**Control Plane Module**: `tofu/modules/control-plane/main.tf` lines 148-160 (EIP-first pattern)
+**Control Plane Module**: `tofu/modules/control-plane/main.tf` (NLB-first pattern — the EIP-first pattern was removed in S2 piece 3, ADR-007)
 
 **Bootstrap Files** (to be created):
 - `bootstrap/common.yaml`
