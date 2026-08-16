@@ -57,6 +57,29 @@ gh variable set K8S_CA_DATA --repo jmcj-labs/logistics-lab \
   --body "$(awk '$1=="certificate-authority-data:"{print $2}' <<<"$KC")"
 ```
 
+## 2b. La entrada de aplicación: DNS del NLB (nuevo en cada apply)
+
+```bash
+NLB_DNS=$(cd tofu/envs/lab && tofu output -raw nlb_dns_name)
+```
+
+El e2e exterior va por él — `--connect-to` (no `--resolve`, que espera
+dirección y no hostname) conserva el SNI:
+
+```bash
+# HTTP (pin del cert vivo del Gateway; ver §e2e del runbook de coronación)
+curl --connect-to "shipments.logistics.lab:443:${NLB_DNS}:443" \
+  -sS -k --pinnedpubkey "sha256//<pin-del-cert-vivo>" \
+  https://shipments.logistics.lab/shipments -d '{...}' -H "Content-Type: application/json"
+
+# gRPC
+grpcurl -insecure -authority routing.logistics.lab "${NLB_DNS}:443" \
+  list logistics.routing.v1.RoutingService
+```
+
+Grafana ya **no** tiene NodePort: 
+`kubectl port-forward -n infra svc/kube-prometheus-stack-grafana 3000:80`.
+
 ## 3. Deploy y verificación
 
 ```bash

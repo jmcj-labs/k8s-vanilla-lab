@@ -25,6 +25,7 @@ jobs:
     if: github.event.inputs.confirm == 'apply'
     outputs:
       cp_eip: ${{ steps.apply_outputs.outputs.cp_eip }}
+      nlb_dns: ${{ steps.apply_outputs.outputs.nlb_dns }}
     defaults:
       run:
         working-directory: tofu/envs/lab
@@ -138,7 +139,9 @@ jobs:
       # the admin kubeconfig SecureString (PLAN-SPRINTS S2 hygiene microcommit).
       - name: Publish apply outputs (non-sensitive)
         id: apply_outputs
-        run: echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
+        run: |
+          echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
+          echo "nlb_dns=$(tofu output -raw nlb_dns_name)" >> "${GITHUB_OUTPUT}"
 
       - name: Install platform layer
         env:
@@ -307,6 +310,7 @@ jobs:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           CP_EIP: ${{ needs.apply.outputs.cp_eip }}
+          NLB_DNS: ${{ needs.apply.outputs.nlb_dns }}
         run: |
           # The EIP arrives as a non-sensitive job output from the apply job
           # (tofu output -raw) — this job no longer decrypts the admin
@@ -358,6 +362,7 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg NODE_COUNT "${NODE_COUNT}" \
             --arg API_ENDPOINT "${API_ENDPOINT}" \
+            --arg NLB_DNS "${NLB_DNS:-unknown}" \
             --arg INSTANCE_TYPES "${INSTANCE_TYPES}" \
             --arg HOURLY_COST "${HOURLY_COST}" \
             --arg GIT_SHA "${GIT_SHA}" \
@@ -374,6 +379,7 @@ jobs:
                     { type: "mrkdwn", text: "*K8s:*\nv1.35.x" },
                     { type: "mrkdwn", text: ("*Nodos:*\n" + $NODE_COUNT) },
                     { type: "mrkdwn", text: ("*API endpoint:*\n" + $API_ENDPOINT) },
+                    { type: "mrkdwn", text: ("*Entrada (NLB):*\n" + $NLB_DNS) },
                     { type: "mrkdwn", text: ("*Instancias:*\n" + $INSTANCE_TYPES) },
                     { type: "mrkdwn", text: ("*Coste/hora:*\n~$" + $HOURLY_COST) }
                   ]},

@@ -221,6 +221,7 @@ helm upgrade --install cilium cilium/cilium \
   --set k8sServiceHost="$${PRIVATE_IP}" \
   --set k8sServicePort=6443 \
   --set gatewayAPI.enabled=true \
+  --set gatewayAPI.externalTrafficPolicy=Cluster \
   --set hubble.relay.enabled=true \
   --set hubble.ui.enabled=true \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log

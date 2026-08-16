@@ -272,7 +272,26 @@ module "worker" {
   cluster_name                    = var.cluster_name
   worker_count                    = var.worker_count
   capacity_type                   = var.worker_capacity_type
+  gateway_nodeport                = var.gateway_nodeport
+  nlb_security_group_id           = module.nlb.security_group_id
   tags                            = local.common_tags
 
   depends_on = [module.control_plane, aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
+}
+
+# Application NLB (S2 piece 2) — lives and dies with the cluster.
+# The module-level mutual reference is fine: the RESOURCE graph is acyclic
+# (NLB SG depends on nothing from the workers; the worker SG references
+# the NLB SG; the target attachments reference the worker instance IDs).
+module "nlb" {
+  source = "../../modules/nlb"
+
+  name                = var.cluster_name
+  vpc_id              = aws_vpc.main.id
+  vpc_cidr            = var.vpc_cidr
+  subnet_id           = aws_subnet.public.id
+  gateway_nodeport    = var.gateway_nodeport
+  worker_count        = var.worker_count
+  worker_instance_ids = module.worker.instance_ids
+  tags                = local.common_tags
 }
