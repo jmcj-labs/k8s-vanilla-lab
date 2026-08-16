@@ -110,8 +110,8 @@ jobs:
             namespace: kube-system
           type: bootstrap.kubernetes.io/token
           stringData:
-            token-id: ${TOKEN_ID}
-            token-secret: ${TOKEN_SECRET}
+            token-id: "${TOKEN_ID}"
+            token-secret: "${TOKEN_SECRET}"
             expiration: "${EXPIRATION}"
             usage-bootstrap-authentication: "true"
             usage-bootstrap-signing: "true"
