@@ -13,8 +13,7 @@ aws_profile = "k8s-vanilla-lab"
 lab_account_id = "222222222222"
 
 # REQUIRED: CIDR allowed for SSH and K8s API access. No default — set your IP
-# (curl ifconfig.me) as x.x.x.x/32, or consciously open it with 0.0.0.0/0.
-my_ip = "1.2.3.4/32"
+# (my_ip ya no existe: no hay SSH entrante — el acceso es SSM, INCIDENTS #16)
 
 # REQUIRED: Existing AWS SSH key pair name
 ssh_key_name = "your-key-name"

@@ -24,18 +24,6 @@ variable "control_plane_count" {
   default     = 3
 }
 
-variable "my_ip" {
-  # VESTIGIAL since INCIDENTS #16: nothing consumes it any more (no inbound
-  # SSH exists). Kept only so existing terraform.tfvars / CI variables do not
-  # break; delete it in a later sweep once every caller has dropped it.
-  description = "UNUSED since the move to SSM out-of-band access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0). The K8s API no longer uses it: 6443 enters through the NLB (ADR-007)."
-  type        = string
-  validation {
-    condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"
-  }
-}
-
 variable "worker_count" {
   # 3, not 2: real anti-affinity for the phase-2 data topology
   # (CNPG x3 instances, Kafka x3 brokers — one per worker).

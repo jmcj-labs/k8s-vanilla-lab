@@ -33,8 +33,9 @@ resource "aws_security_group" "worker" {
 
   # Gateway NodePort — ONLY from the NLB's security group (S2 piece 2).
   # The old 30000-32767-from-my_ip range is gone: the NLB is the single
-  # public APPLICATION entry; SSH (my_ip) and the API :6443 keep their own
-  # regimes. SG→SG reference works with native client-IP preservation
+  # public APPLICATION entry, and since INCIDENTS #16 there is no inbound
+  # SSH at all — node access is SSM. SG→SG reference works with native
+  # client-IP preservation
   # because the health checks and forwarded connections originate from the
   # NLB's ENIs, which carry its SG.
   ingress {
