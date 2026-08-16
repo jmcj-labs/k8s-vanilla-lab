@@ -51,21 +51,29 @@ bash scripts/replace-control-plane.sh <índice>     # 0, 1 o 2
    Node ya no está registrado, localiza al huérfano *por eliminación* (el
    miembro etcd cuyo nombre no corresponde a ningún Node vivo) y aborta si
    hay más de uno.
-3. **Renueva el material de join** (certificate-key 2h + token 24h) desde un
+3. **Plan guardado e inspeccionado — ANTES de degradar nada**: `tofu plan
+   -replace=<addr> -out=…` y comprobación sobre el JSON de que **ninguna
+   otra instancia** se destruye o reemplaza. Si el plan falla o resulta
+   inaceptable, la ceremonia aborta con **el cluster intacto**: etcd conserva
+   todos sus miembros y no se ha borrado ningún Node. Ese orden es
+   deliberado — abortar después de haber retirado un miembro cobraría un
+   cluster de 2 como precio de un ensayo fallido.
+4. **Renueva el material de join** (certificate-key 2h + token 24h) desde un
    superviviente — salvo `SKIP_RENEW=1`, que existe para el drill.
-4. **Retira el miembro etcd muerto** (`etcdctl member remove`) y **borra el
-   Node** viejo.
-5. **Plan guardado, inspeccionado y aplicado**: `tofu plan -replace=<addr>
-   -out=…`, se comprueba sobre el JSON que **ninguna otra instancia** se
-   destruye o reemplaza, y se aplica **ese** plan. Un `apply -replace` a
-   pelo arrastraría cualquier otro cambio pendiente o derivado.
-6. **Vuelve a borrar el Node viejo** tras el apply: entre el primer borrado y
+5. **Retira el miembro etcd muerto** (`etcdctl member remove`) y **borra el
+   Node** viejo. A partir de aquí el cluster está degradado a propósito, con
+   el plan ya aprobado.
+6. **Aplica el plan aprobado** tal cual (`tofu apply <plan>`): lo que se
+   inspeccionó es lo que se ejecuta.
+7. **Vuelve a borrar el Node viejo** tras el apply: entre el primer borrado y
    la terminación real de la máquina, su kubelet puede re-registrarlo.
-7. **Cierra con capacidad restaurada y conjuntos EXACTOS** (las invariantes
+8. **Cierra con capacidad restaurada y conjuntos EXACTOS** (las invariantes
    del smoke §14, no meros conteos): exactamente 3 Nodes de control plane y
    los 3 Ready · exactamente 3 miembros etcd y los 3 *started* ·
    `etcdctl endpoint health --cluster` sano · y el conjunto de targets
-   healthy **igual** al de instance-ids vivos.
+   **registrados** igual al de instance-ids vivos **y todos healthy** (dos
+   asertos separados: "3 healthy" ocultaría un cuarto target *draining* de la
+   máquina retirada).
 
 ## El índice 0 no es especial (ya no)
 
@@ -146,7 +154,13 @@ make smoke-test
   viva (el mensaje dice quién y desde cuándo) o murió dejando el lock. Si se
   confirma que no hay ninguna corriendo:
   `kubectl -n kube-system delete configmap cp-replacement-lock`.
-- **"plan inspection refused this plan"**: el plan tocaba otras instancias —
-  **no se aplicó nada**. Revisar el `tofu plan` completo a mano: normalmente
-  significa que hay cambios pendientes sin relación con el reemplazo, y esos
-  deben aplicarse (o revertirse) por separado antes de repetir la ceremonia.
+- **"plan inspection refused this plan"**: el plan tocaba otras instancias.
+  **No se aplicó nada y el cluster sigue intacto** — la inspección ocurre
+  antes de retirar el miembro etcd (paso 3, no 5). Revisar el `tofu plan`
+  completo a mano: normalmente significa que hay cambios pendientes sin
+  relación con el reemplazo, y esos deben aplicarse (o revertirse) por
+  separado antes de repetir la ceremonia.
+- **"cannot read cluster_info from the tofu state"**: la ceremonia no
+  adivina cuántos CPs debería haber — sin ese dato no puede juzgar ninguna
+  precondición. Causas típicas: credenciales caducadas, `make init`
+  pendiente, backend inalcanzable.

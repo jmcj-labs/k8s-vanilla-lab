@@ -17,6 +17,13 @@
 # SAVED PLAN that is inspected before being applied — never a bare
 # `apply -replace`, which would also carry along whatever else was pending.
 #
+# ORDER MATTERS AND IS DELIBERATE: everything that can REFUSE the ceremony
+# (preconditions, plan generation, plan inspection) runs BEFORE anything
+# that degrades the cluster (member remove, node delete). A plan that turns
+# out to be unacceptable must leave etcd at full strength — aborting after
+# having already removed a member would hand the operator a 2-member
+# cluster as the price of a failed dry run.
+#
 # Requires: kubectl (admin kubeconfig), AWS credentials for the lab, and
 # the tofu working dir initialised (make init).
 set -euo pipefail
@@ -52,13 +59,36 @@ if ! kubectl -n kube-system create configmap "${LOCK_CM}" \
   If it died, release the lock deliberately:
     kubectl -n kube-system delete configmap ${LOCK_CM}"
 fi
-release_lock() { kubectl -n kube-system delete configmap "${LOCK_CM}" --ignore-not-found >/dev/null 2>&1 || true; }
-trap release_lock EXIT
+PLAN_DIR=""
+cleanup() {
+  kubectl -n kube-system delete configmap "${LOCK_CM}" --ignore-not-found >/dev/null 2>&1 || true
+  [ -n "${PLAN_DIR}" ] && rm -rf "${PLAN_DIR}"
+  return 0
+}
+trap cleanup EXIT
 log "✓ ceremony lock acquired (${LOCK_OWNER})"
 
 # ── 1. Inventory: what SHOULD exist, what does, and in what shape ───────────
-EXPECTED=$(cd "${TOFU_DIR}" && tofu output -json cluster_info 2>/dev/null \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["control_plane_count"])' 2>/dev/null || echo 3)
+# How many control planes SHOULD exist is the yardstick for every check
+# below — never guess it. `|| echo 3` would be the same fail-open pattern
+# just removed from the state guard: inventing the expected size and then
+# running a destructive ceremony against that invention.
+set +e
+CLUSTER_INFO=$(cd "${TOFU_DIR}" && tofu output -json cluster_info 2>&1)
+CI_RC=$?
+set -e
+[ ${CI_RC} -eq 0 ] || FAIL "cannot read cluster_info from the tofu state (rc=${CI_RC}):
+$(echo "${CLUSTER_INFO}" | sed 's/^/    /')
+  The expected control-plane count is the yardstick for every safety check
+  here — refusing to guess it. Usual causes: expired credentials, the
+  working dir not initialised (make init), or an unreachable backend."
+EXPECTED=$(echo "${CLUSTER_INFO}" | python3 -c '
+import json,sys
+print(json.load(sys.stdin)["control_plane_count"])' 2>/dev/null || echo "")
+case "${EXPECTED}" in
+  ''|*[!0-9]*) FAIL "control_plane_count missing or not a number in cluster_info" ;;
+esac
+[ "${EXPECTED}" -ge 3 ] || FAIL "control_plane_count is ${EXPECTED}: this ceremony assumes an HA cluster (>=3)"
 [ "${CP_INDEX}" -lt "${EXPECTED}" ] || FAIL "index ${CP_INDEX} is out of range (cluster has ${EXPECTED} control planes)"
 
 # Registered control-plane Nodes, with the instance id carried in providerID
@@ -143,7 +173,44 @@ etcdctl_on_survivor() {
 }
 etcd_members_json() { etcdctl_on_survivor member list -w json 2>/dev/null; }
 
-# ── 3. Renew join material (unless the drill wants the expiry path) ─────────
+# ── 3. PLAN AND INSPECT FIRST — before degrading anything ───────────────────
+# Everything that can still say NO happens here, while etcd is at full
+# strength. `apply -replace` alone would also carry along whatever else was
+# pending or drifted, so: plan to a file, prove on the JSON that no other
+# instance is destroyed or replaced, and later apply THAT saved plan.
+ADDR="module.control_plane.aws_instance.control_plane[${CP_INDEX}]"
+PLAN_DIR=$(mktemp -d)
+PLAN_FILE="${PLAN_DIR}/tfplan"
+log "Planning the replacement of ${ADDR} (nothing has been touched yet)"
+( cd "${TOFU_DIR}" && tofu plan -input=false -replace="${ADDR}" -out="${PLAN_FILE}" >/dev/null ) \
+  || FAIL "tofu plan failed — cluster untouched, etcd still at full strength"
+
+( cd "${TOFU_DIR}" && tofu show -json "${PLAN_FILE}" ) | ADDR="${ADDR}" python3 -c '
+import json,os,sys
+target=os.environ["ADDR"]
+plan=json.load(sys.stdin)
+bad=[]; expected=False
+for c in plan.get("resource_changes",[]):
+    actions=c.get("change",{}).get("actions",[])
+    destructive = "delete" in actions
+    addr = c["address"]
+    if addr==target:
+        expected = destructive and "create" in actions
+        continue
+    if destructive and c["type"] == "aws_instance":
+        bad.append(addr + ": " + ",".join(actions))
+if bad:
+    print("PLAN TOUCHES OTHER INSTANCES:")
+    for b in bad: print("   ", b)
+    sys.exit(2)
+if not expected:
+    print("plan does NOT replace " + target)
+    sys.exit(3)
+print("plan verified: only the target control plane is replaced")' \
+  || FAIL "plan inspection refused this plan (see above) — NOTHING was applied and the cluster is untouched: etcd still has all its members and no Node was deleted"
+log "✓ plan inspected and saved: only ${ADDR} is replaced"
+
+# ── 4. Renew join material (unless the drill wants the expiry path) ─────────
 if [ "${SKIP_RENEW}" = "1" ]; then
   log "SKIP_RENEW=1 — NOT renewing join material (drill: prove the expired-key path)"
 else
@@ -152,7 +219,9 @@ else
     bash "$(dirname "$0")/renew-cp-certificate-key.sh" "${SURVIVOR}"
 fi
 
-# ── 4. Bury the dead: etcd member + Node ────────────────────────────────────
+# ── 5. Bury the dead: etcd member + Node ────────────────────────────────────
+# FROM HERE ON the cluster is degraded on purpose: the plan is already
+# approved and saved, so every remaining step moves towards restoring it.
 # The member is identified by name when the Node is known; when the Node is
 # already gone, by ELIMINATION — the member whose name matches no current
 # control-plane Node. More than one orphan is a multi-failure scenario, not
@@ -195,44 +264,10 @@ if [ -n "${OLD_NODE}" ]; then
   kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null
 fi
 
-# ── 5. SAVED PLAN, inspected, then applied ──────────────────────────────────
-# `apply -replace` would also carry along anything else pending in the
-# working tree or drifted in the cloud. Plan → inspect → apply THAT plan:
-# no other control plane (and no worker) may be destroyed or replaced.
-ADDR="module.control_plane.aws_instance.control_plane[${CP_INDEX}]"
-PLAN_FILE=$(mktemp -u)/tfplan
-mkdir -p "$(dirname "${PLAN_FILE}")"
-log "Planning the replacement of ${ADDR}"
-( cd "${TOFU_DIR}" && tofu plan -input=false -replace="${ADDR}" -out="${PLAN_FILE}" >/dev/null ) \
-  || FAIL "tofu plan failed"
-
-( cd "${TOFU_DIR}" && tofu show -json "${PLAN_FILE}" ) | ADDR="${ADDR}" python3 -c '
-import json,os,sys
-target=os.environ["ADDR"]
-plan=json.load(sys.stdin)
-bad=[]; expected=False
-for c in plan.get("resource_changes",[]):
-    actions=c.get("change",{}).get("actions",[])
-    destructive = "delete" in actions
-    addr = c["address"]
-    if addr==target:
-        expected = destructive and "create" in actions
-        continue
-    if destructive and c["type"] == "aws_instance":
-        bad.append(addr + ": " + ",".join(actions))
-if bad:
-    print("PLAN TOUCHES OTHER INSTANCES:")
-    for b in bad: print("   ", b)
-    sys.exit(2)
-if not expected:
-    print("plan does NOT replace " + target)
-    sys.exit(3)
-print("plan verified: only the target control plane is replaced")' \
-  || FAIL "plan inspection refused this plan (see above) — nothing was applied"
-log "✓ plan inspected: only ${ADDR} is replaced"
-
+# ── 6. Apply the plan approved in step 3 ────────────────────────────────────
+# The saved plan is applied verbatim: what was inspected is what runs.
+log "Applying the approved plan (${ADDR})"
 ( cd "${TOFU_DIR}" && tofu apply -input=false "${PLAN_FILE}" ) || FAIL "tofu apply failed"
-rm -f "${PLAN_FILE}"
 
 # The old kubelet can re-register its Node between our delete and the actual
 # termination of the machine — delete again now that the instance is gone.
@@ -275,21 +310,33 @@ CP_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
             "Name=tag:Role,Values=control-plane" \
             "Name=instance-state-name,Values=running" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
+# TWO separate assertions, because "3 healthy" hides a 4th target left
+# draining or unhealthy from the machine we just replaced:
+#   (a) the REGISTERED set equals exactly the live control planes
+#   (b) every one of them is healthy
 TG_DEADLINE=$(( $(date -u +%s) + 600 ))
 while true; do
   TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}")
-  HEALTHY_IDS=$(echo "${TARGETS_JSON}" | python3 -c '
+  ALL_IDS=$(echo "${TARGETS_JSON}" | python3 -c '
 import json,sys
 t=json.load(sys.stdin)["TargetHealthDescriptions"]
-print("\n".join(sorted(d["Target"]["Id"] for d in t if d["TargetHealth"]["State"]=="healthy")))')
-  [ "${HEALTHY_IDS}" = "${CP_IDS}" ] && break
+print("\n".join(sorted(d["Target"]["Id"] for d in t)))')
+  UNHEALTHY_LIST=$(echo "${TARGETS_JSON}" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)["TargetHealthDescriptions"]
+print("\n".join(d["Target"]["Id"] + "=" + d["TargetHealth"]["State"]
+                for d in t if d["TargetHealth"]["State"] != "healthy"))')
+  if [ "${ALL_IDS}" = "${CP_IDS}" ] && [ -z "${UNHEALTHY_LIST}" ]; then
+    break
+  fi
   [ "$(date -u +%s)" -lt "${TG_DEADLINE}" ] \
-    || FAIL "API target group healthy set != live control planes after 10 min
-  healthy: ${HEALTHY_IDS//$'\n'/ }
-  live:    ${CP_IDS//$'\n'/ }"
+    || FAIL "API target group did not settle in 10 min
+  registered: ${ALL_IDS//$'\n'/ }
+  live CPs:   ${CP_IDS//$'\n'/ }
+  not healthy: ${UNHEALTHY_LIST//$'\n'/ }"
   sleep 15
 done
 T1=$(date -u +%s)
-log "✓ API target group: healthy set == exactly the ${EXPECTED} live control planes"
+log "✓ API target group: registered set == exactly the ${EXPECTED} live control planes, ALL healthy (no stale/draining target)"
 log "=== Replacement complete in $((T1-T0))s — HA capacity RESTORED ==="
 log "record the timing in docs/RUNBOOK-replace-control-plane.md"
