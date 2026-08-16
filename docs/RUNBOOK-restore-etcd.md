@@ -57,12 +57,15 @@ aws s3 presign "s3://<BACKUP_BUCKET>/etcd/<SNAPSHOT>.db" \
 curl -fsSL -o /tmp/restore.db '<URL_PREFIRMADA>'
 
 ETCD_VER=v3.6.4    # mantener alineado con el etcd que corre kubeadm
-curl -fsSL -o /tmp/etcd.tgz \
-  "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz"
+TARBALL="etcd-${ETCD_VER}-linux-amd64.tar.gz"
+# Descargar con su NOMBRE DE RELEASE: sha256sum -c resuelve literalmente el
+# nombre de cada linea del SHA256SUMS (PR #57 — el script ya lo hace asi).
+curl -fsSL -o "/tmp/${TARBALL}" \
+  "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/${TARBALL}"
 curl -fsSL -o /tmp/etcd-SHA256SUMS \
   "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/SHA256SUMS"
-(cd /tmp && grep "etcd-${ETCD_VER}-linux-amd64.tar.gz" etcd-SHA256SUMS | sha256sum -c -)
-tar -xzf /tmp/etcd.tgz -C /tmp --strip-components=1 \
+(cd /tmp && grep "${TARBALL}$" etcd-SHA256SUMS | sha256sum -c -)
+tar -xzf "/tmp/${TARBALL}" -C /tmp --strip-components=1 \
   "etcd-${ETCD_VER}-linux-amd64/etcdutl"
 
 # 5. Parar los pods estáticos (kubelet los relanzará al reaparecer el manifest)
