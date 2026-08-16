@@ -142,11 +142,14 @@ jobs:
         run: |
           echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
           echo "nlb_dns=$(tofu output -raw nlb_dns_name)" >> "${GITHUB_OUTPUT}"
+          echo "gateway_nodeport=$(tofu output -raw gateway_nodeport)" >> "${GITHUB_OUTPUT}"
 
       - name: Install platform layer
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
+          # Single source of truth: the Tofu output, not an independent literal
+          GATEWAY_NODEPORT: ${{ steps.apply_outputs.outputs.gateway_nodeport }}
         run: |
           # Poll SSM for the kubeconfig (published at the end of the CP bootstrap)
           # instead of a blind sleep: a fresh cluster takes 8-12 min, a re-run on
@@ -198,6 +201,7 @@ jobs:
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
+          GATEWAY_NODEPORT: ${{ steps.apply_outputs.outputs.gateway_nodeport }}
         run: |
           make smoke-test CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .
@@ -350,6 +354,7 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           NODE_COUNT: ${{ steps.context.outputs.node_count }}
           API_ENDPOINT: ${{ steps.context.outputs.api_endpoint }}
+          NLB_DNS: ${{ needs.apply.outputs.nlb_dns }}
           INSTANCE_TYPES: ${{ steps.context.outputs.instance_types }}
           HOURLY_COST: ${{ steps.context.outputs.hourly_cost }}
           GIT_SHA: ${{ github.sha }}

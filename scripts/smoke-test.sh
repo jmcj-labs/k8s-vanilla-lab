@@ -850,7 +850,9 @@ TG_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn "${NLB_ARN}" --reg
 TG_PORT=$(aws elbv2 describe-target-groups --target-group-arns "${TG_ARN}" --region "${AWS_REGION}" \
   --query 'TargetGroups[0].Port' --output text)
 WORKER_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
-  --filters "Name=tag:Role,Values=worker" "Name=instance-state-name,Values=running" \
+  --filters "Name=tag:Role,Values=worker" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
 HEALTH_ELAPSED=0
 until TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --region "${AWS_REGION}") \
@@ -892,15 +894,19 @@ assert not any(r.get("FromPort")==30000 and r.get("ToPort")==32767 for r in rule
 ' || FAIL "worker SG / NodePort coherence broken"
 OK "port coherence: Service=${SVC_NP} · target group=${TG_PORT} · worker SG accepts it from the NLB SG only"
 
-# 13d. NEGATIVE test: the NodePort on the workers' public IPs must NOT
-# answer from outside — the SG closes it; the NLB is the only door.
-W_PUB_IP=$(aws ec2 describe-instances --region "${AWS_REGION}" \
-  --filters "Name=tag:Role,Values=worker" "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-if curl -sk --max-time 6 "https://${W_PUB_IP}:${GATEWAY_NODEPORT}/" -o /dev/null 2>/dev/null; then
-  FAIL "NodePort ${GATEWAY_NODEPORT} answers on worker public IP ${W_PUB_IP} — the SG should close it"
-fi
-OK "negative proof: NodePort closed on worker public IPs (NLB is the only application door)"
+# 13d. NEGATIVE test: the NodePort must NOT answer from outside on ANY
+# worker public IP — one closed door proves nothing about the other two.
+W_PUB_IPS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Role,Values=worker" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].PublicIpAddress' --output text | tr '\t' '\n')
+for W_PUB_IP in ${W_PUB_IPS}; do
+  if curl -sk --max-time 6 "https://${W_PUB_IP}:${GATEWAY_NODEPORT}/" -o /dev/null 2>/dev/null; then
+    FAIL "NodePort ${GATEWAY_NODEPORT} answers on worker public IP ${W_PUB_IP} — the SG should close it"
+  fi
+done
+OK "negative proof: NodePort closed on EVERY worker public IP (NLB is the only application door)"
 
 # 13e. POSITIVE e2e THROUGH the NLB: TLS pinned to the live Gateway cert.
 # 200 or 404 both prove the full datapath (world→NLB→NodePort→Gateway);

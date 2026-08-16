@@ -58,7 +58,8 @@ workers solo acepta ese puerto desde el SG del NLB. SSH (`my_ip`) y API
 ClusterIssuer `selfsigned`, gateway-shim activado) → pool LB-IPAM + Gateway
 `shared-gw` (HTTPS :443, `*.logistics.lab`, TLS de cert-manager, rutas solo
 desde ns `logistics`) → CNPG → Strimzi → kube-prometheus-stack (Grafana
-NodePort, Alertmanager off). Solo operators: los clusters PG/Kafka son de la
+type NodePort pero inaccesible desde fuera — acceso por port-forward,
+Alertmanager off). Solo operators: los clusters PG/Kafka son de la
 app.
 
 **Backups** (S2 pieza 1 — "sin restore probado no es backup"): bucket S3
@@ -179,8 +180,7 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 - ~~Ingreso sin e2e probado~~ **CERRADA (2026-08-15)**: e2e exterior en la
   coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
   desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
-  evidencia en [HANDOFF.md](HANDOFF.md). La *exposición* sigue por NodePort
-  hasta el NLB de S2.
+  evidencia en [HANDOFF.md](HANDOFF.md). La exposición es el NLB desde S2-2.
 - **API 6443 pública** y **kubeconfig admin en SSM** (ya solo break-glass,
   ADR-005) — aceptable en lab efímero, inaceptable en cualquier otro contexto.
 - **Egress a la VIP del Gateway no es restringible por CNP del cliente**: el

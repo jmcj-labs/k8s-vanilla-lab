@@ -256,7 +256,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - EC2 instances (t3.medium Spot by default)
-- Security group (SSH, kubelet API, NodePorts, pod networking)
+- Security group (SSH, kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
 - `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/CNI components at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
@@ -451,7 +451,10 @@ without opening another file:
   exclusion — deny is not compensable in Cilium). Never remove it.
 - **Gateway `Programmed`**: requires an address on its LoadBalancer Service. No cloud LB here —
   Cilium LB-IPAM (`platform/manifests/lb-ipam-pool.yaml`, virtual IPs, ns `infra` only)
-  provides it. External access is via NodePort until the Sprint 2 NLB decision.
+  provides it. External application access is the internet-facing NLB (S2-2):
+  TCP/443 passthrough to the deterministic NodePort 30443, which only
+  answers to the NLB's security group. Grafana is reached via
+  `kubectl port-forward` (NodePorts are closed to the outside).
 - **providerID**: never remove the kubelet `--provider-id` step in `bootstrap/common.yaml`;
   without it the EBS CSI driver cannot map nodes to instances and PVCs stay Pending.
 - **Spot worker disappeared**: auto-restarts within 5-10 min

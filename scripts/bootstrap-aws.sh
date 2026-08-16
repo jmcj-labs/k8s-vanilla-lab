@@ -259,9 +259,21 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "elasticloadbalancing:ModifyTargetGroup",
         "elasticloadbalancing:ModifyTargetGroupAttributes",
         "elasticloadbalancing:RegisterTargets",
-        "elasticloadbalancing:RemoveTags"
+        "elasticloadbalancing:RemoveTags",
+        "elasticloadbalancing:SetSecurityGroups"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "ELBServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+        }
+      }
     },
     {
       "Sid": "DeleteDynamicCSIVolumesOnly",

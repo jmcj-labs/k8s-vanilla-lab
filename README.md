@@ -55,7 +55,7 @@ Platform layer (installed by `make platform` — see [platform/README.md](platfo
 | Shared Gateway | — | `infra/shared-gw`: HTTPS :443, `*.logistics.lab`, routes from ns `logistics` |
 | CloudNativePG | 0.29.0 | PostgreSQL operator (ns `data`, operator only) |
 | Strimzi | 1.1.0 | Kafka operator (ns `data`, operator only) |
-| kube-prometheus-stack | 88.2.0 | Monitoring; Grafana on NodePort, Alertmanager off |
+| kube-prometheus-stack | 88.2.0 | Monitoring; Grafana via `kubectl port-forward` (NodePorts closed since S2-2), Alertmanager off |
 | aws-iam-authenticator | v0.7.18 | IAM auth webhook (DynamicFile); daily access — admin kubeconfig is break-glass (ADR-005) |
 
 Deployment runs in four sequential stages:
@@ -210,7 +210,8 @@ used. Full breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.
   to every pod except the EBS CSI (`platform/policies/`), verified by the smoke via
   Hubble drops
 - **Gateway IP is virtual** (Cilium LB-IPAM, not announced externally): external access to
-  the Gateway is via NodePort until a real NLB lands (Sprint 2 ingress decision)
+  the Gateway is an internet-facing NLB (TCP/443 passthrough → deterministic
+  NodePort 30443, reachable ONLY from the NLB's security group — S2 piece 2)
 
 ---
 
