@@ -121,6 +121,14 @@ after() {
 #     deliberate act: RESUME=1.
 LOCK_OWNER="$(whoami)@$(hostname)-$$"
 RESUME="${RESUME:-0}"
+
+# release_lock_verified — delete the lock and PROVE it is gone. Returns 0 only
+# when it really is. Used both when refusing to start and when finishing: a
+# lock is either provably released or still ours to declare.
+release_lock_verified() {
+  aws ssm delete-parameter --name "${LOCK_PARAM}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
+  [ "$(ssm_param_get "${LOCK_PARAM}" "__absent__")" = "__absent__" ]
+}
 set +e
 LOCK_OUT=$(aws ssm put-parameter --name "${LOCK_PARAM}" --type String \
   --value "${LOCK_OWNER} started $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -140,21 +148,38 @@ if [ ${LOCK_RC} -ne 0 ]; then
   [ "${DONE_PHASE}" != "none" ] || FAIL "RESUME=1 was given but no phase has ever completed —
   there is nothing to resume. Release the lock instead."
   log "RESUMING deliberately (lock: ${HOLDER}, last completed phase: ${DONE_PHASE})"
-elif [ "${DONE_PHASE}" != "none" ] && [ "${RESUME}" != "1" ]; then
-  # THE BACK DOOR: the lock was acquired cleanly, but a phase marker survives
-  # from an earlier run — someone released the lock, or it was cleaned by
-  # hand, while the progress record stayed. Without this branch the ceremony
-  # would silently "resume", skipping phases nobody asked it to skip, on the
-  # strength of a marker whose provenance it cannot know. Continuing must be
-  # as deliberate here as it is when the lock is held.
-  FAIL "the lock was free, but a phase marker says '${DONE_PHASE}' is already done.
+  LOCK_HELD="yes"          # adopting the existing lock as ours
+else
+  # The lock is OURS from this instant — recorded before any decision that
+  # might abort, so no exit path can leave it behind unannounced.
+  LOCK_HELD="yes"
+  if [ "${DONE_PHASE}" != "none" ] && [ "${RESUME}" != "1" ]; then
+    # THE BACK DOOR: acquired cleanly, but a phase marker survives from an
+    # earlier run — someone released the lock, or cleaned it by hand, while
+    # the progress record stayed. Resuming on a marker whose provenance we
+    # cannot know must be as deliberate as resuming on a held lock.
+    #
+    # And we GIVE THE LOCK BACK before refusing: we took it a moment ago and
+    # are declining to proceed, so keeping it would block the very next run —
+    # including the "start over" the message recommends.
+    if release_lock_verified; then
+      LOCK_HELD=""
+      FAIL "the lock was free, but a phase marker says '${DONE_PHASE}' is already done.
   This is an unfinished ceremony whose lock is gone, not a fresh start.
+  (The lock this run took has been released again, so nothing is blocked.)
   To continue it deliberately:   RESUME=1 bash $0
   To start over, clear the markers first:
     aws ssm delete-parameter --name ${PHASE_PARAM} --region ${AWS_REGION}
     aws ssm delete-parameter --name ${STATE_PARAM} --region ${AWS_REGION}"
+    fi
+    FAIL "the lock was free, but a phase marker says '${DONE_PHASE}' is already done,
+  AND the lock this run took could not be released again — it is now blocking.
+  Release all three before anything else:
+    aws ssm delete-parameter --name ${LOCK_PARAM}  --region ${AWS_REGION}
+    aws ssm delete-parameter --name ${PHASE_PARAM} --region ${AWS_REGION}
+    aws ssm delete-parameter --name ${STATE_PARAM} --region ${AWS_REGION}"
+  fi
 fi
-LOCK_HELD="yes"
 
 T0=$(date -u +%s)
 log "=== DRILL: HA etcd restore over SSM Run Command (cluster ${CLUSTER_NAME}) ==="
@@ -436,10 +461,10 @@ T1=$(date -u +%s)
 # blocked cluster and a success message to explain it away — so a lock that
 # survives is a FAILURE of this run, not a footnote.
 kubectl delete configmap ha-restore-witness --ignore-not-found >/dev/null 2>&1 || true
-for P in "${LOCK_PARAM}" "${PHASE_PARAM}" "${STATE_PARAM}"; do
+for P in "${PHASE_PARAM}" "${STATE_PARAM}"; do
   aws ssm delete-parameter --name "${P}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
 done
-if [ "$(ssm_param_get "${LOCK_PARAM}" "__absent__")" != "__absent__" ]; then
+if ! release_lock_verified; then
   FAIL "the restore succeeded but the ceremony lock could NOT be removed.
   The next run would be blocked by it. Release it and re-verify:
     aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}"
