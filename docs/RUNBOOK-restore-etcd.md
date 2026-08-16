@@ -1,8 +1,13 @@
-# RUNBOOK — Restore de etcd (single-CP, línea base pre-HA)
+# RUNBOOK — Restore de etcd (single-CP, HISTÓRICO desde S2 pieza 3)
+
+> **HISTÓRICO**: desde la pieza 3 (HA, 3 CPs con etcd stacked) el
+> procedimiento vigente es [RUNBOOK-restore-etcd-ha.md](RUNBOOK-restore-etcd-ha.md)
+> — el restore multi-miembro es una reconstrucción de cluster lógico, no
+> esta rehidratación de un solo nodo. Este documento queda como evidencia
+> de la línea base pre-HA (drill coronado 2026-08-16: 11s/45s/58s).
 
 Drill de aceptación de S2 pieza 1: **ceremonia documentada, ejecutada una
-vez y repetible** — no entra en el smoke de cada apply. Con HA (S2 pieza 3)
-este runbook se revisa: el restore multi-miembro es otro procedimiento.
+vez y repetible** — no entra en el smoke de cada apply.
 
 Principio: sin restore probado no es backup.
 
