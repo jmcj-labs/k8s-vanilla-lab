@@ -4,7 +4,12 @@
 **PRs**: #65 (5 cruces, merge `032d865`) + **#66** (cierre: acceso OOB + evidencia, 2 cruces)
 
 Criterio de coronación del brief #S2-3, con la evidencia de cada punto.
-Los apartados marcados **PENDIENTE** se rellenan al ejecutarlos.
+
+**Estado: 7 de 7 criterios de aceptación cerrados.** El coste real medido
+(§8) NO es un criterio de aceptación: es un dato **diferido a propósito**
+porque Cost Explorer publica con ~24 h de retraso, y consta como tal aquí en
+vez de fingir que no falta. Mientras llega, §8 lleva el desglose por
+concepto sobre el inventario real.
 
 ---
 
@@ -335,6 +340,24 @@ Idempotencia probada **después** de un ciclo que incluyó destroy completo,
 apply desde cero, tres paradas/arranques del drill de pérdida, un reemplazo
 de nodo con `-replace` y un restore total de etcd.
 
-## 8. Coste real medido
+## 8. Coste real medido — **DIFERIDO A MAÑANA** (no es criterio de aceptación)
 
-PENDIENTE — Cost Explorer → `CLUSTER.md` §FinOps.
+Cost Explorer publica con ~24 h de retraso: el día del apply HA figuraba en
+`0.00`. **Medir hoy sería inventar**, así que el dato queda explícitamente
+pendiente en lugar de estimado y presentado como medición.
+
+Mientras tanto, el desglose sobre el inventario **real** (en
+[CLUSTER.md](CLUSTER.md) §FinOps): 3 CP on-demand + 3 workers spot + NLB +
+6 IPv4 + 225 GiB gp3 ≈ **0,2951 $/h ≈ 7,1 $/día**.
+
+Comando para cerrarlo:
+
+```bash
+aws ce get-cost-and-usage --time-period Start=2026-08-16 End=2026-08-17 \
+  --granularity DAILY --metrics UnblendedCost \
+  --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
+```
+
+Dos correcciones que salieron del desglose y ya están aplicadas: la tarifa
+spot de la fórmula de Slack estaba **4,5× baja** (0,0055 vs 0,0246 reales) y
+las estimaciones previas ignoraban IPv4 y EBS (1,4 $/día).

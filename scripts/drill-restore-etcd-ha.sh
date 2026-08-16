@@ -50,7 +50,7 @@ cleanup() {
   ssm_cancel_inflight
   if [ -n "${LOCK_HELD}" ]; then
     echo "[$(date -u +'%H:%M:%SZ')] NOTE: the ceremony lock is still held on purpose." >&2
-    echo "  Resume with:  bash $0" >&2
+    echo "  Resume with:  RESUME=1 bash $0" >&2
     echo "  Abandon with: aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}" >&2
   fi
 }
@@ -140,6 +140,19 @@ if [ ${LOCK_RC} -ne 0 ]; then
   [ "${DONE_PHASE}" != "none" ] || FAIL "RESUME=1 was given but no phase has ever completed —
   there is nothing to resume. Release the lock instead."
   log "RESUMING deliberately (lock: ${HOLDER}, last completed phase: ${DONE_PHASE})"
+elif [ "${DONE_PHASE}" != "none" ] && [ "${RESUME}" != "1" ]; then
+  # THE BACK DOOR: the lock was acquired cleanly, but a phase marker survives
+  # from an earlier run — someone released the lock, or it was cleaned by
+  # hand, while the progress record stayed. Without this branch the ceremony
+  # would silently "resume", skipping phases nobody asked it to skip, on the
+  # strength of a marker whose provenance it cannot know. Continuing must be
+  # as deliberate here as it is when the lock is held.
+  FAIL "the lock was free, but a phase marker says '${DONE_PHASE}' is already done.
+  This is an unfinished ceremony whose lock is gone, not a fresh start.
+  To continue it deliberately:   RESUME=1 bash $0
+  To start over, clear the markers first:
+    aws ssm delete-parameter --name ${PHASE_PARAM} --region ${AWS_REGION}
+    aws ssm delete-parameter --name ${STATE_PARAM} --region ${AWS_REGION}"
 fi
 LOCK_HELD="yes"
 
@@ -364,7 +377,7 @@ case "${ANTI_VERDICT}" in
   absent) OK "the anti-witness is GONE (NotFound) — etcd genuinely rewound to the snapshot" ;;
   present) FAIL "the ANTI-WITNESS SURVIVED — etcd did not rewind. Do NOT trust this restore." ;;
   *) FAIL "could not determine whether the anti-witness exists after 12 attempts.
-  Last answer: $(printf '%s' "${ANTI_OUT}" | head -2)
+  Last answer: $(printf '%s' "${ANTI_OUT}")
   An inconclusive proof is a failed proof — investigate before declaring this drill passed." ;;
 esac
 
@@ -385,39 +398,55 @@ SETTLE_DEADLINE=$(( $(date -u +%s) + 300 ))
 API_TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-api-tg" \
   --region "${AWS_REGION}" --query 'TargetGroups[0].TargetGroupArn' --output text)
 EXPECTED_NODES_TOTAL="${EXPECTED_NODES_TOTAL:-6}"
+# EXACT SETS, not positive counts. "3 etcd pods are 1/1" is also true with a
+# fourth stuck Pending; "3 targets healthy" is also true beside a draining
+# one. Each inventory must match on BOTH sides: the expected number present
+# AND nothing else in any other state — the same rule already applied to the
+# EBS cleanup and the target groups in the smoke.
 while true; do
+  ETCD_TOTAL=$(kubectl -n kube-system get pods -l component=etcd --no-headers 2>/dev/null | grep -c . || true)
   ETCD_READY=$(kubectl -n kube-system get pods -l component=etcd --no-headers 2>/dev/null \
     | awk '$2=="1/1" && $3=="Running"' | grep -c . || true)
+  NODES_TOTAL=$(kubectl get nodes --no-headers 2>/dev/null | grep -c . || true)
   NODES_READY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | grep -c . || true)
+  TG_TOTAL=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" \
+    --region "${AWS_REGION}" --query 'length(TargetHealthDescriptions)' --output text 2>/dev/null || echo -1)
   TG_HEALTHY=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" \
     --region "${AWS_REGION}" --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
-    --output text 2>/dev/null || echo 0)
-  if [ "${ETCD_READY}" = "3" ] && [ "${NODES_READY}" = "${EXPECTED_NODES_TOTAL}" ] && [ "${TG_HEALTHY}" = "3" ]; then
+    --output text 2>/dev/null || echo -1)
+  if [ "${ETCD_TOTAL}" = "3" ] && [ "${ETCD_READY}" = "3" ] \
+     && [ "${NODES_TOTAL}" = "${EXPECTED_NODES_TOTAL}" ] && [ "${NODES_READY}" = "${EXPECTED_NODES_TOTAL}" ] \
+     && [ "${TG_TOTAL}" = "3" ] && [ "${TG_HEALTHY}" = "3" ]; then
     break
   fi
   [ "$(date -u +%s)" -lt "${SETTLE_DEADLINE}" ] \
-    || FAIL "the cluster did not settle within 300s of the restore:
-  etcd pods 1/1: ${ETCD_READY}/3 · nodes Ready: ${NODES_READY}/${EXPECTED_NODES_TOTAL} · API targets healthy: ${TG_HEALTHY}/3"
+    || FAIL "the cluster did not settle within 300s of the restore (exact sets required):
+  etcd pods: ${ETCD_READY} ready of ${ETCD_TOTAL} present (want 3 of 3)
+  nodes:     ${NODES_READY} Ready of ${NODES_TOTAL} present (want ${EXPECTED_NODES_TOTAL} of ${EXPECTED_NODES_TOTAL})
+  API targets: ${TG_HEALTHY} healthy of ${TG_TOTAL} registered (want 3 of 3)"
   sleep 10
 done
-OK "settled: 3/3 etcd pods 1/1 · ${EXPECTED_NODES_TOTAL}/${EXPECTED_NODES_TOTAL} nodes Ready · 3/3 API targets healthy"
+OK "settled on EXACT sets: etcd 3 of 3 · nodes ${EXPECTED_NODES_TOTAL} of ${EXPECTED_NODES_TOTAL} · API targets 3 of 3, none in any other state"
 phase_done verified
 
 T1=$(date -u +%s)
-echo ""
-log "=== DRILL PASSED: the cluster was rebuilt from its backup ==="
-log "total $((T1-T0))s — record the phase timings in docs/RUNBOOK-restore-etcd-ha.md"
-log "old data dirs kept as /var/lib/etcd.pre-restore-${STAMP} on the 3 CPs (clean up when satisfied)"
+
+# Clean up and PROVE the lock is gone BEFORE declaring victory. A ceremony
+# that announces success while leaving its lock behind hands the next run a
+# blocked cluster and a success message to explain it away — so a lock that
+# survives is a FAILURE of this run, not a footnote.
 kubectl delete configmap ha-restore-witness --ignore-not-found >/dev/null 2>&1 || true
 for P in "${LOCK_PARAM}" "${PHASE_PARAM}" "${STATE_PARAM}"; do
   aws ssm delete-parameter --name "${P}" --region "${AWS_REGION}" >/dev/null 2>&1 || true
 done
-# Only claim the lock is released after PROVING it: silently clearing
-# LOCK_HELD on a failed delete would leave the next ceremony blocked by a
-# lock this run believes it removed.
-if [ "$(ssm_param_get "${LOCK_PARAM}" "__absent__")" = "__absent__" ]; then
-  LOCK_HELD=""
-else
-  log "⚠ the ceremony lock could NOT be removed — release it before the next run:"
-  log "    aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}"
+if [ "$(ssm_param_get "${LOCK_PARAM}" "__absent__")" != "__absent__" ]; then
+  FAIL "the restore succeeded but the ceremony lock could NOT be removed.
+  The next run would be blocked by it. Release it and re-verify:
+    aws ssm delete-parameter --name ${LOCK_PARAM} --region ${AWS_REGION}"
 fi
+LOCK_HELD=""
+
+echo ""
+log "=== DRILL PASSED: the cluster was rebuilt from its backup ==="
+log "total $((T1-T0))s — record the phase timings in docs/RUNBOOK-restore-etcd-ha.md"
+log "old data dirs kept as /var/lib/etcd.pre-restore-${STAMP} on the 3 CPs (clean up when satisfied)"

@@ -262,7 +262,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - EC2 instances (t3.medium Spot by default)
-- Security group (SSH, kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
+- Security group (NO inbound SSH — access is SSM, INCIDENTS #16; kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
 - `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/CNI components at runtime (not tracked by OpenTofu; would otherwise block security group deletion)

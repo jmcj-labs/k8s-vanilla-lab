@@ -22,7 +22,7 @@ direnv allow
 
 # Option B: terraform.tfvars
 cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
-# edit: set aws_profile, my_ip, ssh_key_name
+# edit: set aws_profile, ssh_key_name  (no my_ip: there is no inbound SSH)
 ```
 
 ---
@@ -179,7 +179,6 @@ Set this as a GitHub Actions Variable at:
 
 Also ensure these Variables are configured:
   AWS_REGION          = eu-west-1
-  TF_VAR_MY_IP        = <your-laptop-ip>/32
   TF_VAR_SSH_KEY_NAME = <your-ec2-key-pair-name>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
@@ -207,7 +206,7 @@ All three workflows (validate, apply, destroy) read the following **Variables** 
 |----------|---------------|-------------|-------|
 | `AWS_REGION` | `eu-west-1` | all | Must match the region used for bootstrap |
 | `TF_BACKEND_BUCKET` | `k8s-vanilla-lab-tfstate-123456789012` | all | S3 bucket name from bootstrap output |
-| `TF_VAR_MY_IP` | `203.0.113.42/32` | validate, apply, destroy | Your public IP for SSH and K8s API security group rules |
+| ~~`TF_VAR_MY_IP`~~ | — | — | **Removed** with inbound SSH (INCIDENTS #16). Node access is SSM; the API is reached through the NLB |
 | `TF_VAR_SSH_KEY_NAME` | `k8s-vanilla-lab` | validate, apply, destroy | Name of the EC2 key pair in your account |
 | `CLUSTER_NAME` | `k8s-vanilla-lab` | apply (smoke-test) | Cluster name; defaults to `k8s-vanilla-lab` if unset |
 

@@ -101,7 +101,7 @@ worker_public_ips = [
 ## 4. Monitor bootstrap progress (optional)
 
 ```bash
-# SSH into the control plane
+# Open a shell on the control plane (SSM Session Manager — there is no SSH)
 make ssm-cp
 
 # Inside the instance:
