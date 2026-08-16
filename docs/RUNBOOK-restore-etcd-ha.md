@@ -98,13 +98,25 @@ Fases (el script las cronometra):
    **Nunca los dos a la vez.**
 7. **El testigo vuelve** — `drill-marker` presente con el ts exacto.
 
-## Tiempos (drill del AAAA-MM-DD — pendiente de ejecución)
+## Tiempos (drill EJECUTADO el 2026-08-16 por SSM Run Command)
 
-| Fase | Tiempo |
-|------|--------|
-| Stop → API restaurada (CP-0 solo) | — |
-| Quorum 3/3 completo | — |
-| Drill total (testigo → testigo) | — |
+| Fase | Reloj | Duración |
+|------|-------|----------|
+| Preflight: canal probado en los 3 CPs | 17:19:18 → 17:19:27 | 9 s |
+| Testigo + snapshot forzado + anti-testigo | 17:19:27 → 17:19:50 | 23 s |
+| Parada de los 3 control planes (**API cae**) | → 17:21:28 | ~98 s |
+| Data dirs apartados + restore con `etcdutl` | 17:21:28 → ~17:21:50 | ~22 s |
+| CP-0 sirviendo otra vez (**API vuelve**) | → ~17:22:00 | ~10 s |
+| CP-1 y CP-2 reincorporados (uno a uno) | → 17:22:25 | ~25 s |
+| Verificación (testigo, anti-testigo, etcd 3/3) | → 17:22:31 | 6 s |
+| **TOTAL** | 17:19:18 → 17:22:31 | **193 s** |
+
+**Ventana de API caída: ~35 s** (17:21:28 → ~17:22:00). El grueso del drill
+son la parada ordenada y las verificaciones, no la restauración en sí.
+
+Los pods de etcd tardan ~15 s más en reportar `1/1` a la API que en estar
+sanos para `etcdctl`: la vista de la API va por detrás del hecho. Comprobar
+`endpoint health` antes de alarmarse.
 
 ## Después del drill
 
