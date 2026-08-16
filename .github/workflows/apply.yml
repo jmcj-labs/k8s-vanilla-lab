@@ -360,7 +360,10 @@ jobs:
           # The measured all-in figure lives in CLUSTER.md §FinOps, and the
           # Slack field says "base" so nobody reads it as all-in.
           CONTROL_PLANE_RATE=0.0456
-          WORKER_SPOT_RATE=0.0055
+          # Real eu-west-1 spot for t3.medium is ~0.0246 (checked 2026-08-16
+          # via describe-spot-price-history). The previous 0.0055 was off by
+          # ~4.5x and made every Slack report optimistic.
+          WORKER_SPOT_RATE=0.0246
           NLB_RATE=0.0252
           HOURLY_COST=$(awk "BEGIN {printf \"%.3f\", (${CP_COUNT} * ${CONTROL_PLANE_RATE}) + (${WORKER_COUNT} * ${WORKER_SPOT_RATE}) + ${NLB_RATE}}")
           EPOCH=$(date +%s)

@@ -175,14 +175,39 @@ nombrando el perfil y el login exacto:
 
 Historia del cepo (`Token has expired` sin dueño): `docs/troubleshooting.md`.
 
-**FinOps**: con S2-3 el control plane pasa a 3× on-demand: CP 3×$0.038 +
-3×spot + NLB (~$0.55/día) + IPv4 públicas ≈ **~4,8–5 $/día encendido**
-(estimación del brief S2-3: +2,7–2,9 $/día sobre la pieza 2, que iba en
-~2,1 $/día). **Pendiente: fijar el número real con Cost Explorer tras el
-primer apply HA y anotarlo aquí.** El cron de destroy nocturno está
-**pausado** durante el sprint — el cluster no se apaga solo: destruir a
-mano al terminar el día. Slack notifica cada apply (coste/hora) y cada
-destroy (uptime y coste estimado).
+**FinOps** (desglose del 2026-08-16 sobre el inventario REAL de la pieza 3):
+
+| Concepto | $/h | $/día |
+|---|---|---|
+| 3 × t3.medium on-demand (control planes) | 0,1368 | 3,28 |
+| 3 × t3.medium spot (workers, precio real del día) | 0,0738 | 1,77 |
+| NLB (tarifa base; NLCU aparte, despreciable a este tráfico) | 0,0252 | 0,60 |
+| 6 × IPv4 pública | 0,0300 | 0,72 |
+| 225 GiB gp3 (6×30 raíz + PVCs 3×10 + 3×5) | 0,0293 | 0,70 |
+| **TOTAL** | **0,2951** | **≈ 7,1** |
+
+**Es una estimación con tarifas publicadas, no una medición.** Cost Explorer
+lleva ~24 h de retraso: el día del apply HA figuraba en 0,00. La medición se
+cierra al día siguiente con:
+
+```bash
+aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD> End=<+1d> \
+  --granularity DAILY --metrics UnblendedCost \
+  --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
+```
+
+Dos correcciones que salieron de hacer este desglose:
+
+- La fórmula del aviso de Slack usaba **0,0055 $/h** de spot para t3.medium
+  cuando el precio real ronda **0,0246** — un factor 4,5 que hacía optimista
+  cada informe. Corregido.
+- Las estimaciones anteriores (~2,1 $/día en la pieza 2, ~5 en el primer
+  borrador de esta) **ignoraban IPv4 y EBS**, que suman 1,4 $/día. El coste
+  de la pieza 2 estaba igualmente subestimado por la misma razón.
+
+El cron de destroy nocturno sigue **pausado** durante el sprint — el cluster
+no se apaga solo: destruir a mano al terminar el día. Apagado sigue costando
+cero salvo el bucket de backups (céntimos).
 
 ## 5. Límites conocidos (deuda consciente)
 
