@@ -4,7 +4,7 @@
 # fetched from SSM. Exits non-zero on the first failed check.
 #
 # Checks:
-#   1. All nodes Ready (EXPECTED_NODES, default 4)
+#   1. All nodes Ready (EXPECTED_NODES, default 6: 3 CPs + 3 workers)
 #   2. No kube-proxy pods (kube-proxy-free bootstrap)
 #   3. Cilium reports KubeProxyReplacement: True
 #   4. spec.providerID set on every node
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-EXPECTED_NODES="${EXPECTED_NODES:-4}"
+EXPECTED_NODES="${EXPECTED_NODES:-6}"
 FAIL() { echo "✗ $*" >&2; exit 1; }
 OK() { echo "✓ $*"; }
 
@@ -836,16 +836,20 @@ import json,sys
 lb=json.load(sys.stdin)["LoadBalancers"][0]
 print(lb["LoadBalancerArn"], lb["DNSName"], lb["State"]["Code"], lb["SecurityGroups"][0])')"
 [ "${NLB_STATE}" = "active" ] || FAIL "NLB state is ${NLB_STATE}, want active"
+# Select by port, never Listeners[0]: since piece 3 the NLB carries TWO
+# listeners (443 application + 6443 API) and the API order is not defined.
 aws elbv2 describe-listeners --load-balancer-arn "${NLB_ARN}" --region "${AWS_REGION}" \
-  --query 'Listeners[0].[Port,Protocol]' --output text | grep -q "^443	TCP$" \
-  || FAIL "NLB listener is not TCP/443"
+  --query 'Listeners[?Port==`443`].Protocol' --output text | grep -q "^TCP$" \
+  || FAIL "NLB has no TCP/443 listener"
 OK "NLB active with TCP/443 listener (${NLB_DNS})"
 
 # 13b. Target set == EXACTLY the worker instance IDs, and ALL healthy.
 # Runs AFTER the platform install by design: the NLB is born unhealthy
 # during tofu apply (the NodePort only answers once Cilium programs the
 # Gateway) — that ordering is expected, not a failure.
-TG_ARN=$(aws elbv2 describe-target-groups --load-balancer-arn "${NLB_ARN}" --region "${AWS_REGION}" \
+# Select the APPLICATION target group by name — TargetGroups[0] is
+# ambiguous now that the API TG shares the NLB (piece 3).
+TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-gw-tg" --region "${AWS_REGION}" \
   --query 'TargetGroups[0].TargetGroupArn' --output text)
 TG_PORT=$(aws elbv2 describe-target-groups --target-group-arns "${TG_ARN}" --region "${AWS_REGION}" \
   --query 'TargetGroups[0].Port' --output text)
@@ -923,5 +927,91 @@ case "${E2E_CODE}" in
   *) FAIL "unexpected HTTP ${E2E_CODE} through the NLB";;
 esac
 
+# ── 14. HA control plane — endpoint, quorum, single door (S2 piece 3) ────────
+# Reuses NLB_ARN/NLB_DNS from section 13.
+
+# 14a. 3 control-plane nodes, all Ready
+CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/control-plane --no-headers)
+CP_TOTAL=$(echo "${CP_NODES}" | grep -c . || true)
+CP_NOT_READY=$(echo "${CP_NODES}" | awk '$2 != "Ready" {n++} END {print n+0}')
+[ "${CP_TOTAL}" -eq 3 ] || FAIL "expected 3 control-plane nodes, found ${CP_TOTAL}"
+[ "${CP_NOT_READY}" -eq 0 ] || FAIL "${CP_NOT_READY} control-plane node(s) not Ready"
+OK "3/3 control-plane nodes Ready"
+
+# 14b. etcd: 3 members, ALL started (stacked etcd quorum). member list via
+# one etcd pod with the standard kubeadm cert paths.
+ETCD_POD=$(kubectl -n kube-system get pods -l component=etcd \
+  --field-selector status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+[ -n "${ETCD_POD}" ] || FAIL "no Running etcd pod found"
+ETCD_MEMBERS=$(kubectl -n kube-system exec "${ETCD_POD}" -- etcdctl \
+  --cacert /etc/kubernetes/pki/etcd/ca.crt \
+  --cert /etc/kubernetes/pki/etcd/server.crt \
+  --key /etc/kubernetes/pki/etcd/server.key \
+  member list -w json 2>/dev/null) || FAIL "etcdctl member list failed"
+echo "${ETCD_MEMBERS}" | python3 -c '
+import json,sys
+m=json.load(sys.stdin)["members"]
+started=[x for x in m if x.get("clientURLs")]
+assert len(m)==3, f"expected 3 etcd members, found {len(m)}"
+assert len(started)==3, f"only {len(started)}/3 etcd members started"
+' || FAIL "etcd membership is not 3/3 started"
+OK "etcd: 3/3 members started (stacked quorum)"
+
+# 14c. API target group: exactly the 3 CP instance IDs, ALL healthy
+API_TG_ARN=$(aws elbv2 describe-target-groups --names "${CLUSTER_NAME}-api-tg" --region "${AWS_REGION}" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text) || FAIL "API target group not found"
+CP_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Role,Values=control-plane" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
+API_HEALTH_ELAPSED=0
+until API_TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}") \
+  && [ "$(echo "${API_TARGETS_JSON}" | python3 -c '
+import json,sys
+t=json.load(sys.stdin)["TargetHealthDescriptions"]
+print("ok" if len(t)==3 and all(d["TargetHealth"]["State"]=="healthy" for d in t) else "no")')" = "ok" ]; do
+  if [ "${API_HEALTH_ELAPSED}" -ge 300 ]; then
+    echo "${API_TARGETS_JSON}" | python3 -c 'import json,sys; [print(" ", d["Target"]["Id"], d["TargetHealth"]["State"]) for d in json.load(sys.stdin)["TargetHealthDescriptions"]]' || true
+    FAIL "API targets not 3/3 healthy after 300s"
+  fi
+  sleep 15; API_HEALTH_ELAPSED=$((API_HEALTH_ELAPSED + 15))
+done
+API_TARGET_IDS=$(echo "${API_TARGETS_JSON}" | python3 -c '
+import json,sys
+print("\n".join(sorted(d["Target"]["Id"] for d in json.load(sys.stdin)["TargetHealthDescriptions"])))')
+[ "${API_TARGET_IDS}" = "${CP_IDS}" ] || FAIL "API target set differs from the CP instance set"
+OK "API targets: exactly the 3 control planes, ALL healthy"
+
+# 14d. NEGATIVE proof: :6443 must NOT answer on ANY CP public IP — the API
+# is public THROUGH THE NLB ONLY (ADR-007); the CP SG accepts 6443 solely
+# from the NLB's SG.
+CP_PUB_IPS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:Role,Values=control-plane" \
+            "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].PublicIpAddress' --output text | tr '\t' '\n')
+for CP_PUB_IP in ${CP_PUB_IPS}; do
+  if curl -sk --max-time 6 "https://${CP_PUB_IP}:6443/" -o /dev/null 2>/dev/null; then
+    FAIL "API :6443 answers on CP public IP ${CP_PUB_IP} — the SG should close it"
+  fi
+done
+OK "negative proof: :6443 closed on EVERY CP public IP (NLB is the only API door)"
+
+# 14e. Endpoint coherence: kubeconfig AND Cilium anchor to the NLB DNS —
+# never to a node IP (a node can die; the endpoint cannot).
+KC_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+[ "${KC_SERVER}" = "https://${NLB_DNS}:6443" ] \
+  || FAIL "kubeconfig server is ${KC_SERVER}, want https://${NLB_DNS}:6443"
+CILIUM_HOST=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.k8s-service-host}')
+[ "${CILIUM_HOST}" = "${NLB_DNS}" ] \
+  || FAIL "Cilium k8s-service-host is ${CILIUM_HOST}, want ${NLB_DNS}"
+# IAM auth path: the authenticator DaemonSet must cover all 3 CPs (the API
+# server on EVERY CP webhooks to ITS OWN local authenticator).
+AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
+  -o jsonpath='{.status.desiredNumberScheduled} {.status.numberReady}')
+[ "${AUTH_DS}" = "3 3" ] || FAIL "aws-iam-authenticator DaemonSet is ${AUTH_DS}, want 3 3"
+OK "endpoint coherence: kubeconfig + Cilium on the NLB DNS · authenticator 3/3"
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups and NLB entry are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups, NLB entry and HA control plane are healthy"

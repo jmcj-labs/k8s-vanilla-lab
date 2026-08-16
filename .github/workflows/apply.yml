@@ -24,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.inputs.confirm == 'apply'
     outputs:
-      cp_eip: ${{ steps.apply_outputs.outputs.cp_eip }}
       nlb_dns: ${{ steps.apply_outputs.outputs.nlb_dns }}
     defaults:
       run:
@@ -134,13 +133,14 @@ jobs:
           TF_VAR_lab_account_id: ${{ vars.LAB_ACCOUNT_ID }}
         run: tofu apply -auto-approve -no-color
 
-      # The EIP is public data already in the tofu state — publishing it as a
-      # job output lets notify-slack report the endpoint without decrypting
-      # the admin kubeconfig SecureString (PLAN-SPRINTS S2 hygiene microcommit).
+      # The NLB DNS is public data already in the tofu state — publishing it
+      # as a job output lets notify-slack report both endpoints (app :443 and
+      # API :6443, same door since ADR-007) without decrypting the admin
+      # kubeconfig SecureString. The historical cp_eip output is GONE: no EIP
+      # exists anymore and no consumer may anchor to a node IP.
       - name: Publish apply outputs (non-sensitive)
         id: apply_outputs
         run: |
-          echo "cp_eip=$(tofu output -raw control_plane_public_ip)" >> "${GITHUB_OUTPUT}"
           echo "nlb_dns=$(tofu output -raw nlb_dns_name)" >> "${GITHUB_OUTPUT}"
           echo "gateway_nodeport=$(tofu output -raw gateway_nodeport)" >> "${GITHUB_OUTPUT}"
 
@@ -313,13 +313,12 @@ jobs:
         env:
           CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'k8s-vanilla-lab' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
-          CP_EIP: ${{ needs.apply.outputs.cp_eip }}
           NLB_DNS: ${{ needs.apply.outputs.nlb_dns }}
         run: |
-          # The EIP arrives as a non-sensitive job output from the apply job
-          # (tofu output -raw) — this job no longer decrypts the admin
-          # kubeconfig SecureString to learn a public datum.
-          API_ENDPOINT="${CP_EIP:+${CP_EIP}:6443}"
+          # Since ADR-007 the API endpoint IS the NLB (TCP/6443) — same
+          # non-sensitive job output that already feeds the app entry; no
+          # node IP is an endpoint anymore.
+          API_ENDPOINT="${NLB_DNS:+${NLB_DNS}:6443}"
           API_ENDPOINT="${API_ENDPOINT:-unknown}"
 
           WORKER_COUNT=$(aws ec2 describe-instances \
@@ -329,7 +328,8 @@ jobs:
             --query 'length(Reservations[].Instances[])' \
             --output text \
             --region "${AWS_REGION}" 2>/dev/null || echo "2")
-          NODE_COUNT=$((WORKER_COUNT + 1))
+          # 3 control planes since S2 piece 3 (HA, stacked etcd)
+          NODE_COUNT=$((WORKER_COUNT + 3))
 
           INSTANCE_TYPES=$(aws ec2 describe-instances \
             --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
