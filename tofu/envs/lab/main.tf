@@ -191,7 +191,6 @@ module "control_plane" {
   instance_type         = var.control_plane_instance_type
   ami_id                = data.aws_ami.ubuntu.id
   key_name              = var.ssh_key_name
-  my_ip                 = var.my_ip
   control_plane_count   = var.control_plane_count
   user_data_base64      = data.cloudinit_config.control_plane[*].rendered
   nlb_security_group_id = module.nlb.security_group_id
@@ -304,7 +303,6 @@ module "worker" {
   instance_type                   = var.worker_instance_type
   ami_id                          = data.aws_ami.ubuntu.id
   key_name                        = var.ssh_key_name
-  my_ip                           = var.my_ip
   control_plane_security_group_id = module.control_plane.security_group_id
   user_data_base64                = data.cloudinit_config.worker.rendered
   ecr_repository_arns             = module.registry.repository_arns

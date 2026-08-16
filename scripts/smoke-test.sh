@@ -1003,9 +1003,26 @@ OK "negative proof: :6443 closed on EVERY CP public IP (NLB is the only API door
 KC_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 [ "${KC_SERVER}" = "https://${NLB_DNS}:6443" ] \
   || FAIL "kubeconfig server is ${KC_SERVER}, want https://${NLB_DNS}:6443"
-CILIUM_HOST=$(kubectl -n kube-system get cm cilium-config -o jsonpath='{.data.k8s-service-host}')
+# Cilium 1.19 does NOT keep k8sServiceHost in cilium-config: the chart
+# injects it as KUBERNETES_SERVICE_HOST into the DaemonSet's containers
+# (verified live 2026-08-16 — the ConfigMap has no such key at all).
+# Assert BOTH the spec and the value inside the RUNNING agent: a spec
+# updated without a rollout would otherwise read as compliant while the
+# live agents still talked to the old endpoint.
+CILIUM_HOST=$(kubectl -n kube-system get ds cilium -o json | python3 -c '
+import json,sys
+spec=json.load(sys.stdin)["spec"]["template"]["spec"]
+for c in spec["containers"]:
+    if c["name"] == "cilium-agent":
+        for e in c.get("env", []):
+            if e["name"] == "KUBERNETES_SERVICE_HOST":
+                print(e.get("value", ""))
+                break')
 [ "${CILIUM_HOST}" = "${NLB_DNS}" ] \
-  || FAIL "Cilium k8s-service-host is ${CILIUM_HOST}, want ${NLB_DNS}"
+  || FAIL "Cilium DaemonSet KUBERNETES_SERVICE_HOST is '${CILIUM_HOST}', want ${NLB_DNS}"
+CILIUM_LIVE=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- printenv KUBERNETES_SERVICE_HOST 2>/dev/null | tr -d '\r')
+[ "${CILIUM_LIVE}" = "${NLB_DNS}" ] \
+  || FAIL "the RUNNING cilium-agent points at '${CILIUM_LIVE}', want ${NLB_DNS} (DaemonSet updated without a rollout?)"
 # IAM auth path: the authenticator DaemonSet must cover all 3 CPs (the API
 # server on EVERY CP webhooks to ITS OWN local authenticator).
 AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
@@ -1013,5 +1030,68 @@ AUTH_DS=$(kubectl -n kube-system get ds aws-iam-authenticator \
 [ "${AUTH_DS}" = "3 3" ] || FAIL "aws-iam-authenticator DaemonSet is ${AUTH_DS}, want 3 3"
 OK "endpoint coherence: kubeconfig + Cilium on the NLB DNS · authenticator 3/3"
 
+# ── 15. Out-of-band access — the channel recovery depends on (INCIDENTS #16) ─
+# This section exists because a documented recovery procedure was found to
+# depend on an access nobody had ever exercised. A door never opened is
+# indistinguishable from a locked one, so it gets opened on EVERY apply.
+
+# 15a. SSM's view of the fleet must be EXACTLY the cluster's instances.
+CLUSTER_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+  --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
+CLUSTER_COUNT=$(echo "${CLUSTER_IDS}" | grep -c . || true)
+SSM_IDS=$(aws ssm describe-instance-information --region "${AWS_REGION}" \
+  --query 'InstanceInformationList[].InstanceId' --output text | tr '\t' '\n' | sort)
+SSM_ONLINE=$(aws ssm describe-instance-information --region "${AWS_REGION}" \
+  --query 'InstanceInformationList[?PingStatus==`Online`].InstanceId' --output text | tr '\t' '\n' | sort)
+[ "${SSM_IDS}" = "${CLUSTER_IDS}" ] || FAIL "SSM inventory != cluster instances
+  SSM:     ${SSM_IDS//$'\n'/ }
+  cluster: ${CLUSTER_IDS//$'\n'/ }"
+[ "${SSM_ONLINE}" = "${CLUSTER_IDS}" ] || FAIL "not every node is Online in SSM
+  online:  ${SSM_ONLINE//$'\n'/ }
+  cluster: ${CLUSTER_IDS//$'\n'/ }"
+OK "SSM inventory: exactly the ${CLUSTER_COUNT} cluster nodes, all Online"
+
+# 15b. Online is a heartbeat, not proof of access: deliver and RUN something
+# on every node and demand the exact output back.
+. "$(dirname "$0")/lib/ssm-exec.sh"
+for IID in ${CLUSTER_IDS}; do
+  ssm_canary "${IID}" || FAIL "out-of-band canary FAILED on ${IID} — recovery would be impossible"
+done
+OK "canary Run Command executed on all ${CLUSTER_COUNT} nodes (exact output, as root)"
+
+# 15c. NEGATIVE proof: inbound SSH must not exist on either security group.
+for SG_NAME in "${CLUSTER_NAME}-cp-sg" "${CLUSTER_NAME}-worker-sg"; do
+  SG_ID=$(aws ec2 describe-security-groups --region "${AWS_REGION}" \
+    --filters "Name=group-name,Values=${SG_NAME}" \
+    --query 'SecurityGroups[0].GroupId' --output text)
+  SSH_RULES=$(aws ec2 describe-security-group-rules --region "${AWS_REGION}" \
+    --filters "Name=group-id,Values=${SG_ID}" \
+    --query 'length(SecurityGroupRules[?IsEgress==`false` && FromPort==`22`])' --output text)
+  [ "${SSH_RULES}" = "0" ] || FAIL "${SG_NAME} still has ${SSH_RULES} inbound SSH rule(s) — the port was meant to be closed"
+done
+OK "negative proof: no inbound TCP/22 on either security group"
+
+# 15d. The HUMAN channel, when the operator's plugin is present. Skipped in
+# CI (runners have no session-manager-plugin) but exercised locally: closing
+# SSH without ever proving the interactive door opens would repeat the very
+# mistake this section exists to prevent, one level up.
+if command -v session-manager-plugin >/dev/null 2>&1; then
+  FIRST_CP=$(aws ec2 describe-instances --region "${AWS_REGION}" \
+    --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
+              "Name=tag:CPIndex,Values=0" "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].InstanceId' --output text)
+  SESSION_OUT=$({ printf 'hostname\n'; sleep 6; printf 'exit\n'; sleep 2; } \
+    | aws ssm start-session --target "${FIRST_CP}" --region "${AWS_REGION}" 2>&1 || true)
+  echo "${SESSION_OUT}" | grep -q "Starting session with SessionId" \
+    || FAIL "interactive Session Manager shell did not open on ${FIRST_CP}"
+  echo "${SESSION_OUT}" | grep -qE "^ip-10-" \
+    || FAIL "interactive shell opened but did not execute a command"
+  OK "human channel: interactive shell opened on CP-0 and ran a command (make ssm-cp works)"
+else
+  echo "  · human channel not exercised here (no session-manager-plugin); it is an acceptance step run locally"
+fi
+
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups, NLB entry and HA control plane are healthy"
+echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups, NLB entry, HA control plane and out-of-band access are healthy"

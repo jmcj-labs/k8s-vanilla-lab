@@ -25,7 +25,7 @@ ADR-007** — HA de nodo: sobrevive a perder un CP; **una sola AZ**, no es HA
 zonal) · 3 workers t3.medium spot (3, no 2: anti-affinity real para la
 topología de datos de fase 2 — CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS ·
 IMDSv2 obligatorio con hop limit 3 · EBS cifrado. El EIP del CP **ya no
-existe**: IPs públicas auto-asignadas solo para SSH/egress; ningún consumidor
+existe**: IPs públicas auto-asignadas solo para egress; ningún consumidor
 ancla a IPs de nodo.
 
 **Red**: VPC dedicada `10.0.0.0/16`, subred pública `10.0.1.0/24` (sin NAT
@@ -40,7 +40,7 @@ endpoint del API (S2-3, ADR-007)**: listener TCP/6443 → TG propio hacia los
 los tiene como targets, hairpin), `controlPlaneEndpoint` de kubeadm = DNS
 del NLB, y el SG de CPs solo acepta 6443 desde el SG del NLB (murió
 `0.0.0.0/0:6443`). Acoplamiento app/API en un recurso: **declarado y
-aceptado en lab**. SSH (`my_ip`) mantiene su régimen. DNS del NLB nuevo en
+aceptado en lab**. No hay SSH entrante (acceso por SSM, INCIDENTS #16). DNS del NLB nuevo en
 cada apply (output `nlb_dns_name`) — **el refresh de `K8S_SERVER` sigue
 vivo** —, sin Route53 hasta post-S4.
 
@@ -100,7 +100,7 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | `controller.region` explícito en el EBS CSI | Defensa en profundidad: no depender de IMDS para descubrir la región | [INCIDENTS #4](INCIDENTS.md) |
 | Gateway API CRDs **antes** del helm install de Cilium | El operator solo habilita su controller de Gateway API si las CRDs ya existen | `bootstrap/control-plane.yaml` |
 | Pool LB-IPAM (`172.20.255.0/24`, solo ns `infra`) | Sin cloud-controller nadie asigna IP al Service del Gateway y `Programmed` nunca llega; la IP es virtual, no anunciada | [INCIDENTS #7](INCIDENTS.md) |
-| API server público **por el NLB** (los CPs solo aceptan 6443 del SG del NLB) | Los runners de CI (IPs dinámicas) ejecutan platform+smoke vía kubeconfig; TLS + certificados/IAM como control de acceso, SSH sigue cerrado a `my_ip`. El acceso directo a las IPs de CP murió en S2-3 | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) + [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
+| API server público **por el NLB** (los CPs solo aceptan 6443 del SG del NLB) | Los runners de CI (IPs dinámicas) ejecutan platform+smoke vía kubeconfig; TLS + certificados/IAM como control de acceso. El acceso directo a las IPs de CP murió en S2-3, y el SSH entrante en el cierre de la pieza | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) + [ADR-007](decisions/ADR-007-api-endpoint-nlb.md) |
 | `user_data_base64` (nunca `user_data`) | cloud-init va gzip+base64; el contrato del provider lo exige y su violación rompe updates in-place | [INCIDENTS #5](INCIDENTS.md) |
 | SG del CP sin reglas inline (todo standalone) | Mezclar inline + standalone borra reglas ajenas en cada apply | [INCIDENTS #6](INCIDENTS.md) |
 | Acceso diario vía IAM (aws-iam-authenticator, backend DynamicFile) | Credenciales STS efímeras por identidad, revocación = membresía de grupo en Identity Center; el kubeconfig admin queda solo como break-glass | [ADR-005](decisions/ADR-005-iam-access.md) |
@@ -155,7 +155,7 @@ Bound **y montado** (pod Ready) con limpieza · Gateway `Accepted` y
   `--forward-session-name`; la sesión viene de `aws sso login`.
 - Break-glass: `make kubeconfig` → cert admin de kubeadm desde SSM (ADR-004).
   Solo si el authenticator no responde.
-- `make ssh-cp` / `make ssh-worker`
+- `make ssm-cp` / `make ssm-worker` (SSM; no existe SSH entrante)
 - Grafana — **por port-forward** (S2-2 cerró los NodePort al exterior; no
   abrir otro puerto ni regla):
   `kubectl port-forward -n infra svc/kube-prometheus-stack-grafana 3000:80`
@@ -175,14 +175,54 @@ nombrando el perfil y el login exacto:
 
 Historia del cepo (`Token has expired` sin dueño): `docs/troubleshooting.md`.
 
-**FinOps**: con S2-3 el control plane pasa a 3× on-demand: CP 3×$0.038 +
-3×spot + NLB (~$0.55/día) + IPv4 públicas ≈ **~4,8–5 $/día encendido**
-(estimación del brief S2-3: +2,7–2,9 $/día sobre la pieza 2, que iba en
-~2,1 $/día). **Pendiente: fijar el número real con Cost Explorer tras el
-primer apply HA y anotarlo aquí.** El cron de destroy nocturno está
-**pausado** durante el sprint — el cluster no se apaga solo: destruir a
-mano al terminar el día. Slack notifica cada apply (coste/hora) y cada
-destroy (uptime y coste estimado).
+**Acceso a los nodos (desde INCIDENTS #16): SSM, cero SSH entrante.**
+
+| Necesidad | Herramienta | Identidad en el nodo |
+|---|---|---|
+| Shell humana | `make ssm-cp CP_INDEX=n` · `make ssm-worker WORKER_INDEX=n` (Session Manager) | `ssm-user` (sudo sin contraseña) |
+| Ceremonias guionizadas | `scripts/lib/ssm-exec.sh` → `send-command` con `AWS-RunShellScript` | **root** directamente |
+
+Requiere el plugin local: `brew install --cask session-manager-plugin` (o el
+bundle sin sudo de `s3.amazonaws.com/session-manager-downloads/plugin/latest/`).
+
+No hay regla de entrada TCP/22 en ningún SG y no existe clave privada que
+custodiar: el acceso viaja con el instance profile. `key_name` sigue en las
+instancias **a propósito** — es `ForceNew` y quitarlo recrearía los 6 nodos
+sin ganancia; queda vestigial hasta el próximo nacimiento desde cero.
+
+**FinOps** (desglose del 2026-08-16 sobre el inventario REAL de la pieza 3):
+
+| Concepto | $/h | $/día |
+|---|---|---|
+| 3 × t3.medium on-demand (control planes) | 0,1368 | 3,28 |
+| 3 × t3.medium spot (workers, precio real del día) | 0,0738 | 1,77 |
+| NLB (tarifa base; NLCU aparte, despreciable a este tráfico) | 0,0252 | 0,60 |
+| 6 × IPv4 pública | 0,0300 | 0,72 |
+| 225 GiB gp3 (6×30 raíz + PVCs 3×10 + 3×5) | 0,0293 | 0,70 |
+| **TOTAL** | **0,2951** | **≈ 7,1** |
+
+**Es una estimación con tarifas publicadas, no una medición.** Cost Explorer
+lleva ~24 h de retraso: el día del apply HA figuraba en 0,00. La medición se
+cierra al día siguiente con:
+
+```bash
+aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD> End=<+1d> \
+  --granularity DAILY --metrics UnblendedCost \
+  --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
+```
+
+Dos correcciones que salieron de hacer este desglose:
+
+- La fórmula del aviso de Slack usaba **0,0055 $/h** de spot para t3.medium
+  cuando el precio real ronda **0,0246** — un factor 4,5 que hacía optimista
+  cada informe. Corregido.
+- Las estimaciones anteriores (~2,1 $/día en la pieza 2, ~5 en el primer
+  borrador de esta) **ignoraban IPv4 y EBS**, que suman 1,4 $/día. El coste
+  de la pieza 2 estaba igualmente subestimado por la misma razón.
+
+El cron de destroy nocturno sigue **pausado** durante el sprint — el cluster
+no se apaga solo: destruir a mano al terminar el día. Apagado sigue costando
+cero salvo el bucket de backups (céntimos).
 
 ## 5. Límites conocidos (deuda consciente)
 
@@ -209,6 +249,11 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   coronación de S1 — `POST /shipments` HTTP 201 por el Gateway con TLS/SNI
   desde fuera del cluster, y gRPC (`CalculateRoute`) por la GRPCRoute;
   evidencia en [HANDOFF.md](HANDOFF.md). La exposición es el NLB desde S2-2.
+- **Auditoría de sesiones: parcial hasta configurar el logging.** CloudTrail
+  registra *que* se abrió una sesión y quién, pero **el contenido de la shell
+  solo queda grabado si se activa el logging de Session Manager** (S3 o
+  CloudWatch, con su preferencia de cifrado). Mientras no esté, decir "shell
+  auditada" sería exagerar: es *acceso trazado*, no *sesión grabada*.
 - **API 6443 pública (por el NLB desde S2-3)** y **kubeconfig admin en SSM**
   (ya solo break-glass, ADR-005) — aceptable en lab efímero, inaceptable en
   cualquier otro contexto. Desde ADR-007 los CPs ya no exponen 6443 al mundo
@@ -277,5 +322,5 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 
 ## 6. Historial de incidencias
 
-Ver [INCIDENTS.md](INCIDENTS.md) — 7 incidencias con causa raíz y fix (4 del
+Ver [INCIDENTS.md](INCIDENTS.md) — 17 incidencias con causa raíz y fix (4 del
 montaje manual, 3 de la automatización).

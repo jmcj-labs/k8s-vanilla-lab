@@ -32,7 +32,6 @@ cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
 Required fields:
 
 ```hcl
-my_ip        = "203.0.113.42/32"   # curl ifconfig.me
 ssh_key_name = "k8s-vanilla-lab"   # AWS key pair name
 aws_region   = "eu-west-1"
 cluster_name = "k8s-vanilla-lab"
@@ -102,8 +101,8 @@ worker_public_ips = [
 ## 4. Monitor bootstrap progress (optional)
 
 ```bash
-# SSH into the control plane
-make ssh-cp
+# Open a shell on the control plane (SSM Session Manager — there is no SSH)
+make ssm-cp
 
 # Inside the instance:
 sudo tail -f /var/log/k8s-bootstrap.log       # Stage 1 — containerd, kubeadm install
@@ -119,7 +118,7 @@ Control Plane bootstrap completed successfully
 For workers:
 
 ```bash
-make ssh-worker   # connects to worker node 1
+make ssm-worker   # opens a session on worker node 1
 
 sudo tail -f /var/log/k8s-bootstrap.log          # Stage 1
 sudo tail -f /var/log/k8s-worker-bootstrap.log   # Stage 3 — SSM poll, kubeadm join
@@ -184,8 +183,8 @@ kubectl delete pod test-nginx
 |------|---------|
 | Re-apply after config changes | `make apply` |
 | Verify cluster health | `make smoke-test` |
-| SSH to control plane | `make ssh-cp` |
-| SSH to first worker | `make ssh-worker` |
+| Shell on a control plane | `make ssm-cp` (SSM Session Manager) |
+| Shell on the first worker | `make ssm-worker` |
 | Refresh kubeconfig | `make kubeconfig` |
 
 `make apply` is idempotent — safe to re-run after variable changes without tearing down the cluster.

@@ -87,7 +87,6 @@ jobs:
       - name: OpenTofu Destroy
         id: destroy
         env:
-          TF_VAR_my_ip: ${{ vars.TF_VAR_MY_IP }}
           TF_VAR_ssh_key_name: ${{ vars.TF_VAR_SSH_KEY_NAME }}
           TF_VAR_aws_region: ${{ vars.AWS_REGION }}
           TF_VAR_aws_profile: ""

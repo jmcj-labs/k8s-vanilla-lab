@@ -56,6 +56,7 @@ k8s-vanilla-lab/
 │   ├── guard-legacy-cp-state.sh    # Fail-closed: refuses apply over a pre-HA state (make apply + CI)
 │   ├── replace-control-plane.sh    # Ceremony: replace ONE CP (etcd member remove → -replace → 3/3)
 │   ├── renew-cp-certificate-key.sh # Ceremony: renew CP join material (key 2h + token 24h)
+│   ├── drill-cp-loss.sh            # Drill: survive losing a CP (API/IAM/workloads/backup proofs)
 │   ├── drill-restore-etcd-ha.sh    # Drill: HA etcd restore (logical cluster reconstruction)
 │   └── smoke-test.sh               # Cluster + platform verification (invoked by make smoke-test)
 ├── platform/
@@ -184,7 +185,7 @@ If validation fails, fix immediately before proceeding.
 
 ### 5. Security Best Practices
 
-- SSH access: restricted to `var.my_ip` only
+- NO inbound SSH: node access is SSM (Session Manager for humans, Run Command for ceremonies) — INCIDENTS #16
 - API server: public THROUGH THE NLB only (ADR-007) — the CP SG accepts 6443 solely from the NLB's SG; `api_server_allowed_cidrs` no longer exists
 - IAM policies: minimal scope (`/k8s/${cluster_name}/*` for SSM)
 - IMDSv2: enforced on all EC2 instances
@@ -207,8 +208,8 @@ The `Makefile` is the single source of truth for operational commands. **Any pro
 | `make kubeconfig-dev` | IAM-auth kubeconfig (developer role, ns logistics only) |
 | `make platform` | Fetch kubeconfig (temp file), run `platform/install.sh` (EBS CSI, cert-manager, Gateway, operators, monitoring) |
 | `make smoke-test` | Fetch kubeconfig (temp file), run `scripts/smoke-test.sh`: nodes Ready, no kube-proxy, Cilium KPR True, providerID set, gp3 PVC Bound, Gateway Programmed, operators Ready |
-| `make ssh-cp` | SSH into control plane |
-| `make ssh-worker` | SSH into first worker node |
+| `make ssm-cp` | Shell on a control plane via SSM Session Manager (CP_INDEX=0\|1\|2) — there is NO inbound SSH (INCIDENTS #16) |
+| `make ssm-worker` | Shell on a worker via SSM Session Manager (WORKER_INDEX=1..N) |
 | `make clean` | Remove `.terraform/` cache and `*.tfstate.backup` |
 | `make bootstrap-aws` | One-time: create/verify S3, DynamoDB, OIDC, IAM role |
 
@@ -246,7 +247,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - 3× EC2 instances (t3.medium On-Demand, `count = control_plane_count`, auto-assigned public IPs — NO EIP anymore)
-- Security group (SSH from `my_ip`; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
+- Security group (NO inbound SSH — access is SSM, INCIDENTS #16; 6443 ONLY from the NLB's SG; etcd/kubelet self-referencing) — ALL rules standalone, never inline (INCIDENTS #6)
 - IAM role with SSM write permissions (`/k8s/${cluster_name}/*` — includes the `cp/` subpath, which the WORKER role is excluded from; the CI/OIDC role reads `/k8s/*` and already holds the admin kubeconfig)
 
 **Key Pattern**: NLB-first (replaced the historical EIP-first):
@@ -261,7 +262,7 @@ All hooks in `.pre-commit-config.yaml` must pass before any commit is considered
 
 **Creates**:
 - EC2 instances (t3.medium Spot by default)
-- Security group (SSH, kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
+- Security group (NO inbound SSH — access is SSM, INCIDENTS #16; kubelet API, Gateway NodePort 30443 from the NLB SG only, pod networking)
 - IAM role with SSM read-only permissions
 - Bidirectional security group rules with control plane
 - `terraform_data` destroy-time provisioner to delete orphaned ENIs created by Kubernetes/CNI components at runtime (not tracked by OpenTofu; would otherwise block security group deletion)
@@ -395,7 +396,7 @@ before the IAM role is removed.
 ```bash
 # Copy and configure
 cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
-# Edit: my_ip, ssh_key_name, aws_region
+# Edit: ssh_key_name, aws_region (my_ip ya no existe: sin SSH entrante)
 cp tofu/envs/lab/backend.hcl.example tofu/envs/lab/backend.hcl
 # Edit: bucket, region, dynamodb_table
 
@@ -443,7 +444,7 @@ without opening another file:
 
 - **Bootstrap takes 8-12 min after `make apply`**: cloud-init runs in the background. Logs at
   `/var/log/k8s-bootstrap.log`, `/var/log/k8s-cp-bootstrap.log`,
-  `/var/log/k8s-worker-bootstrap.log`. Use `make ssh-cp` / `make ssh-worker` to access nodes.
+  `/var/log/k8s-worker-bootstrap.log`. Use `make ssm-cp` / `make ssm-worker` to reach nodes (SSM; no SSH exists).
 - **cloud-init is first-boot only**: re-running `make apply` on existing instances does not
   re-execute bootstrap scripts. Only new instances run them.
 - **Cilium NotReady**: usually resolves 1-2 min after nodes join. Forced re-apply (from any CP

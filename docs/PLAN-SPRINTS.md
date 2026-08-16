@@ -91,7 +91,7 @@ El orden interno importa:
   determinista 30443, sin PPv2, health TCP + seguridad en SG (fail-open
   asumido), cross-zone off explícito, NLB en el ciclo destroy/apply
 
-### 3. HA del control plane — EN CURSO (brief #S2-3 ratificado 16-ago, con las 5 correcciones de Codex)
+### 3. HA del control plane — 👑 CORONADA 16-ago (7/7 criterios · restore HA 193 s · acceso OOB restaurado, INCIDENTS #16-17)
 - 3 CPs t3.medium on-demand con etcd stacked (tolera caída de 1; **HA de nodo,
   no zonal** — la zonal queda deuda post-S2)
 - Endpoint estable del API: **el NLB existente, listener TCP/6443** → TG propio

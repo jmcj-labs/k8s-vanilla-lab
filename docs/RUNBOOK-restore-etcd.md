@@ -44,7 +44,7 @@ aws s3 ls "s3://${BACKUP_BUCKET}/etcd/" | tail -1     # ← anotar el objeto
 kubectl delete configmap drill-marker
 ```
 
-## Restore (en el control plane — `make ssh-cp`)
+## Restore (en el control plane — `make ssm-cp`; el original usaba SSH)
 
 > El plano de control se detiene durante el restore: API caída unos minutos.
 > Single-CP: no hay quórum que preservar — es la razón de este drill como

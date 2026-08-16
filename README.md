@@ -31,7 +31,7 @@ Kubernetes 1.35 bootstrapped with kubeadm on AWS EC2, automated with OpenTofu an
 Workers run on spot; the control planes run on-demand so the API servers and etcd quorum are
 never interrupted by spot reclamations. See
 [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md) for the original cost rationale
-and [ADR-007](docs/decisions/ADR-007-api-endpoint-nlb.md) for the HA topology (~4.8–5 $/day
+and [ADR-007](docs/decisions/ADR-007-api-endpoint-nlb.md) for the HA topology (~7.1 $/day
 running — CLUSTER.md §FinOps holds the measured number).
 
 ---
@@ -95,7 +95,7 @@ make bootstrap-aws
 
 # 2. Configure
 cp tofu/envs/lab/terraform.tfvars.example tofu/envs/lab/terraform.tfvars
-# edit: my_ip (curl ifconfig.me), ssh_key_name, aws_region
+# edit: ssh_key_name, aws_region  (no my_ip: there is no inbound SSH)
 cp tofu/envs/lab/backend.hcl.example tofu/envs/lab/backend.hcl
 # edit: bucket, region, dynamodb_table
 
@@ -171,7 +171,7 @@ profiles, not people.
 
 | Configuration | Per day (running) | Notes |
 |---------------|-------------------|-------|
-| Lab since S2 piece 3 | ~$4.8–5 | 3× On-Demand CPs (HA) + 3× Spot workers + NLB + public IPv4s |
+| Lab since S2 piece 3 | ~$7.1 | 3× On-Demand CPs (HA) + 3× Spot workers + NLB + 6 public IPv4 + 225 GiB gp3 — itemised in CLUSTER.md §FinOps |
 | Pre-HA baseline (piece 2) | ~$2.1 | 1 CP + NLB — kept for comparison |
 | All Spot | rejected | CP reclamation would take etcd quorum offline |
 
@@ -212,7 +212,8 @@ breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md).
   acceptable for a short-lived lab, not for shared or long-lived environments
 - **K8s API public through the NLB** (ADR-004 + ADR-007): CI runners (dynamic IPs) need it
   for platform install + smoke via the SSM kubeconfig; the API is TLS + cert-authenticated,
-  the CP nodes only accept 6443 from the NLB's SG, and SSH remains restricted to `my_ip`
+  the CP nodes only accept 6443 from the NLB's SG, and there is no inbound SSH at all
+  (node access is SSM Session Manager / Run Command — INCIDENTS #16)
 - **IMDS from pods: closed by policy** (2026-08-11): hop limit 3 is still required (EBS CSI,
   Cilium tunnel — INCIDENTS #4) but a clusterwide Cilium policy denies `169.254.169.254`
   to every pod except the EBS CSI (`platform/policies/`), verified by the smoke via

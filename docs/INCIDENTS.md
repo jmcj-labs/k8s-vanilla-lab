@@ -429,3 +429,165 @@ an on-demand `Backup` completed in ~30 seconds.
   the last attempt worked, not the current path. The install gate now
   passing on it is still right — but drills remain the only proof that
   matters.
+
+---
+
+## 16. The drill found the door locked: no out-of-band access to the control planes
+
+**When**: 2026-08-16, S2 piece 3 (HA), acceptance phase.
+**Severity**: the documented recovery procedure for the worst scenario was
+**not executable**. Nothing was broken — which is the point: it had never
+been tried.
+
+### What happened
+
+The HA etcd restore is the one ceremony that cannot use `kubectl`: it stops
+all three control planes, so by design the API is gone and the only way in
+is out-of-band. The runbook uses SSH, and SSH from `my_ip` was open — the
+NLB piece closed 6443, never 22. The procedure was sound.
+
+But the **private key of the `k8s-vanilla-lab` key pair does not exist in
+the operating environment**. Verified five ways before concluding: no file
+in `~/.ssh` (only `agent/` and `known_hosts`), `ssh-add -l` → *The agent has
+no identities*, no `~/.ssh/config`, no match in a disk-wide search for
+`*.pem` / `id_rsa` / `id_ed25519` / `*k8s-vanilla*`, and a direct connection
+answering `Permission denied (publickey)`. The node's
+`authorized_keys` holds exactly one `ssh-ed25519` key — the lost one.
+
+Nobody had noticed because since 2026-05-14 every operation went through CI,
+SSM parameters and `kubectl`. **The channel was never exercised, so its
+absence was invisible.**
+
+### Why it matters beyond this drill
+
+A recovery procedure that depends on an untested channel is not a procedure.
+This is the same house rule that produced the backup drills in S2-1 —
+*untested restore is hope, not backup* — applied one level down: **the
+ACCESS the restore depends on also needs proving.**
+
+### The trap inside the workaround
+
+"Rotate a new key" is not the small fix it appears to be. An EC2 key pair is
+baked into `authorized_keys` at first boot: changing the key pair in AWS does
+nothing to a running instance. Injecting a key by hand (possible today via a
+privileged pod, since the cluster is healthy) produces access that is **not
+reproducible by IaC and vanishes at the next node replacement** — and this
+piece just made node replacement a routine ceremony.
+
+### Fix
+
+Session Manager, whose agent turned out to be **already installed and active**
+on the nodes (`amazon-ssm-agent 3.3.4793.0`, snap, service active) and only
+missing the IAM permission to register. Access then travels with the instance
+profile: every future node gets it from the IaC, replacement-proof, audited in
+CloudTrail, and it lets the SSH ingress rules disappear entirely — which also
+removes the `my_ip` drift class (see the note in EVIDENCE-S2-piece3 §4b).
+
+### The lesson that generalises
+
+**The smoke must assert the out-of-band channel on every apply.** A door you
+never open is indistinguishable from a door that is locked, until the day you
+need it. Every recovery dependency deserves the same treatment as the backups
+themselves: exercised automatically, not documented and trusted.
+
+### Resolution (same day)
+
+SSM adopted as the out-of-band channel, in the order the brief demanded:
+**prove the new door before closing the old one.**
+
+1. `AmazonSSMManagedInstanceCore` on both node roles → 6/6 nodes `Online`.
+2. Canary Run Command executed on each node, asserting its exact output.
+3. Interactive Session Manager shell opened and verified running a command.
+4. **Only then** the inbound TCP/22 rules were removed from both security
+   groups, and `my_ip` retired from the modules with it.
+
+Two things the live run taught that the plan did not anticipate:
+
+- **Attaching the policy is not enough on a running node.** The agent had
+  already failed to get credentials and had backed off:
+  `[CredentialRefresher] Sleeping for 27m48s before retrying`. Without
+  restarting the agent, registration appears broken for half an hour. Nodes
+  born after this change are unaffected — the permission is in the profile
+  from first boot.
+- **`AWS-RunShellScript` executes with `/bin/sh`** (dash on Ubuntu), which
+  rejects `set -o pipefail` outright. A shebang as the FIRST command IS
+  honoured (verified: bash 5.2.21), which is how `scripts/lib/ssm-exec.sh`
+  keeps the strictness the SSH helper had. Without this the ceremonies would
+  have silently lost their error handling.
+
+**The generalised lesson is now enforced, not just written**: smoke §15
+proves the channel on every apply — exact inventory, all `Online`, a canary
+Run Command per node, the absence of inbound TCP/22, and (locally, where the
+plugin exists) an interactive shell that opens and runs a command.
+
+---
+
+## 17. The optimistic condition: four faces of one bug, in one piece
+
+**When**: 2026-08-16, S2 piece 3 (HA) and its closing deliverable.
+**Severity**: none reached production — every instance was caught by a cross
+review or by executing. That is the point of recording it.
+
+### The pattern
+
+Four times in one piece, a check that could not determine something decided
+**"fine, carry on"**:
+
+| Where | The optimistic condition | What it would have allowed |
+|---|---|---|
+| Recreate guard | `tofu state list 2>/dev/null \|\| true` | Any credential/backend/lock failure read as "empty state" → apply over the pre-HA singleton |
+| Founder autodetect | `if aws ssm get-parameter; then` | Any SSM error read as "no cluster" → a second `kubeadm init` on top of a live one |
+| Ceremony inventory | `tofu output ... \|\| echo 3` | An unreadable state read as "3 control planes" → destructive ceremony against an invented number |
+| Restore phase markers | flag set on meeting the completed phase | Every phase read as "already done" → a restore that skips the restore |
+
+Different files, different days, different reviewers catching them. Same
+shape: **the absence of an answer treated as a good answer.**
+
+### Why it keeps happening
+
+Shell makes the optimistic form the *shorter* one. `|| true`, `|| echo N`
+and `if cmd; then` are what fingers type; the fail-closed version always
+costs more lines — capture the exit code, capture stderr, name the ONE
+signature that legitimately means "nothing there", abort on everything else.
+The cheap form is also the one that reads fine in review, because it looks
+like it is handling the error.
+
+### The rule this leaves behind
+
+**In anything that guards a destructive action, "I could not tell" is a
+failure, not a pass.** Concretely:
+
+- Never `|| true` / `|| echo <default>` on a value a safety decision depends on.
+- Capture rc and stderr separately; enumerate the exact signature that means
+  "legitimately absent" (`ParameterNotFound`, `No state file was found`);
+  everything else aborts with the cause named.
+- Prove the decision table, do not read it. The phase-marker bug survived
+  review and died to a four-row truth table.
+
+### The fifth face: inside the script that documents this
+
+Codex found it **in this very entry's own enforcement list**. The HA restore
+drill — the file cited below as an example of failing closed — had:
+
+- the **anti-witness check** reading `if kubectl get …; then FAIL; fi`, so a
+  `Forbidden` while RBAC settled after the rewind, a timeout, or an API still
+  coming up all fell through to "it is gone" and PASSED the proof. The exact
+  trap that had to be dodged by hand minutes earlier.
+- `phase_get` / `state_get` back on `|| echo none` — expired credentials or a
+  throttle read as "no progress recorded", i.e. "start from scratch" on a
+  cluster possibly halfway through a restore.
+- a lock that treated **any** put-parameter failure as "someone holds it" and
+  then inferred a resume from the presence of a phase marker, so two
+  concurrent ceremonies could both proceed.
+
+**Writing the rule in prose does not install it in the artefact.** The lesson
+had been documented for a day and was still being committed. That is why the
+enforcement list below is a list of *files*, checked one by one, rather than a
+claim about having learnt something.
+
+### Where it is enforced
+
+`scripts/guard-legacy-cp-state.sh`, `bootstrap/control-plane.yaml` (genesis
+detection), `scripts/replace-control-plane.sh` (inventory), and
+`scripts/drill-restore-etcd-ha.sh` (`after()` plus the resume-without-state
+guard) all now fail closed and say why.

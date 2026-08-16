@@ -18,14 +18,9 @@ resource "aws_security_group" "worker" {
   vpc_id                 = var.vpc_id
   revoke_rules_on_delete = true
 
-  # SSH access from my IP only
-  ingress {
-    description = "SSH from my IP"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip]
-  }
+  # NO inbound SSH — out-of-band access is SSM Run Command / Session Manager
+  # (INCIDENTS #16). See the note in the control-plane module for why
+  # `key_name` survives on the instances while this rule does not.
 
   # Kubelet API - from control plane
   ingress {
@@ -38,8 +33,9 @@ resource "aws_security_group" "worker" {
 
   # Gateway NodePort — ONLY from the NLB's security group (S2 piece 2).
   # The old 30000-32767-from-my_ip range is gone: the NLB is the single
-  # public APPLICATION entry; SSH (my_ip) and the API :6443 keep their own
-  # regimes. SG→SG reference works with native client-IP preservation
+  # public APPLICATION entry, and since INCIDENTS #16 there is no inbound
+  # SSH at all — node access is SSM. SG→SG reference works with native
+  # client-IP preservation
   # because the health checks and forwarded connections originate from the
   # NLB's ENIs, which carry its SG.
   ingress {
@@ -214,6 +210,25 @@ resource "aws_iam_role_policy" "worker_ecr_pull" {
 }
 
 # EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
+# Out-of-band access (INCIDENTS #16 → brief de cierre de la pieza 3).
+#
+# The HA etcd restore stops all three API servers by design, so kubectl
+# ceases to exist as a tool exactly when it is needed most. The channel it
+# falls back on must therefore live OUTSIDE Kubernetes — and it must be one
+# that travels with the instance profile, not a private key that a laptop
+# can lose (which is precisely what happened: the key pair's private half
+# was gone and nobody had noticed, because the door was never opened).
+#
+# The managed policy is chosen over a hand-rolled minimal one on purpose:
+# it already carries the ssmmessages/ec2messages permissions the agent
+# needs and survives agent-version changes. The agent (3.3.4793.0) is
+# already installed and active on the AMI — attaching this is enough for it
+# to register on its next retry, no reboot and no replacement.
+resource "aws_iam_role_policy_attachment" "worker_ssm" {
+  role       = aws_iam_role.worker.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_role_policy_attachment" "worker_ebs_csi" {
   role       = aws_iam_role.worker.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"

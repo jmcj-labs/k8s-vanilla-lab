@@ -242,6 +242,34 @@ PERMISSIONS_POLICY=$(cat <<JSON
       "Resource": "*"
     },
     {
+      "Sid": "OutOfBandReadAndControl",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:CancelCommand"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OutOfBandSendShellScriptDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:*::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "OutOfBandSendToClusterNodesOnly",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:*:${ACCOUNT_ID}:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/kubernetes.io/cluster/${CLUSTER_NAME}": "owned"
+        }
+      }
+    },
+    {
       "Sid": "NLBLifecycle",
       "Effect": "Allow",
       "Action": [
@@ -499,6 +527,5 @@ echo "  Value: ${ROLE_ARN}"
 echo ""
 echo "Also ensure these Variables are configured:"
 echo "  AWS_REGION          = ${AWS_REGION}"
-echo "  TF_VAR_MY_IP        = <your-laptop-ip>/32"
 echo "  TF_VAR_SSH_KEY_NAME = <your-ec2-key-pair-name>"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

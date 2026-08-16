@@ -6,8 +6,6 @@ AWS_REGION      ?= eu-west-1
 EXPECTED_NODES  ?= 6
 TOFU_DIR        := tofu/envs/lab
 KUBECONFIG_PATH ?= $(HOME)/.kube/k8s-vanilla-lab.conf
-SSH_KEY_PATH    ?= $(HOME)/.ssh/k8s-vanilla-lab.pem
-SSH_USER        := ubuntu
 
 # The CLI-based targets call plain `aws` — resolved from the environment.
 # Locally that silently fell through to the stale `default` profile when
@@ -24,7 +22,7 @@ endif
 
 .PHONY: help check-aws init validate fmt plan apply destroy \
         plan-empty kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
-        smoke-app-contract ssh-cp ssh-worker clean bootstrap-aws
+        smoke-app-contract ssm-cp ssm-worker clean bootstrap-aws
 
 # Preflight for every target that talks to AWS via the CLI: fail fast and
 # NAME the credential chain in use instead of leaking a bare
@@ -67,7 +65,7 @@ plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each
 	( cd "$$STACK" && \
 	  TF_DATA_DIR="$$EMPTY_DATA" tofu init -input=false >/dev/null && \
 	  TF_DATA_DIR="$$EMPTY_DATA" tofu plan -input=false -no-color \
-	    -var="lab_account_id=" -var="my_ip=0.0.0.0/0" \
+	    -var="lab_account_id=" \
 	    -var="ssh_key_name=plan-empty" -var="aws_profile=$(AWS_PROFILE)" ) \
 	  || { echo "✗ plan-from-empty failed — a count/for_each likely depends on a known-after-apply value (INCIDENTS #11)"; exit 1; }
 
@@ -152,13 +150,34 @@ smoke-app-contract: check-aws ## Verify the deployed app against the platform co
 	KUBECONFIG="$$KUBECONFIG_FILE" CLUSTER_NAME=$(CLUSTER_NAME) AWS_REGION=$(AWS_REGION) \
 	  bash scripts/smoke-app-contract.sh
 
-ssh-cp: ## SSH into the founder control plane (CP-0); CP_INDEX=1|2 for the others
-	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \
-	  $(SSH_USER)@$$(cd $(TOFU_DIR) && tofu output -json control_plane_public_ips | jq -r '.[$(or $(CP_INDEX),0)]')
+# Out-of-band shell — SSM Session Manager, NOT ssh (INCIDENTS #16).
+# There is no inbound SSH any more and no private key to lose: access rides
+# on the instance profile and every session is recorded in CloudTrail.
+# The session lands as `ssm-user` (passwordless sudo available); Run
+# Command, used by the ceremonies, runs as root directly.
+# Needs the session-manager-plugin locally:
+#   brew install --cask session-manager-plugin
+#   (or the no-sudo bundle: https://s3.amazonaws.com/session-manager-downloads/plugin/latest/)
+ssm-cp: check-aws ## Interactive shell on a control plane (CP_INDEX=0|1|2, default 0)
+	@IID=$$(aws ec2 describe-instances --region $(AWS_REGION) \
+	  --filters "Name=tag:kubernetes.io/cluster/$(CLUSTER_NAME),Values=owned" \
+	            "Name=tag:Role,Values=control-plane" \
+	            "Name=tag:CPIndex,Values=$(or $(CP_INDEX),0)" \
+	            "Name=instance-state-name,Values=running" \
+	  --query 'Reservations[].Instances[].InstanceId' --output text); \
+	[ -n "$$IID" ] || { echo "✗ no control plane with CPIndex=$(or $(CP_INDEX),0)"; exit 1; }; \
+	echo "→ session on $$IID (control plane $(or $(CP_INDEX),0))"; \
+	aws ssm start-session --target "$$IID" --region $(AWS_REGION)
 
-ssh-worker: ## SSH into the first worker node
-	ssh -i $(SSH_KEY_PATH) -o StrictHostKeyChecking=no \
-	  $(SSH_USER)@$$(cd $(TOFU_DIR) && tofu output -json worker_public_ips | jq -r '.[0]')
+ssm-worker: check-aws ## Interactive shell on a worker (WORKER_INDEX=1..N, default 1)
+	@IID=$$(aws ec2 describe-instances --region $(AWS_REGION) \
+	  --filters "Name=tag:kubernetes.io/cluster/$(CLUSTER_NAME),Values=owned" \
+	            "Name=tag:WorkerIndex,Values=$(or $(WORKER_INDEX),1)" \
+	            "Name=instance-state-name,Values=running" \
+	  --query 'Reservations[].Instances[].InstanceId' --output text); \
+	[ -n "$$IID" ] || { echo "✗ no worker with WorkerIndex=$(or $(WORKER_INDEX),1)"; exit 1; }; \
+	echo "→ session on $$IID (worker $(or $(WORKER_INDEX),1))"; \
+	aws ssm start-session --target "$$IID" --region $(AWS_REGION)
 
 # ── Utility ───────────────────────────────────────────────────────────────────
 

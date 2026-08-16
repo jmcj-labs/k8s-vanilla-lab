@@ -24,15 +24,6 @@ variable "control_plane_count" {
   default     = 3
 }
 
-variable "my_ip" {
-  description = "CIDR allowed for SSH access. No default on purpose: set it explicitly in terraform.tfvars (your IP as x.x.x.x/32, or consciously 0.0.0.0/0). The K8s API no longer uses it: 6443 enters through the NLB (ADR-007)."
-  type        = string
-  validation {
-    condition     = can(cidrhost(var.my_ip, 0))
-    error_message = "Must be a valid CIDR block (e.g., 1.2.3.4/32 or 0.0.0.0/0)"
-  }
-}
-
 variable "worker_count" {
   # 3, not 2: real anti-affinity for the phase-2 data topology
   # (CNPG x3 instances, Kafka x3 brokers — one per worker).

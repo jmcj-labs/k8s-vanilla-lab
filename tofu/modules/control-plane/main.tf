@@ -33,14 +33,15 @@ resource "aws_security_group" "control_plane" {
   )
 }
 
-resource "aws_vpc_security_group_ingress_rule" "ssh" {
-  security_group_id = aws_security_group.control_plane.id
-  description       = "SSH from my IP"
-  cidr_ipv4         = var.my_ip
-  from_port         = 22
-  to_port           = 22
-  ip_protocol       = "tcp"
-}
+# NO inbound SSH. Out-of-band access is SSM (INCIDENTS #16): it rides on the
+# instance profile instead of a private key a laptop can lose, every session
+# is recorded, and there is no port to leave open by accident. Removing this
+# rule also retires the `my_ip` drift class — a stale local value silently
+# rewrote this very rule during the piece-3 acceptance.
+#
+# `key_name` on the instances is DELIBERATELY kept: it is ForceNew, so
+# dropping it would recreate all six nodes for no operational gain. It stays
+# vestigial until the next birth from an empty state.
 
 # Kubernetes API server — ONLY from the NLB's security group (S2 piece 3,
 # ADR-007). The old world-facing 6443 rule is gone: the API stays public by
@@ -241,6 +242,25 @@ resource "aws_iam_role_policy" "control_plane_etcd_backup" {
 }
 
 # EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
+# Out-of-band access (INCIDENTS #16 → brief de cierre de la pieza 3).
+#
+# The HA etcd restore stops all three API servers by design, so kubectl
+# ceases to exist as a tool exactly when it is needed most. The channel it
+# falls back on must therefore live OUTSIDE Kubernetes — and it must be one
+# that travels with the instance profile, not a private key that a laptop
+# can lose (which is precisely what happened: the key pair's private half
+# was gone and nobody had noticed, because the door was never opened).
+#
+# The managed policy is chosen over a hand-rolled minimal one on purpose:
+# it already carries the ssmmessages/ec2messages permissions the agent
+# needs and survives agent-version changes. The agent (3.3.4793.0) is
+# already installed and active on the AMI — attaching this is enough for it
+# to register on its next retry, no reboot and no replacement.
+resource "aws_iam_role_policy_attachment" "control_plane_ssm" {
+  role       = aws_iam_role.control_plane.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_role_policy_attachment" "control_plane_ebs_csi" {
   role       = aws_iam_role.control_plane.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"

@@ -22,19 +22,45 @@ Dos flags de `etcdutl snapshot restore` son **obligatorios** aquí
 - `--mark-compacted` — fuerza a los watchers a resincronizar desde cero en vez
   de continuar desde una revisión que ya no significa nada.
 
-## Por qué la orquestación es SSH y no kubectl
+## Por qué la orquestación es fuera de banda, y por qué SSM
 
 En el escenario real la API está caída — ese es el escenario. `kubectl` solo
 abre el drill (testigo + snapshot) y lo cierra (testigo recuperado); todo lo
-demás viaja por SSH (`my_ip` es el único origen admitido en el SG).
+demás viaja por **SSM Run Command** (`AWS-RunShellScript`, que ejecuta como
+**root**, sin `sudo`).
+
+Antes esto era SSH. Dejó de serlo por [INCIDENTS #16](INCIDENTS.md): al ir a
+ejecutar este mismo drill se descubrió que **la clave privada no existía en
+ningún sitio** — el procedimiento era correcto y a la vez inejecutable. El
+canal SSM viaja con el instance profile, así que ninguna máquina nueva nace
+sin él y ningún portátil puede perderlo.
+
+**El preflight prueba el canal en los tres CPs antes de tocar nada.** Si la
+puerta no abre, la ceremonia se detiene con el cluster intacto — que es
+exactamente la lección que la originó.
+
+### Reentrada
+
+Cada fase publica un marcador en un parámetro SSM, y el lock también vive
+ahí (un ConfigMap no puede arbitrar exclusión mutua cuando la API en la que
+vive está muerta). Si la ceremonia se interrumpe —incluso después de apartar
+los data dirs, el punto delicado— **se relanza el mismo comando y continúa
+donde estaba**. Para abandonarla a conciencia:
+
+```bash
+aws ssm delete-parameter --name /k8s/<cluster>/oob/restore-lock  --region <region>
+aws ssm delete-parameter --name /k8s/<cluster>/oob/restore-phase --region <region>
+```
 
 ## Precondiciones
 
 - Snapshot en `s3://<cluster>-backups-<account>/etcd/` (el CronJob de backup
   corre en **cualquier** CP sano — sin pin, a propósito: pinearlo a un nodo
   mataría el backup justo al perder ese nodo).
-- Credenciales de operador (presign; el role de CP es write-only a `etcd/*`
-  por diseño y no se amplía para drills).
+- Credenciales de operador con `ssm:SendCommand` sobre `AWS-RunShellScript`
+  y presign de S3 (el role de CP es write-only a `etcd/*` por diseño y no se
+  amplía para drills).
+- **Sin clave SSH ni puerto 22**: no existen desde INCIDENTS #16.
 - Los manifests generados por kubeadm en cada nodo (supuesto que el script
   explota, generado por el propio kubeadm):
   - **CP-0 (fundador)**: `etcd.yaml` con `--initial-cluster=<cp0>` solo,
@@ -72,13 +98,25 @@ Fases (el script las cronometra):
    **Nunca los dos a la vez.**
 7. **El testigo vuelve** — `drill-marker` presente con el ts exacto.
 
-## Tiempos (drill del AAAA-MM-DD — pendiente de ejecución)
+## Tiempos (drill EJECUTADO el 2026-08-16 por SSM Run Command)
 
-| Fase | Tiempo |
-|------|--------|
-| Stop → API restaurada (CP-0 solo) | — |
-| Quorum 3/3 completo | — |
-| Drill total (testigo → testigo) | — |
+| Fase | Reloj | Duración |
+|------|-------|----------|
+| Preflight: canal probado en los 3 CPs | 17:19:18 → 17:19:27 | 9 s |
+| Testigo + snapshot forzado + anti-testigo | 17:19:27 → 17:19:50 | 23 s |
+| Parada de los 3 control planes (**API cae**) | → 17:21:28 | ~98 s |
+| Data dirs apartados + restore con `etcdutl` | 17:21:28 → ~17:21:50 | ~22 s |
+| CP-0 sirviendo otra vez (**API vuelve**) | → ~17:22:00 | ~10 s |
+| CP-1 y CP-2 reincorporados (uno a uno) | → 17:22:25 | ~25 s |
+| Verificación (testigo, anti-testigo, etcd 3/3) | → 17:22:31 | 6 s |
+| **TOTAL** | 17:19:18 → 17:22:31 | **193 s** |
+
+**Ventana de API caída: ~35 s** (17:21:28 → ~17:22:00). El grueso del drill
+son la parada ordenada y las verificaciones, no la restauración en sí.
+
+Los pods de etcd tardan ~15 s más en reportar `1/1` a la API que en estar
+sanos para `etcdctl`: la vista de la API va por detrás del hecho. Comprobar
+`endpoint health` antes de alarmarse.
 
 ## Después del drill
 

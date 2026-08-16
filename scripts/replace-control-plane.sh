@@ -206,6 +206,16 @@ if bad:
 if not expected:
     print("plan does NOT replace " + target)
     sys.exit(3)
+# Everything the plan carries rides in front of the operator. Refusing
+# only what is dangerous while staying silent about the rest is how a
+# stale my_ip rewrote a security-group rule unnoticed (live phase,
+# 2026-08-16): silence read as "nothing else happened".
+other=[c["address"] + ": " + ",".join(c["change"]["actions"])
+       for c in plan.get("resource_changes",[])
+       if c["address"] != target and c.get("change",{}).get("actions",["no-op"]) != ["no-op"]]
+if other:
+    print("plan also carries these changes (accepted, but SHOWN):")
+    for o in other: print("   ", o)
 print("plan verified: only the target control plane is replaced")' \
   || FAIL "plan inspection refused this plan (see above) — NOTHING was applied and the cluster is untouched: etcd still has all its members and no Node was deleted"
 log "✓ plan inspected and saved: only ${ADDR} is replaced"
@@ -275,7 +285,7 @@ if [ -n "${OLD_NODE}" ]; then
   kubectl delete node "${OLD_NODE}" --ignore-not-found >/dev/null 2>&1 || true
 fi
 
-# ── 6. Close on capacity RESTORED, with EXACT sets (smoke §14 invariants) ───
+# ── 7. Close on capacity RESTORED, with EXACT sets (smoke §14 invariants) ───
 log "Waiting for the replacement to join (bootstrap takes 8-12 min)..."
 DEADLINE=$(( $(date -u +%s) + 1800 ))
 while true; do
