@@ -132,14 +132,21 @@ conjuntos exactos. Después, la verificación independiente:
 make smoke-test
 ```
 
-## Tiempos (drill del AAAA-MM-DD — pendiente de ejecución)
+## Tiempos (drill ejecutado el 2026-08-16, con clave caducada)
 
 | Fase | Tiempo |
 |------|--------|
-| Retirada de miembro + Node | — |
-| `tofu apply -replace` | — |
-| Bootstrap + join del reemplazo | — |
-| Hasta 3/3 etcd y 3/3 targets | — |
+| Lock + inventario + precondición + **plan inspeccionado** | 16 s |
+| Retirada de miembro etcd + borrado del Node | 1 s |
+| `tofu apply` del plan aprobado (incluye recrear el attachment) | ~2 min |
+| Bootstrap del nodo nuevo hasta el primer intento de join | ~1 min |
+| **4 intentos fallidos** con la clave caducada (120 s entre ellos) | ~6 min |
+| Renovación → siguiente intento → join completado | 2 min |
+| Hasta 3/3 nodos, 3/3 etcd y 3/3 targets healthy | ~1 min |
+| **Total de la ceremonia** | **819 s (13 min 39 s)** |
+
+Sin la caducidad de por medio (caso normal), restar los ~6 min de reintentos:
+**~8 minutos**.
 
 ## Si algo va mal
 
