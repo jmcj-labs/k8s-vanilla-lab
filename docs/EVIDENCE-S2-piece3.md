@@ -353,7 +353,7 @@ Mientras tanto, el desglose sobre el inventario **real** (en
 Comando para cerrarlo:
 
 ```bash
-aws ce get-cost-and-usage --time-period Start=2026-08-16 End=2026-08-17 \
+aws ce get-cost-and-usage --time-period Start=2026-08-16,End=2026-08-17 \
   --granularity DAILY --metrics UnblendedCost \
   --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
 ```

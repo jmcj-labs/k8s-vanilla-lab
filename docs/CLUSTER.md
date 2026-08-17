@@ -206,7 +206,9 @@ lleva ~24 h de retraso: el día del apply HA figuraba en 0,00. La medición se
 cierra al día siguiente con:
 
 ```bash
-aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD> End=<+1d> \
+# OJO: Start y End van en el MISMO argumento, separados por coma —
+# con un espacio el CLI responde "Unknown options: End=..."
+aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD>,End=<+1d> \
   --granularity DAILY --metrics UnblendedCost \
   --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
 ```
