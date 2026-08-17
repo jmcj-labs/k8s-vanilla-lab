@@ -340,7 +340,20 @@ Idempotencia probada **después** de un ciclo que incluyó destroy completo,
 apply desde cero, tres paradas/arranques del drill de pérdida, un reemplazo
 de nodo con `-replace` y un restore total de etcd.
 
-## 8. Coste real medido — **DIFERIDO A MAÑANA** (no es criterio de aceptación)
+## 8. Coste real medido — **CERRADO** (2026-08-17)
+
+| Día | Cluster | Gasto medido |
+|---|---|---|
+| 15-ago | pieza 2 (1 CP) | 1,55 USD |
+| 16-ago | pieza 2 + **HA ~3 h** | **1,97 USD** |
+
+**El número medido no valida la proyección de 7,1 $/día: mide otra cosa.**
+La proyección supone 24 h encendido; el HA vivió ~3 h. Aislar su ventana
+exigiría granularidad horaria, que es opt-in de la cuenta pagadora y está
+deshabilitada. Lo afirmable: **operado como se opera, el lab cuesta ~2 USD
+por día de trabajo**.
+
+<details><summary>Contexto original del diferimiento</summary>
 
 Cost Explorer publica con ~24 h de retraso: el día del apply HA figuraba en
 `0.00`. **Medir hoy sería inventar**, así que el dato queda explícitamente
@@ -361,3 +374,5 @@ aws ce get-cost-and-usage --time-period Start=2026-08-16,End=2026-08-17 \
 Dos correcciones que salieron del desglose y ya están aplicadas: la tarifa
 spot de la fórmula de Slack estaba **4,5× baja** (0,0055 vs 0,0246 reales) y
 las estimaciones previas ignoraban IPv4 y EBS (1,4 $/día).
+
+</details>
