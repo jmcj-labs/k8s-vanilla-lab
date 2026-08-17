@@ -366,11 +366,31 @@ resource "terraform_data" "cleanup_cp_ssm" {
     when    = destroy
     command = <<-EOT
       echo "Deleting SSM parameters for cluster ${self.input.cluster_name}..."
+      # --recursive is NOT optional: without it the listing only sees the
+      # top level and silently leaves every SUBPATH behind. Found on the
+      # 2026-08-16 destroy — /k8s/<cluster>/cp/certificate-key, control-plane
+      # JOIN MATERIAL, survived the cluster that owned it. The subpaths were
+      # introduced by S2 piece 3 (cp/) and its ceremonies (oob/); the sweep
+      # was written before they existed and nobody re-read it.
+      #
+      # And the listing FAILS CLOSED: `|| echo ""` turned an expired token or
+      # a throttle into "there is nothing to delete", i.e. a silent success
+      # that leaves secrets behind (INCIDENTS #17, once more).
+      set +e
       PARAMS=$(aws ssm get-parameters-by-path \
         --path "/k8s/${self.input.cluster_name}" \
+        --recursive \
         --query 'Parameters[*].Name' \
         --output text \
-        --region ${self.input.region} 2>/dev/null || echo "")
+        --region ${self.input.region} 2>&1)
+      LIST_RC=$?
+      set -e
+      if [ $LIST_RC -ne 0 ]; then
+        echo "ERROR: could not list SSM parameters under /k8s/${self.input.cluster_name} (rc=$LIST_RC)" >&2
+        echo "$PARAMS" >&2
+        echo "Refusing to report a clean destroy while cluster secrets may remain." >&2
+        exit 1
+      fi
       for PARAM in $PARAMS; do
         [ -z "$PARAM" ] && continue
         echo "Deleting SSM parameter $PARAM"

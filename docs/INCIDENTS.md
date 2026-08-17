@@ -591,3 +591,58 @@ claim about having learnt something.
 detection), `scripts/replace-control-plane.sh` (inventory), and
 `scripts/drill-restore-etcd-ha.sh` (`after()` plus the resume-without-state
 guard) all now fail closed and say why.
+
+---
+
+## 18. Control-plane join material survived the destroy that should have taken it
+
+**When**: 2026-08-16, right after crowning S2 piece 3 — found while verifying
+the closing destroy, not by a review.
+
+### What happened
+
+The destroy reported success and every visible resource was gone: zero
+instances, no NLB, zero orphaned volumes, no registered SSM nodes. But the
+post-destroy check found **two parameters still alive**:
+
+```
+/k8s/k8s-vanilla-lab/cp/certificate-key   SecureString
+/k8s/k8s-vanilla-lab/cp/joined-count      String
+```
+
+The first is **control-plane join material** — the exact secret this piece
+treated as a privilege boundary, scoped away from the worker role and given a
+2h TTL precisely because holding it means being able to become a control
+plane. It outlived the cluster it belonged to.
+
+### Root cause
+
+The destroy-time sweep listed parameters with `get-parameters-by-path`
+**without `--recursive`**, so it only ever saw the top level of
+`/k8s/<cluster>/`. It was written when every parameter lived there. S2 piece 3
+introduced the `cp/` subpath (join material) and its ceremonies the `oob/`
+one (restore lock and phase markers) — **and nobody re-read the sweep that was
+supposed to clean up after them.**
+
+A destroy is not the place to discover that a cleanup routine has a blind
+spot: by then the cluster is gone and only the secrets remain.
+
+### Second defect in the same five lines
+
+The listing ended in `|| echo ""`, so a failure — expired credentials, a
+throttle — produced an empty list, an empty loop, and a **silent success**
+that leaves every secret behind. INCIDENTS #17 again, this time in the
+destroy path. Now the listing fails closed and the destroy aborts rather than
+report a clean teardown it cannot vouch for.
+
+### Fix
+
+`--recursive` on the listing, and a hard failure if the listing itself fails.
+
+### The lesson
+
+**A cleanup routine is a consumer of every path anyone adds.** Introducing a
+new subpath is not complete until the thing that deletes it has been re-read.
+Worth stating because the mistake is structurally invisible: nothing fails,
+nothing warns, and the evidence only shows up if someone counts what remains
+after a destroy — which is exactly why that count belongs in the ceremony.
