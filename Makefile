@@ -58,6 +58,8 @@ validate: ## Check formatting and validate all stacks (no backend required)
 
 test: ## Run the script test suites that need no cluster and no AWS
 	@bash scripts/test-witness-verdict.sh
+	@echo ""
+	@bash scripts/test-witness-liveness.sh
 
 plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each on known-after-apply — INCIDENTS #11)
 	@STACK=tofu/envs/lab; \

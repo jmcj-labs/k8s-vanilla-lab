@@ -150,6 +150,9 @@ cmd_start() {
     n=0
     while true; do
       n=$((n + 1))
+      # Evidence that the loop is WORKING, stamped before the probe so a
+      # hung probe shows up as a stale heartbeat rather than as silence.
+      date -u +%s > "${STATE_DIR}/heartbeat"
       r=$(probe_http)
       # A TLS failure may be a rotated certificate rather than a broken path.
       if [ "${r}" = "transport:tls" ]; then
@@ -176,28 +179,55 @@ cmd_start() {
   log "close it with: bash $0 stop"
 }
 
+# Worst legitimate silence between two heartbeats: an HTTP probe at its
+# --max-time, a gRPC probe at its own, the sleep, and slack for a loaded box.
+hb_tolerance() { echo "${WITNESS_HB_TOLERANCE:-$((10 + 10 + INTERVAL + 10))}"; }
+
 cmd_stop() {
   [ -f "${STATE_DIR}/pid" ] || FAIL "no witness window is open"
   # THE HOLE THIS CLOSES: if the probing loop died halfway, the series simply
   # stops growing — and a verdict computed over what it managed to collect
   # would read sent == successful and PASS a window that stopped witnessing.
-  # A witness that died is not a witness that saw nothing wrong. Liveness is
-  # checked BEFORE the kill, so it is the loop's own state, not ours.
-  WPID=$(cat "${STATE_DIR}/pid")
-  if kill -0 "${WPID}" 2>/dev/null; then
-    ALIVE=yes
-  else
-    ALIVE=no
-  fi
-  kill "${WPID}" 2>/dev/null || true
+  # A witness that died is not a witness that saw nothing wrong.
+  #
+  # THE HOLE THE FIRST FIX STILL HAD: liveness was `kill -0 <pid>`, which
+  # asks "does a process with this number exist" — not "was my loop still
+  # working". It answers YES for a PID the OS recycled onto some unrelated
+  # process, and YES for a loop wedged and probing nothing. Both are exactly
+  # the failure this check exists to catch: the watchdog inheriting the bug
+  # it watches. Liveness is now the loop's own HEARTBEAT — evidence of work
+  # done, stamped by the loop itself, immune to PID reuse.
+  local wpid hb now age tol
+  wpid=$(cat "${STATE_DIR}/pid")
+  [ -f "${STATE_DIR}/heartbeat" ] || { kill "${wpid}" 2>/dev/null || true
+    FAIL "the window left NO heartbeat: the loop never completed an iteration.
+  There is nothing to give a verdict over."; }
+  hb=$(cat "${STATE_DIR}/heartbeat")
+  case "${hb}" in
+    ''|*[!0-9]*) kill "${wpid}" 2>/dev/null || true
+      FAIL "the heartbeat is unreadable ('${hb}') — the record of whether the
+  witness was alive is itself damaged, so it cannot be read as alive." ;;
+  esac
+  now=$(date -u +%s); age=$((now - hb)); tol=$(hb_tolerance)
+  kill "${wpid}" 2>/dev/null || true
   rm -f "${STATE_DIR}/pid"
-  [ "${ALIVE}" = "yes" ] || FAIL "the witness loop was ALREADY DEAD when the window closed.
-  Whatever it collected is a truncated record, not a verdict — the window
-  must be re-run. (This is why liveness is checked, not assumed.)"
-  local label started
-  label=$(cat "${STATE_DIR}/label"); started=$(cat "${STATE_DIR}/started")
+  [ "${age}" -le "${tol}" ] || FAIL "the witness loop STOPPED WITNESSING ${age}s before
+  the window closed (tolerance ${tol}s). Whatever it collected is a truncated
+  record, not a verdict — the window must be re-run."
+
+  # The verifier is held to its own rule: every input it needs must be
+  # readable, or there is no verdict. Read them explicitly instead of inside
+  # the command prefix, where a failing substitution passes an empty string.
+  local label started endpoint
+  label=$(cat "${STATE_DIR}/label")     || FAIL "cannot read the window label"
+  started=$(cat "${STATE_DIR}/started") || FAIL "cannot read the window start"
+  endpoint=$(cat "${STATE_DIR}/endpoint") || FAIL "cannot read the window endpoint"
+  command -v python3 >/dev/null 2>&1 || FAIL "python3 is absent: the verdict cannot be
+  computed, which is not the same as a window that passed."
   SERIES="${STATE_DIR}/series" LABEL="${label}" STARTED="${started}" \
-    ENDPOINT="$(cat "${STATE_DIR}/endpoint")" python3 "$(dirname "$0")/lib/witness-verdict.py"
+    ENDPOINT="${endpoint}" python3 "$(dirname "$0")/lib/witness-verdict.py" \
+    || FAIL "the verifier itself did not complete (exit $?) — no verdict was
+  produced, so this window has NOT passed."
 }
 
 cmd_once() {

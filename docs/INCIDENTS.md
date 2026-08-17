@@ -618,13 +618,32 @@ anyway is what exposed three real holes, each worse than the one reported:
 All three were found by the **negative tests**, not by reading. The second and
 third had already survived being written, reviewed and reasoned about.
 
+**And then the fix for the first one turned out to have the same shape.** The
+liveness check was `kill -0 <pid>`, which asks *does a process with this
+number exist* — not *was my loop still working*. It answers yes for a PID the
+OS recycled onto an unrelated process, and yes for a loop wedged and probing
+nothing. A watchdog added to catch "it stopped and I did not notice" that
+itself could not tell the difference between working and merely existing.
+Proven, not argued: driving the recycled-PID scenario against the previous
+commit returns **rc=0 — it passed a window whose loop had been dead for ten
+minutes**. Liveness is now the loop's own heartbeat, stamped before each
+probe: evidence of work done, immune to PID reuse, and stale when the loop
+hangs. The verifier is held to the same rule — a missing heartbeat, an
+unreadable one, an absent `python3`, or a verifier that dies mid-verdict all
+fail the window, because *no verdict was produced* is not *the window
+passed*.
+
 **What generalises**: measuring instruments need their own negative tests, and
 "it failed closed" is not the same as "it works". A witness has two ways to be
 worthless — passing what it should fail, and failing what it should pass — and
 only executing its decision table finds both. `scripts/test-witness-verdict.sh`
 runs 14 synthetic series and asserts the outcome of each; the verdict logic
 lives in `scripts/lib/witness-verdict.py` precisely so it can be executed
-without a cluster.
+without a cluster. `scripts/test-witness-liveness.sh` does the same for the
+watchdog — 10 cases including a recycled PID, a wedged loop, and killing the
+verifier mid-verdict. Both run in CI via `make test`, and that gate was
+verified by inducing a red case and watching it fail the PR: a suite that
+reports without blocking is the same bug in a lab coat.
 
 ### Where it is enforced
 
