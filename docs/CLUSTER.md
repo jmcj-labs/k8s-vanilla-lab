@@ -201,12 +201,36 @@ sin ganancia; queda vestigial hasta el próximo nacimiento desde cero.
 | 225 GiB gp3 (6×30 raíz + PVCs 3×10 + 3×5) | 0,0293 | 0,70 |
 | **TOTAL** | **0,2951** | **≈ 7,1** |
 
-**Es una estimación con tarifas publicadas, no una medición.** Cost Explorer
-lleva ~24 h de retraso: el día del apply HA figuraba en 0,00. La medición se
-cierra al día siguiente con:
+### Medición real (2026-08-17, sobre el día 16)
+
+| Día | Forma del cluster | Gasto MEDIDO |
+|---|---|---|
+| 2026-08-15 | pieza 2 (1 CP), parte del día | **1,55 USD** |
+| 2026-08-16 | pieza 2 por la mañana + **HA ~3 h** | **1,97 USD** |
+
+Desglose del 16: EC2 compute 1,305 · VPC 0,237 · **ELB 0,204** · EC2-Other
+0,201 · S3 0,003 · SSM 0,001 (+0,020 del propio Cost Explorer, que cobra por
+consulta).
+
+**La medición NO valida ni desmiente la tabla de arriba: mide otra cosa.**
+Esos 7,1 $/día son la proyección de un día **entero** encendido; el cluster
+HA vivió unas 3 horas antes del destroy. Para validar la proyección haría
+falta o bien dejarlo 24 h encendido —contrario a la disciplina que nos
+impusimos— o bien granularidad horaria en Cost Explorer, que es **opt-in de
+la cuenta pagadora y aquí está deshabilitada** (`AccessDeniedException:
+Hourly data granularity is an opt-in only feature`).
+
+**Lo que sí se puede afirmar, y es lo que importa para FinOps**: operado como
+lo operamos —encender, trabajar, destruir— el laboratorio cuesta **~2 USD por
+día de trabajo**, no 7. La factura la manda el número de horas, no la tarifa
+diaria teórica.
+
+Para repetir la medición:
 
 ```bash
-aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD> End=<+1d> \
+# OJO: Start y End van en el MISMO argumento, separados por coma —
+# con un espacio el CLI responde "Unknown options: End=..."
+aws ce get-cost-and-usage --time-period Start=<AAAA-MM-DD>,End=<+1d> \
   --granularity DAILY --metrics UnblendedCost \
   --group-by Type=DIMENSION,Key=SERVICE --region us-east-1
 ```
