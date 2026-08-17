@@ -22,7 +22,7 @@ endif
 
 .PHONY: help check-aws init validate fmt plan apply destroy \
         plan-empty kubeconfig kubeconfig-admin kubeconfig-dev platform smoke-test \
-        smoke-app-contract ssm-cp ssm-worker clean bootstrap-aws
+        smoke-app-contract ssm-cp ssm-worker clean bootstrap-aws test
 
 # Preflight for every target that talks to AWS via the CLI: fail fast and
 # NAME the credential chain in use instead of leaking a bare
@@ -55,6 +55,11 @@ validate: ## Check formatting and validate all stacks (no backend required)
 	    TF_DATA_DIR="$$VALIDATE_TMP" tofu validate ) || { rm -rf "$$VALIDATE_TMP"; exit 1; }; \
 	  rm -rf "$$VALIDATE_TMP"; \
 	done
+
+test: ## Run the script test suites that need no cluster and no AWS
+	@bash scripts/test-witness-verdict.sh
+	@echo ""
+	@bash scripts/test-witness-liveness.sh
 
 plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each on known-after-apply — INCIDENTS #11)
 	@STACK=tofu/envs/lab; \
