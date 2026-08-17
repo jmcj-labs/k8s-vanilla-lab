@@ -181,7 +181,7 @@ cmd_start() {
 
 # Worst legitimate silence between two heartbeats: an HTTP probe at its
 # --max-time, a gRPC probe at its own, the sleep, and slack for a loaded box.
-hb_tolerance() { echo "${WITNESS_HB_TOLERANCE:-999999}"; }  # DELIBERATE REGRESSION
+hb_tolerance() { echo "${WITNESS_HB_TOLERANCE:-$((10 + 10 + INTERVAL + 10))}"; }
 
 cmd_stop() {
   [ -f "${STATE_DIR}/pid" ] || FAIL "no witness window is open"
