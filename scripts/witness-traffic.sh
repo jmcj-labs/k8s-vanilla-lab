@@ -47,14 +47,57 @@ resolve_endpoint() {
   # Pin to the live Gateway certificate: the selfsigned CA has an empty DN
   # and LibreSSL will not verify it (S1 finding), so pinning is how we get
   # real TLS verification instead of -k blindness.
-  GW_PIN=$(kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' 2>/dev/null \
-    | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
-    | openssl dgst -sha256 -binary | base64) || FAIL "cannot read the Gateway certificate"
+  GW_PIN=$(gateway_pin) || FAIL "cannot read the Gateway certificate"
+  GW_ISSUER=$(gateway_issuer) || FAIL "cannot read the Gateway certificate issuer"
 }
 
-# probe_http → prints "ok" | "transport" | "timeout" | "http:<code>"
+gateway_pin() {
+  kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' 2>/dev/null \
+    | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+    | openssl dgst -sha256 -binary | base64
+}
+gateway_issuer() {
+  kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' 2>/dev/null \
+    | base64 -d | openssl x509 -noout -issuer
+}
+
+# A pinned witness breaks the moment the certificate legitimately rotates —
+# cert-manager renews, and 4c is a long window. Treating every TLS failure as
+# "the cluster broke" would cry wolf; treating every new certificate as fine
+# would make the pin decorative. So: on a TLS failure, re-read the live
+# certificate. If the ISSUER is the one we started with, this is the expected
+# rotation — re-pin and record it as an event. If the issuer changed, the
+# door is presenting something we did not expect, and that IS a failure.
+handle_possible_rotation() {
+  local new_pin new_issuer
+  new_pin=$(gateway_pin 2>/dev/null || true)
+  new_issuer=$(gateway_issuer 2>/dev/null || true)
+  if [ -z "${new_pin}" ] || [ -z "${new_issuer}" ]; then
+    echo "cert-unreadable"; return
+  fi
+  if [ "${new_pin}" = "${GW_PIN}" ]; then
+    echo "same-cert"; return          # TLS failed for another reason: real
+  fi
+  if [ "${new_issuer}" = "${GW_ISSUER}" ]; then
+    GW_PIN="${new_pin}"
+    echo "rotated-expected"; return
+  fi
+  echo "rotated-unexpected"
+}
+
+# probe_http → "ok" | "transport" | "timeout" | "http:<code>" | "probe-error:<why>"
+#
+# THE DISTINCTION THAT MATTERS: a failure to MEASURE is not a measurement.
+# Blaming the cluster for our own broken tooling produces a false FAIL;
+# treating an unparseable answer as a code produces a false PASS. Both are
+# INCIDENTS #17 wearing different hats, so the two are separated explicitly
+# and "probe-error" is its own class — it fails the window, and it says the
+# fault was ours.
 probe_http() {
   local body code rc
+  command -v curl >/dev/null 2>&1 || { echo "probe-error:curl-missing"; return; }
+  [ -n "${GW_PIN:-}" ] || { echo "probe-error:no-pin"; return; }
+  [ -n "${NLB_DNS:-}" ] || { echo "probe-error:no-endpoint"; return; }
   body=$(printf '{"reference":"witness-%s","origin":"MAD","destination":"BCN"}' "$(date -u +%s%N)")
   set +e
   code=$(curl -s --max-time 10 \
@@ -65,12 +108,19 @@ probe_http() {
   rc=$?
   set -e
   case "${rc}" in
-    0)  case "${code}" in
-          200|201) echo "ok" ;;
-          *)       echo "http:${code}" ;;
-        esac ;;
+    0)
+      # curl exited clean, so it HAS an answer — but only a well-formed
+      # three-digit code counts as one. Anything else means we could not
+      # read what happened, which is not the same as a bad status.
+      case "${code}" in
+        200|201)          echo "ok" ;;
+        [1-5][0-9][0-9])  echo "http:${code}" ;;
+        *)                echo "probe-error:unparseable-code" ;;
+      esac ;;
     28) echo "timeout" ;;
-    *)  echo "transport" ;;   # 7 refused, 35 TLS, 6 DNS, 56 reset…
+    35|60|58|77) echo "transport:tls" ;;   # pin mismatch lives here
+    6|7|56)      echo "transport" ;;       # DNS, refused, reset
+    *)  echo "probe-error:curl-rc-${rc}" ;; # unknown curl failure: OURS, not the cluster's
   esac
 }
 
@@ -101,10 +151,22 @@ cmd_start() {
     while true; do
       n=$((n + 1))
       r=$(probe_http)
-      echo "$(date -u +%H:%M:%SZ) http ${r}" >> "${STATE_DIR}/series"
+      # A TLS failure may be a rotated certificate rather than a broken path.
+      if [ "${r}" = "transport:tls" ]; then
+        case "$(handle_possible_rotation)" in
+          rotated-expected)
+            echo "$(date -u +%s) $(date -u +%H:%M:%SZ) event cert-rotated-expected" >> "${STATE_DIR}/series"
+            r=$(probe_http) ;;            # re-probe with the new pin
+          rotated-unexpected)
+            r="transport:unexpected-cert" ;;
+          cert-unreadable)
+            r="probe-error:cert-unreadable" ;;
+        esac
+      fi
+      echo "$(date -u +%s) $(date -u +%H:%M:%SZ) http ${r}" >> "${STATE_DIR}/series"
       if [ $((n % GRPC_EVERY)) -eq 0 ]; then
         g=$(probe_grpc)
-        [ "${g}" != "skip" ] && echo "$(date -u +%H:%M:%SZ) grpc ${g}" >> "${STATE_DIR}/series"
+        [ "${g}" != "skip" ] && echo "$(date -u +%s) $(date -u +%H:%M:%SZ) grpc ${g}" >> "${STATE_DIR}/series"
       fi
       sleep "${INTERVAL}"
     done
@@ -116,42 +178,26 @@ cmd_start() {
 
 cmd_stop() {
   [ -f "${STATE_DIR}/pid" ] || FAIL "no witness window is open"
-  kill "$(cat "${STATE_DIR}/pid")" 2>/dev/null || true
+  # THE HOLE THIS CLOSES: if the probing loop died halfway, the series simply
+  # stops growing — and a verdict computed over what it managed to collect
+  # would read sent == successful and PASS a window that stopped witnessing.
+  # A witness that died is not a witness that saw nothing wrong. Liveness is
+  # checked BEFORE the kill, so it is the loop's own state, not ours.
+  WPID=$(cat "${STATE_DIR}/pid")
+  if kill -0 "${WPID}" 2>/dev/null; then
+    ALIVE=yes
+  else
+    ALIVE=no
+  fi
+  kill "${WPID}" 2>/dev/null || true
   rm -f "${STATE_DIR}/pid"
+  [ "${ALIVE}" = "yes" ] || FAIL "the witness loop was ALREADY DEAD when the window closed.
+  Whatever it collected is a truncated record, not a verdict — the window
+  must be re-run. (This is why liveness is checked, not assumed.)"
   local label started
   label=$(cat "${STATE_DIR}/label"); started=$(cat "${STATE_DIR}/started")
   SERIES="${STATE_DIR}/series" LABEL="${label}" STARTED="${started}" \
-    ENDPOINT="$(cat "${STATE_DIR}/endpoint")" python3 - <<'PY'
-import os, collections
-series = [l.split() for l in open(os.environ["SERIES"]) if l.strip()]
-kinds = collections.Counter()
-first_fail = None
-for ts, proto, result in series:
-    kinds[result if result == "ok" else result.split(":")[0]] += 1
-    if result != "ok" and first_fail is None:
-        first_fail = (ts, proto, result)
-sent = len(series)
-ok = kinds["ok"]
-print("")
-print("=== WITNESS WINDOW '%s' ===" % os.environ["LABEL"])
-print("  endpoint : %s" % os.environ["ENDPOINT"])
-print("  from     : %s" % os.environ["STARTED"])
-print("  sent     : %d" % sent)
-print("  successful: %d" % ok)
-for k in ("transport", "timeout", "http", "grpc"):
-    if kinds[k]:
-        print("  %-9s: %d" % (k, kinds[k]))
-print("")
-if sent == 0:
-    print("✗ VERDICT: the window recorded NOTHING — a witness with no probes is not evidence")
-    raise SystemExit(1)
-if ok == sent:
-    print("✓ VERDICT: sent == successful (%d/%d) — the entry path never broke" % (ok, sent))
-    raise SystemExit(0)
-print("✗ VERDICT: %d of %d probes did NOT succeed" % (sent - ok, sent))
-print("  first failure: %s %s %s" % first_fail)
-raise SystemExit(1)
-PY
+    ENDPOINT="$(cat "${STATE_DIR}/endpoint")" python3 "$(dirname "$0")/lib/witness-verdict.py"
 }
 
 cmd_once() {

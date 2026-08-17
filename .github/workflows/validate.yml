@@ -67,6 +67,12 @@ jobs:
 
       - name: Validate (fmt + syntax, no AWS needed)
         run: make validate
+
+      # The witness decides whether a live upgrade broke traffic. A verdict
+      # nobody tests is the optimistic condition wearing a lab coat — three of
+      # its bugs were found here, not by reading it (INCIDENTS #17, 6th face).
+      - name: Script test suites (no cluster, no AWS)
+        run: make test
         working-directory: .
 
       - name: Configure AWS credentials (OIDC)

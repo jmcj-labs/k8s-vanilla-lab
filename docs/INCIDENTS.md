@@ -522,9 +522,11 @@ plugin exists) an interactive shell that opens and runs a command.
 
 ---
 
-## 17. The optimistic condition: four faces of one bug, in one piece
+## 17. The optimistic condition: six faces of one bug
 
-**When**: 2026-08-16, S2 piece 3 (HA) and its closing deliverable.
+**When**: 2026-08-16 (S2 piece 3 and its closing deliverable) and
+2026-08-17 (the piece-4 scaffolding). It has now outlived the piece that
+named it.
 **Severity**: none reached production — every instance was caught by a cross
 review or by executing. That is the point of recording it.
 
@@ -585,12 +587,55 @@ had been documented for a day and was still being committed. That is why the
 enforcement list below is a list of *files*, checked one by one, rather than a
 claim about having learnt something.
 
+### The sixth face: the instrument whose whole job is not to commit it
+
+2026-08-17, S2 piece 4 scaffolding. The upgrade witness — an instrument built
+**specifically** to refuse the optimistic reading during a live upgrade — was
+handed to review and came back with this face found in it.
+
+Codex described the mechanism as a `|| echo "000"` in the HTTP probe,
+collapsing "I could not measure" into "I measured a 000". That exact line was
+**not** in the code: rc and code were already separate variables. Chasing it
+anyway is what exposed three real holes, each worse than the one reported:
+
+- **A witness that died still passed.** If the probing loop was killed or
+  crashed mid-window, the series simply stopped growing. `stop` then computed
+  `sent == successful` over the truncated record and returned PASS — a green
+  verdict for a window nobody was watching. The failure mode of a witness is
+  not "it reports a failure", it is **silence**, and silence looked identical
+  to success. Liveness is now checked *before* the kill, so it reflects the
+  loop's own state.
+- **Every success counted as a failure.** `line.split(None, 3)` keeps the
+  trailing newline on the final field with `maxsplit`, so `"ok\n" != "ok"`.
+  Harmless in direction (it failed closed) but it made the instrument useless:
+  every window would have failed. It had passed a read-through of the code.
+- **An unreadable record was counted and then ignored.** A malformed line
+  incremented a failure counter but never entered the series, so it never
+  reached the `sent`-vs-`successful` comparison, and the window still passed.
+  The finding existed, was tallied, and **changed nothing** — the optimistic
+  condition with an audit trail.
+
+All three were found by the **negative tests**, not by reading. The second and
+third had already survived being written, reviewed and reasoned about.
+
+**What generalises**: measuring instruments need their own negative tests, and
+"it failed closed" is not the same as "it works". A witness has two ways to be
+worthless — passing what it should fail, and failing what it should pass — and
+only executing its decision table finds both. `scripts/test-witness-verdict.sh`
+runs 14 synthetic series and asserts the outcome of each; the verdict logic
+lives in `scripts/lib/witness-verdict.py` precisely so it can be executed
+without a cluster.
+
 ### Where it is enforced
 
 `scripts/guard-legacy-cp-state.sh`, `bootstrap/control-plane.yaml` (genesis
 detection), `scripts/replace-control-plane.sh` (inventory), and
 `scripts/drill-restore-etcd-ha.sh` (`after()` plus the resume-without-state
-guard) all now fail closed and say why.
+guard), `scripts/witness-traffic.sh` + `scripts/lib/witness-verdict.py`
+(liveness, unreadable records, missing series) and
+`scripts/preflight-cgroup-v2.sh` (a node that cannot be *proven* on v2 blocks
+exactly like one proven on v1) all now fail closed and say why. The witness
+pair is additionally **tested**, not just written.
 
 ---
 
