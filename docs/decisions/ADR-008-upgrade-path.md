@@ -1,0 +1,98 @@
+# ADR-008: Upgrade path for the network column (S2 piece 4)
+
+**Status**: Accepted (brief #S2-4, ratified by dirección; scope closed)
+**Date**: 2026-08-17
+**Deciders**: Platform Engineering Team
+
+---
+
+## Context
+
+The piece is named "live Kubernetes upgrade", but the investigation that
+preceded it found that is the *third* of three chained upgrades, not the
+first. Cilium 1.19 is e2e tested against Kubernetes **1.32–1.35** and does
+not cover 1.36; Cilium 1.20 covers **1.33–1.36**. So Kubernetes cannot move
+until Cilium does, and Cilium 1.20 in turn documents a newer Gateway API.
+
+Every one of the three touches the **single entry path** crowned in piece 2
+(NLB → NodePort 30443 → shared Gateway → app), which is the reason each one
+carries its own witness rather than one witness at the end.
+
+## Decision
+
+### 1. Order is contractual: Cilium → Gateway API → Kubernetes
+
+Not because of a technical dependency in that exact direction, but so that
+**each movement changes ONE variable** and the witness can attribute a
+failure to a cause. Upgrading Gateway API first would put a new Gateway on
+an old Cilium in the entry path and mix two changes in one blast radius.
+
+### 2. Wait for Cilium 1.20.1 before starting
+
+1.20.0 was released 2026-07-29 with no patches yet. The same discipline the
+sprint applies elsewhere — *we do not take as proven what has not been
+tested* — applies to the version of the thing that IS our network. Cilium's
+observed cadence (patches for three branches on 2026-07-16) suggests days,
+not weeks. If execution must start before a patch exists, 1.20.0 is taken
+with reinforced validation and a fresh etcd snapshot first.
+
+### 3. Gateway API CRDs are stepped, not jumped
+
+Upstream guidance: *"Although it is usually safe to upgrade across multiple
+Gateway API minor versions at once, the safest and most widely tested path
+will involve upgrading one minor version at a time."* With a Gateway serving
+production traffic, we take the tested path: v1.2 → v1.3 → v1.4 → v1.5 → v1.6.
+
+### 4. Kubernetes target is 1.36.3
+
+Verified in the **apt index our nodes actually install from**
+(`pkgs.k8s.io`, v1.36 branch: 1.36.0, 1.36.1, 1.36.2-2.1, 1.36.3), not from
+the website — which reported 1.36.2 as latest and was stale. The `-2.1`
+packaging suffix on 1.36.2 suggests a re-release; another reason to take .3.
+
+## Two premises corrected by checking the repository
+
+The brief was written on two assumptions that the code does not support.
+Both are recorded because they change the risk profile, not to score points:
+
+- **We do NOT use `Gateway.spec.infrastructure`.** The whole of
+  `platform/manifests/gateway-shared.yaml` is `gatewayClassName`, one HTTPS
+  listener, TLS and `allowedRoutes`; nothing patches it afterwards. The
+  v1.2→v1.3 step was flagged as "the sensitive one" because that field
+  changed shape — it does not apply to us. The stepped path stays, on
+  general prudence rather than that specific risk. **To re-verify against
+  the live Gateway**, in case the controller materialises the field at
+  runtime.
+- **No CiliumNetworkPolicy uses L7 rules.** Cilium 1.20 removes the Envoy Go
+  extensions and requires Kafka/L7/L7proto rules under `toPorts[].rules` to
+  be deleted before upgrading. `platform/policies/` has none, so this
+  breaking change does not touch us. The IMDS policy is L3/L4.
+
+## Strimzi: managed risk, not a blocker
+
+Strimzi 1.1.0 declares no Kubernetes ceiling anywhere we could find — not in
+the release notes, the overview, nor the changelog, whose last statement on
+the subject is from 0.51: *"we support only Kubernetes 1.30 and newer"*, a
+floor. Absence of a declaration is not evidence of incompatibility, so the
+decision is to treat it as **managed risk** with a data pre-flight in the
+Kubernetes step: drain workers one at a time, observe Kafka Ready after
+EACH one, and stop with two healthy brokers if the first broker on a 1.36
+kubelet fails. RF3 with `min.insync.replicas=2` survives losing one.
+
+## Consequences
+
+- Three PRs, three cross-reviews, three witnessed windows — not one big move.
+- Rollback per step: Cilium 1.19.6 (consecutive minor, supported); the
+  v1.2.1 CRD manifest kept ready for the first Gateway API step; and for
+  Kubernetes, the HA restore from piece 3, because kubeadm does not support
+  a clean minor downgrade.
+- The bootstrap is updated at the end so that **new nodes are born
+  upgraded** — otherwise the next apply resurrects the old versions.
+
+## References
+
+- Cilium k8s compatibility: https://docs.cilium.io/en/v1.19/network/kubernetes/compatibility/ · https://docs.cilium.io/en/v1.20/network/kubernetes/compatibility/
+- Cilium upgrade policy (one minor at a time): https://docs.cilium.io/en/v1.20/operations/upgrade/
+- Gateway API CRD management: https://gateway-api.sigs.k8s.io/guides/crd-management/
+- Gateway API v1.6.0 release: https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.6.0
+- Kubernetes apt index: https://pkgs.k8s.io/core:/stable:/v1.36/deb/

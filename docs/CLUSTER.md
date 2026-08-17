@@ -278,6 +278,12 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
   solo queda grabado si se activa el logging de Session Manager** (S3 o
   CloudWatch, con su preferencia de cifrado). Mientras no esté, decir "shell
   auditada" sería exagerar: es *acceso trazado*, no *sesión grabada*.
+- **Strimzi 1.2.0-rc1 en camino** (deuda de versión, NO de la pieza 4): el
+  chart publicado ya va por 1.2.0-rc1 mientras nosotros pinamos 1.1.0, que
+  además **no declara techo de Kubernetes** en ninguna fuente localizable
+  (su última declaración es un suelo, "1.30 and newer", de la 0.51). En la
+  pieza 4 se trata como riesgo gestionado con pre-flight de datos; el
+  upgrade del operador es trabajo posterior, no un cuarto upgrade encadenado.
 - **API 6443 pública (por el NLB desde S2-3)** y **kubeconfig admin en SSM**
   (ya solo break-glass, ADR-005) — aceptable en lab efímero, inaceptable en
   cualquier otro contexto. Desde ADR-007 los CPs ya no exponen 6443 al mundo
