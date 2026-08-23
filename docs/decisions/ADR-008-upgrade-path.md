@@ -29,6 +29,9 @@ an old Cilium in the entry path and mix two changes in one blast radius.
 
 ### 2. Wait for Cilium 1.20.1 before starting
 
+> **RESUELTO 2026-08-18**: v1.20.1 publicado 10:36Z. La espera duró 20 días
+> desde el .0 (cadencia histórica del .1: 13-17 días). Gate abierto.
+
 1.20.0 was released 2026-07-29 with no patches yet. The same discipline the
 sprint applies elsewhere — *we do not take as proven what has not been
 tested* — applies to the version of the thing that IS our network. Cilium's
