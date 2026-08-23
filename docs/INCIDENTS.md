@@ -522,7 +522,7 @@ plugin exists) an interactive shell that opens and runs a command.
 
 ---
 
-## 17. The optimistic condition: six faces of one bug
+## 17. The optimistic condition: eight faces of one bug
 
 **When**: 2026-08-16 (S2 piece 3 and its closing deliverable) and
 2026-08-17 (the piece-4 scaffolding). It has now outlived the piece that
@@ -644,6 +644,71 @@ watchdog — 10 cases including a recycled PID, a wedged loop, and killing the
 verifier mid-verdict. Both run in CI via `make test`, and that gate was
 verified by inducing a red case and watching it fail the PR: a suite that
 reports without blocking is the same bug in a lab coat.
+
+### The seventh face: the instrument failed what it should have passed
+
+2026-08-23, driving 4a. The witness had been fixed, tested (24 cases) and
+cross-reviewed. Then it was pointed at a live cluster for the first time and
+had **two defects that would have failed the whole window with faults that
+were ours**:
+
+- **The gRPC probe used the HTTP authority.** The chart composes hostnames as
+  `<hostname|service>.<domain>`, so the GRPCRoute answers to
+  `routing.logistics.lab` while HTTP answers to `shipments.logistics.lab`.
+  Probing gRPC with the HTTP authority matches no route: one probe in five
+  fails, forever, with nothing broken.
+- **The HTTP probe was missing `-k`.** The selfsigned CA has an empty DN, so
+  chain verification *cannot* succeed (the S1 finding) and curl returns 60 on
+  every request — classified `transport:tls`. **Every window of 4a would have
+  failed before Cilium was touched.** `-k` does not weaken this: pinning is
+  enforced independently, proven live — a wrong pin still returns curl 90.
+  That rc was also missing from the TLS class, which is the signature of a
+  rotated certificate.
+
+Neither was reachable by the negative tests: those cover the **verdict**, and
+these were in the **probe targets**. A test suite proves what it exercises.
+The instrument was only trustworthy after `witness-traffic.sh once` answered
+over the real datapath — a green suite is not a working instrument.
+
+### The eighth face: `Programmed=True` was stale
+
+2026-08-23, the 4a upgrade itself. Cilium 1.20.1 rolled cleanly: helm
+`deployed`, both DaemonSets 6/6 ready and updated, Gateway `shared-gw`
+reporting **`Accepted=True Programmed=True`** with its LB-IPAM address
+unchanged, all app pods Running with zero restarts. Every check the runbook
+named as the 4a→4b detector said the Gateway was fine.
+
+It was not. 18 seconds after helm declared success the entry path started
+failing, and 138 of 368 witness probes never came back. The operator's log
+had the truth:
+
+```
+level=error msg="Required GatewayAPI resources are not found"
+  tlsroutes... not found
+  CRD referencegrants... does not have version "v1"
+  backendtlspolicies... not found
+```
+
+1.20.1 requires `gateway.networking.k8s.io/v1` for `referencegrants` plus
+`tlsroutes` and `backendtlspolicies`; our v1.2.1 CRDs have none of them, so
+the operator **never started its Gateway API controller**. The new Envoys
+came up and timed out fetching every resource — listeners, clusters, routes,
+and the TLS Secret — which is why the failures were `transport:tls` and
+`transport`: Envoy accepted the connection with no certificate to present
+and no backend to reach.
+
+`Programmed=True` was written by the 1.19.6 operator and **nobody ever
+retracted it**, because the controller that would have is the one that did
+not start. A Kubernetes status field is a *cache of the last controller that
+cared*; absent a controller, it reports the past with total confidence.
+
+**What generalises**: a status field is not a liveness check. Verifying a
+condition proves what some controller believed once, not that anything is
+still reconciling it. Where a status gates a decision, prove the **controller
+is alive** — its logs, its leader election, a change it must observe — not
+just that the field says what you hoped. The witness was the only thing in
+the room that was not fooled, and only because it measured the datapath
+instead of asking the API how it felt.
 
 ### Where it is enforced
 

@@ -1,11 +1,51 @@
 # RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.x (escalonado)
 
-**Pieza**: S2-4, segundo movimiento · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
+**Pieza**: S2-4, **PRIMER** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa al ejecutarlo.
+**Corre sobre Cilium 1.19.6**, NO sobre 1.20.1.
+
+> **Por qué este movimiento va primero ahora.** 4a se ejecutó el 23-ago y
+> falló: Cilium 1.20.1 no *documenta* un Gateway API más nuevo, lo
+> **requiere** — sin `referencegrants/v1`, `tlsroutes` ni
+> `backendtlspolicies` su operador no arranca el controlador de Gateway API,
+> y los Envoy que rotan después se quedan sin listeners, sin rutas y sin
+> secreto TLS. 138 de 368 sondas del testigo se perdieron. El sentido seguro
+> de este par es **CRDs nuevas bajo Cilium viejo**: el controlador de 1.19
+> consume las versiones que conoce e ignora el resto. Detalle en ADR-008 §1
+> e INCIDENTS #17 (8ª cara).
 
 > Las CRDs las instalamos **nosotros** (`bootstrap/control-plane.yaml`, release
 > oficial de kubernetes-sigs), no Cilium. El escalón se aplica con `kubectl
 > apply` del `standard-install.yaml` de cada versión.
+
+## LA VERIFICACIÓN QUE NO PUEDE FALTAR TRAS CADA ESCALÓN
+
+`Gateway ... Programmed=True` **NO sirve como prueba**. Ese campo es una
+caché del último controlador que lo tocó y sobrevive intacto a la muerte de
+ese controlador — así es exactamente como 4a pasó todos sus checks mientras
+la puerta estaba caída. Tras CADA escalón, en este orden:
+
+```bash
+# 1. El controlador está VIVO, no solo el campo. Esta es la línea que
+#    delató el fallo de 4a, y aparece a los ~13s de arrancar el operador.
+kubectl -n kube-system logs deploy/cilium-operator --tail=200 \
+  | grep -iE "Required GatewayAPI resources|gateway-api"
+#    → NO debe aparecer "Required GatewayAPI resources are not found"
+
+# 2. El operador reconcilia de verdad: tocar algo y ver que responde
+kubectl -n infra annotate gateway shared-gw witness/step="v1.X" --overwrite
+kubectl -n infra get gateway shared-gw -o jsonpath='{.status.conditions[*].lastTransitionTime}'
+
+# 3. Envoy tiene configuración: listener presente, sin fetch timeouts
+kubectl -n kube-system logs ds/cilium-envoy --tail=50 \
+  | grep -iE "add/update listener|initial fetch timed out"
+#    → debe haber listener; NO debe haber timeouts nuevos
+
+# 4. Y por encima de todo: el testigo sigue en enviadas == exitosas
+bash scripts/witness-traffic.sh status
+```
+
+Un escalón sin las cuatro no está dado: se revierte esa CRD y se para.
 
 ## Por qué escalonado
 

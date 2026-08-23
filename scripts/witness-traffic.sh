@@ -32,6 +32,13 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 HOST="${WITNESS_HOST:-shipments.logistics.lab}"
+# The gRPC door is a DIFFERENT authority. The chart composes hostnames as
+# <hostname|service-name>.<domain>, so the GRPCRoute answers to
+# routing.logistics.lab while HTTP answers to shipments.logistics.lab.
+# Probing gRPC with the HTTP authority does not match the route: every gRPC
+# probe fails and the window is failed by the instrument, not by the cluster.
+# The other way for a witness to be worthless — failing what it should pass.
+GRPC_HOST="${WITNESS_GRPC_HOST:-routing.logistics.lab}"
 INTERVAL="${WITNESS_INTERVAL:-2}"          # seconds between probes
 GRPC_EVERY="${WITNESS_GRPC_EVERY:-5}"      # one gRPC probe every N HTTP probes
 STATE_DIR="${WITNESS_STATE_DIR:-/tmp/witness-${CLUSTER_NAME}}"
@@ -100,7 +107,12 @@ probe_http() {
   [ -n "${NLB_DNS:-}" ] || { echo "probe-error:no-endpoint"; return; }
   body=$(printf '{"reference":"witness-%s","origin":"MAD","destination":"BCN"}' "$(date -u +%s%N)")
   set +e
-  code=$(curl -s --max-time 10 \
+  # -k IS REQUIRED and does NOT weaken this. The selfsigned CA has an empty
+  # DN, so chain verification cannot succeed (S1 finding) and curl returns 60
+  # on every request — which classified as transport:tls and would have failed
+  # EVERY window of 4a with a fault that was ours. Pinning is enforced
+  # independently of -k: proven live, a wrong pin still returns curl 90.
+  code=$(curl -s -k --max-time 10 \
     --pinnedpubkey "sha256//${GW_PIN}" \
     --connect-to "${HOST}:443:${NLB_DNS}:443" \
     -H 'Content-Type: application/json' -d "${body}" \
@@ -118,7 +130,7 @@ probe_http() {
         *)                echo "probe-error:unparseable-code" ;;
       esac ;;
     28) echo "timeout" ;;
-    35|60|58|77) echo "transport:tls" ;;   # pin mismatch lives here
+    90|35|60|58|77) echo "transport:tls" ;;   # 90 = pin mismatch: THE rotated-cert signature
     6|7|56)      echo "transport" ;;       # DNS, refused, reset
     *)  echo "probe-error:curl-rc-${rc}" ;; # unknown curl failure: OURS, not the cluster's
   esac
@@ -128,7 +140,7 @@ probe_http() {
 probe_grpc() {
   command -v grpcurl >/dev/null 2>&1 || { echo "skip"; return; }
   set +e
-  grpcurl -insecure -authority "${HOST}" -max-time 10 \
+  grpcurl -insecure -authority "${GRPC_HOST}" -max-time 10 \
     -d '{"origin":"MAD","destination":"BCN"}' \
     "${NLB_DNS}:443" logistics.routing.v1.RoutingService/CalculateRoute >/dev/null 2>&1
   local rc=$?
@@ -230,6 +242,46 @@ cmd_stop() {
   produced, so this window has NOT passed."
 }
 
+# IN-FLIGHT INSPECTION. A witness you cannot look at while it runs has the
+# same disease as the ones fixed today: you are asked to trust a banner. This
+# reads the state and NEVER touches the window — no kill, no verdict, no
+# side effects. It reports what it can see and says so when it cannot.
+cmd_status() {
+  [ -d "${STATE_DIR}" ] || FAIL "no witness state at ${STATE_DIR}"
+  [ -f "${STATE_DIR}/pid" ] || FAIL "no witness window is open"
+  local label started endpoint hb now age tol sent ok
+  label=$(cat "${STATE_DIR}/label" 2>/dev/null || echo "?")
+  started=$(cat "${STATE_DIR}/started" 2>/dev/null || echo "?")
+  endpoint=$(cat "${STATE_DIR}/endpoint" 2>/dev/null || echo "?")
+  echo ""
+  echo "=== WITNESS WINDOW '${label}' (OPEN) ==="
+  echo "  endpoint : ${endpoint}"
+  echo "  from     : ${started}"
+  if [ -f "${STATE_DIR}/series" ]; then
+    sent=$(awk '$3!="event"{n++} END{print n+0}' "${STATE_DIR}/series")
+    ok=$(awk '$3!="event" && $4=="ok"{n++} END{print n+0}' "${STATE_DIR}/series")
+    echo "  sent     : ${sent}"
+    echo "  successful: ${ok}"
+    [ "${sent}" = "${ok}" ] || {
+      echo "  ⚠ $((sent - ok)) non-success so far — first:"
+      awk '$3!="event" && $4!="ok"{print "     " $2, $3, $4; exit}' "${STATE_DIR}/series"; }
+  else
+    echo "  series   : ABSENT — nothing has been recorded"
+  fi
+  if [ -f "${STATE_DIR}/heartbeat" ]; then
+    hb=$(cat "${STATE_DIR}/heartbeat"); now=$(date -u +%s); tol=$(hb_tolerance)
+    case "${hb}" in ''|*[!0-9]*) echo "  heartbeat: UNREADABLE ('${hb}')" ;;
+      *) age=$((now - hb))
+         if [ "${age}" -le "${tol}" ]; then echo "  heartbeat: ${age}s ago (tolerance ${tol}s) — MEASURING"
+         else echo "  heartbeat: ${age}s ago (tolerance ${tol}s) — ⚠ STALLED, this window will FAIL"; fi ;;
+    esac
+  else
+    echo "  heartbeat: ABSENT — the loop has not completed an iteration"
+  fi
+  echo ""
+  echo "  (read-only: the window is still open; close it with '$0 stop')"
+}
+
 cmd_once() {
   resolve_endpoint
   local r; r=$(probe_http)
@@ -245,6 +297,7 @@ cmd_once() {
 case "${1:-}" in
   start) shift; cmd_start "${1:-window}" ;;
   stop)  cmd_stop ;;
+  status) cmd_status ;;
   once)  cmd_once ;;
-  *) echo "usage: $0 {start <label>|stop|once}" >&2; exit 2 ;;
+  *) echo "usage: $0 {start <label>|status|stop|once}" >&2; exit 2 ;;
 esac

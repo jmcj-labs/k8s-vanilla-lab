@@ -20,12 +20,40 @@ carries its own witness rather than one witness at the end.
 
 ## Decision
 
-### 1. Order is contractual: Cilium → Gateway API → Kubernetes
+### 1. Order is contractual — REVISED 2026-08-23 to Gateway API → Cilium → Kubernetes
 
-Not because of a technical dependency in that exact direction, but so that
-**each movement changes ONE variable** and the witness can attribute a
-failure to a cause. Upgrading Gateway API first would put a new Gateway on
-an old Cilium in the entry path and mix two changes in one blast radius.
+**The original decision was Cilium → Gateway API → Kubernetes**, on the
+reasoning that each movement should change ONE variable and that putting a
+new Gateway on an old Cilium would mix two changes in one blast radius. The
+reasoning was sound. **The premise was wrong, and executing 4a proved it.**
+
+Cilium 1.20.1 does not merely *document* a newer Gateway API — it **requires**
+it. Its operator refuses to start the Gateway API controller without
+`gateway.networking.k8s.io/v1` `referencegrants`, `tlsroutes` and
+`backendtlspolicies`, none of which exist in v1.2.1. Started in that state it
+does not degrade or warn: it logs one error, skips the controller, and every
+Envoy that subsequently rolls comes up with no listeners, no routes and no
+TLS secret. The entry path died 18 seconds after helm reported success, with
+`Gateway Programmed=True` still on screen (INCIDENTS #17, eighth face).
+
+So "Cilium first" was never one variable. It was **Cilium plus the silent
+removal of the Gateway control plane** — the largest blast radius of the
+three, disguised as the smallest.
+
+**The revised order is `4b → 4a → 4c`:**
+
+| Step | Movement | Why it is safe here |
+|------|----------|---------------------|
+| **4b** | Gateway API CRDs v1.2 → v1.6, stepped, **on Cilium 1.19.6** | 1.19's controller tolerates newer CRDs; it consumes the versions it knows and ignores the rest. This is the direction that degrades gracefully. |
+| **4a** | Cilium 1.19.6 → 1.20.1 | Arrives to CRDs that already satisfy its requirements, so the controller starts and the Gateway keeps a live reconciler. |
+| **4c** | Kubernetes 1.35.8 → 1.36.3 | Unchanged: needs Cilium 1.20 for 1.36 coverage. |
+
+This still changes one variable per movement. It just puts them in the order
+where each one *can* be a single variable.
+
+**Executing 4b requires proving the controller is ALIVE after every step**,
+not that `Programmed` says True — that field is a cache of the last
+controller that cared, and it survives the controller's death intact.
 
 ### 2. Wait for Cilium 1.20.1 before starting
 
@@ -39,12 +67,13 @@ observed cadence (patches for three branches on 2026-07-16) suggests days,
 not weeks. If execution must start before a patch exists, 1.20.0 is taken
 with reinforced validation and a fresh etcd snapshot first.
 
-### 3. Gateway API CRDs are stepped, not jumped
+### 3. Gateway API CRDs are stepped, not jumped — and they go FIRST
 
 Upstream guidance: *"Although it is usually safe to upgrade across multiple
 Gateway API minor versions at once, the safest and most widely tested path
 will involve upgrading one minor version at a time."* With a Gateway serving
-production traffic, we take the tested path: v1.2 → v1.3 → v1.4 → v1.5 → v1.6.
+production traffic, we take the tested path: v1.2 → v1.3 → v1.4 → v1.5 → v1.6, **on Cilium 1.19.6**, one step at a time,
+with the witness open and the controller's liveness proven after each.
 
 ### 4. Kubernetes target is 1.36.3
 
