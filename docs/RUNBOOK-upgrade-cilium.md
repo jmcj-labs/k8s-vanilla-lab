@@ -2,10 +2,34 @@
 
 **Pieza**: S2-4, **SEGUNDO** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa con tiempos y evidencia al ejecutarlo.
-**PRERREQUISITO DURO**: 4b completo — CRDs de Gateway API en v1.6.x. Sin
-ellas el operador de 1.20.1 no arranca su controlador de Gateway API y la
-puerta de entrada muere 18 s después de que helm diga `deployed`
-(ejecución fallida del 23-ago; ADR-008 §1, INCIDENTS #17 8ª cara).
+**PRERREQUISITO DURO — GATE EJECUTABLE, no una nota**. Sin las CRDs en
+v1.6.x el operador de 1.20.1 no arranca su controlador de Gateway API y la
+puerta muere 18 s después de que helm diga `deployed` (ejecución fallida del
+23-ago; ADR-008 §1, INCIDENTS #17 8ª cara). Comprobarlo **antes de nada**:
+
+```bash
+# Gate 1 — las tres CRDs que 1.20.1 EXIGE y v1.2.1 no tiene
+for CRD in tlsroutes backendtlspolicies; do
+  kubectl get crd "$CRD.gateway.networking.k8s.io" >/dev/null 2>&1 \
+    || { echo "✗ falta $CRD — 4b NO está completo. NO ejecutar 4a."; exit 1; }
+done
+kubectl get crd referencegrants.gateway.networking.k8s.io \
+  -o jsonpath='{.spec.versions[*].name}' | grep -qw v1 \
+  || { echo "✗ referencegrants no sirve v1 — 4b NO está completo. NO ejecutar 4a."; exit 1; }
+
+# Gate 2 — el bundle instalado es v1.6.x
+kubectl get crd gateways.gateway.networking.k8s.io \
+  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}' \
+  | grep -qE '^v1\.6\.' || { echo "✗ el bundle no es v1.6.x. NO ejecutar 4a."; exit 1; }
+
+# Gate 3 — y el controlador de 1.19 sigue TRABAJANDO sobre esas CRDs
+bash scripts/verify-gateway-controller.sh pre-4a || exit 1
+
+echo "✓ 4b confirmado: 4a puede proceder"
+```
+
+Los tres son la misma pregunta hecha de tres maneras, y la tercera es la
+única que prueba trabajo en vez de presencia.
 
 **Destino fijado**: **v1.20.1**, publicado 2026-08-18T10:36:16Z (`prerelease=false`,
 `draft=false`), chart Helm 1.20.1 ya en el índice de `cilium/charts`.

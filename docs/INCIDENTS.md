@@ -702,6 +702,24 @@ retracted it**, because the controller that would have is the one that did
 not start. A Kubernetes status field is a *cache of the last controller that
 cared*; absent a controller, it reports the past with total confidence.
 
+**And the first fix for it had the same shape.** The runbook was amended to
+"check the operator log has no CRD error" — which is the identical bug one
+level up: **absence of a known error message is not evidence of work**. A
+controller that never starts, starts and dies, loses leader election, or
+wedges writes no such error either. Cross-review caught it before it shipped.
+
+The verification is now **positive and active**
+(`scripts/verify-gateway-controller.sh`): create a canary HTTPRoute the
+controller has never seen, require it to write a status **naming itself** with
+`observedGeneration == generation`, then **change** the route and require
+`observedGeneration` to *follow* the new generation. That second step is what
+separates "something reconciled this once" from "something is reconciling
+now" — a stale status cannot follow a generation it has never seen. A timeout
+is a failure. The pre-existing Gateway's own conditions are deliberately not
+read: they are the field that lied. Its decision table is executed in
+`scripts/test-gateway-canary-logic.sh` (8 cases, including the 4a scenario
+and a stale observedGeneration).
+
 **What generalises**: a status field is not a liveness check. Verifying a
 condition proves what some controller believed once, not that anything is
 still reconciling it. Where a status gates a decision, prove the **controller

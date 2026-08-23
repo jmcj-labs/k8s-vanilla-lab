@@ -18,34 +18,68 @@
 > oficial de kubernetes-sigs), no Cilium. El escalón se aplica con `kubectl
 > apply` del `standard-install.yaml` de cada versión.
 
-## LA VERIFICACIÓN QUE NO PUEDE FALTAR TRAS CADA ESCALÓN
+## ORDEN DE LA VENTANA: el testigo se abre ANTES del primer `kubectl apply`
 
-`Gateway ... Programmed=True` **NO sirve como prueba**. Ese campo es una
-caché del último controlador que lo tocó y sobrevive intacto a la muerte de
-ese controlador — así es exactamente como 4a pasó todos sus checks mientras
-la puerta estaba caída. Tras CADA escalón, en este orden:
+El hueco potencial empieza con **el primer cambio de esquema**, no después de
+él. Un testigo abierto tras aplicar la primera CRD no puede afirmar nada
+sobre el intervalo en que esa CRD entró.
 
 ```bash
-# 1. El controlador está VIVO, no solo el campo. Esta es la línea que
-#    delató el fallo de 4a, y aparece a los ~13s de arrancar el operador.
-kubectl -n kube-system logs deploy/cilium-operator --tail=200 \
-  | grep -iE "Required GatewayAPI resources|gateway-api"
-#    → NO debe aparecer "Required GatewayAPI resources are not found"
-
-# 2. El operador reconcilia de verdad: tocar algo y ver que responde
-kubectl -n infra annotate gateway shared-gw witness/step="v1.X" --overwrite
-kubectl -n infra get gateway shared-gw -o jsonpath='{.status.conditions[*].lastTransitionTime}'
-
-# 3. Envoy tiene configuración: listener presente, sin fetch timeouts
-kubectl -n kube-system logs ds/cilium-envoy --tail=50 \
-  | grep -iE "add/update listener|initial fetch timed out"
-#    → debe haber listener; NO debe haber timeouts nuevos
-
-# 4. Y por encima de todo: el testigo sigue en enviadas == exitosas
-bash scripts/witness-traffic.sh status
+bash scripts/witness-traffic.sh start "4b-gwapi-crds"
+bash scripts/witness-traffic.sh status   # enviadas subiendo, latido reciente
+# ↑ y SOLO ENTONCES el primer kubectl apply de la escalera
 ```
 
-Un escalón sin las cuatro no está dado: se revierte esa CRD y se para.
+## PRE-ESCALÓN v1.2 → v1.3: `spec.infrastructure` contra el Gateway VIVO
+
+El brief marcó ese salto como sensible por el cambio de forma de ese campo, y
+la auditoría dijo que no lo usamos — **pero eso se comprobó en el
+manifiesto**. El controlador puede haberlo materializado en runtime con
+defaults. Antes de subir la CRD, preguntarle al objeto vivo:
+
+```bash
+kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
+#   → vacío  = confirmado, el salto no nos afecta por ese motivo
+#   → algo   = PARAR. El campo existe en runtime y cambia de forma: revisar
+#              su equivalencia en v1.3 antes de tocar nada.
+```
+
+Verificar el manifiesto y verificar el objeto vivo no son la misma pregunta.
+
+## LA VERIFICACIÓN TRAS CADA ESCALÓN: probar que el controlador TRABAJA
+
+**No** `Programmed=True`. **No** "no aparece el error de CRD en el log". Las
+dos son la 8ª cara de INCIDENTS #17 aplicada a su propia verificación:
+
+- `Programmed=True` es **la caché del último controlador que se ocupó**. Es
+  literalmente el campo que en 4a decía que todo iba bien con la puerta
+  cerrada. Sobrevive intacto a la muerte de su controlador.
+- Grepear el log buscando la **ausencia** de un error conocido no es prueba
+  de trabajo: un controlador que no arranca, que arranca y muere, que pierde
+  la elección de líder o que se queda colgado tampoco escribe *ese* error.
+
+La prueba es **positiva y activa**: hacerle reconciliar algo que no existía.
+
+```bash
+bash scripts/verify-gateway-controller.sh v1.3     # el escalón que acabas de dar
+```
+
+Crea una HTTPRoute canary efímera, exige que el controlador **escriba status
+nombrándose a sí mismo** con `observedGeneration == generation`, luego
+**cambia** la ruta y exige que `observedGeneration` **siga** a la nueva
+`generation` — y la borra pase lo que pase. Ese segundo paso es el que separa
+*"algo reconcilió esto una vez"* de *"algo está reconciliando ahora"*: un
+status rancio no puede seguir una generación que nunca ha visto. Un timeout
+es **fallo**, no pase.
+
+Y por encima de todo, tras cada escalón:
+
+```bash
+bash scripts/witness-traffic.sh status   # enviadas == exitosas, latido vivo
+```
+
+Un escalón sin las tres —canary reconciliado, `spec.infrastructure` cuando
+toque, testigo intacto— no está dado: se revierte esa CRD y se para.
 
 ## Por qué escalonado
 
@@ -70,18 +104,36 @@ escalonado se mantiene por prudencia general, no por ese riesgo concreto.
 
 ## Ejecución, por escalón
 
+El testigo se abrió **una vez, antes del primer escalón** (§ORDEN DE LA
+VENTANA) y sigue abierto durante toda la escalera: no se cierra entre
+escalones, porque el hueco puede caer justo en la transición.
+
 ```bash
-bash scripts/witness-traffic.sh start "4b-gwapi-v1.X"
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.X.Y/standard-install.yaml
 ```
 
 ## Verificación tras CADA escalón (no solo al final)
 
-1. `shared-gw`: `Accepted=True` y `Programmed=True`.
-2. Las rutas de Repo 2: HTTPRoute y GRPCRoute con `Accepted` y `ResolvedRefs`.
-3. `kubectl get crd gateways.gateway.networking.k8s.io -o jsonpath='{.spec.versions[*].name}'` — versión servida.
-4. Si el Gateway materializara `spec.infrastructure`, comprobar que migró al esquema nuevo.
-5. `bash scripts/witness-traffic.sh stop` → **`enviadas == exitosas`**.
+La prueba de que el controlador trabaja está en §LA VERIFICACIÓN TRAS CADA
+ESCALÓN y es la que manda. Estas son complementarias, y **ninguna la
+sustituye**:
+
+1. **`bash scripts/verify-gateway-controller.sh v1.X`** — el canary activo.
+   Si falla, se para aquí; lo demás de esta lista es ruido si el controlador
+   no está reconciliando.
+2. Rutas de Repo 2: HTTPRoute y GRPCRoute con `Accepted` y `ResolvedRefs`
+   — **y con `observedGeneration` al día**, no solo la condición.
+3. `kubectl get crd gateways.gateway.networking.k8s.io -o jsonpath='{.spec.versions[*].name}'`
+   — versión servida, para confirmar que el escalón entró de verdad.
+4. Si el Gateway materializara `spec.infrastructure`, comprobar la migración
+   al esquema nuevo (ver §PRE-ESCALÓN v1.2 → v1.3).
+5. `bash scripts/witness-traffic.sh status` → **`enviadas == exitosas`** y
+   latido vivo. El `stop` va **al terminar la escalera**, no por escalón.
+
+> `shared-gw` con `Accepted/Programmed=True` **NO está en esta lista a
+> propósito**. Es el campo que mintió en 4a; leerlo aquí reintroduciría el
+> fallo que este runbook existe para evitar. Si quieres mirarlo, míralo
+> **después** del canary y como información, nunca como criterio.
 
 ## Rollback
 
