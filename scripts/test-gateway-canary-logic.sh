@@ -3,22 +3,24 @@
 # read (the piece-3 lesson). No cluster: synthetic HTTPRoute status objects
 # fed to the same jq the real script uses.
 #
-# What must hold: the canary accepts ONLY a status that OUR controller wrote
-# for AT LEAST the generation we just created. Everything else — no status,
-# a stale observedGeneration, someone else's controller — must keep it
-# waiting, and waiting ends in FAIL.
+# What must hold: the canary accepts ONLY Accepted=True that OUR controller
+# wrote for AT LEAST the generation we just created. Everything else — no
+# status, False, a stale observedGeneration, someone else's controller —
+# must fail the canary.
 set -euo pipefail
 C="io.cilium/gateway-controller"
 PASS=0; FAILED=0
 
-observed() { jq -r --arg c "$C" '[.status.parents[]? | select(.controllerName==$c)
-  | .conditions[]? | select(.type=="Accepted") | .observedGeneration] | first // empty'; }
+condition() { jq -r --arg c "$C" '[.status.parents[]? | select(.controllerName==$c)
+  | .conditions[]? | select(.type=="Accepted")]
+  | first // {} | "\(.observedGeneration // "")|\(.status // "")"'; }
 
 # accepts <json> <wanted-generation> → "yes" if the wait loop would proceed
 accepts() {
-  local obs; obs=$(printf '%s' "$1" | observed)
+  local result obs acc; result=$(printf '%s' "$1" | condition)
+  obs=${result%%|*}; acc=${result##*|}
   case "${obs}" in ''|*[!0-9]*) echo no; return ;; esac
-  [ "${obs}" -ge "$2" ] && echo yes || echo no
+  [ "${obs}" -ge "$2" ] && [ "${acc}" = "True" ] && echo yes || echo no
 }
 
 run() {
@@ -41,6 +43,11 @@ run "sin-campo-status" no '{}' 1
 # generation is exactly "yesterday's answer", which is what fooled us.
 run "status-rancio-generacion-vieja" no \
   '{"status":{"parents":[{"controllerName":"io.cilium/gateway-controller","conditions":[{"type":"Accepted","status":"True","observedGeneration":1}]}]}}' 2
+
+# Advancing observedGeneration is not enough: the second generation must
+# remain accepted after the mutation.
+run "generacion-al-dia-pero-rechazada" no \
+  '{"status":{"parents":[{"controllerName":"io.cilium/gateway-controller","conditions":[{"type":"Accepted","status":"False","observedGeneration":2}]}]}}' 2
 
 # Someone else's controller reconciling is not ours working.
 run "otro-controlador" no \

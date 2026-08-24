@@ -63,6 +63,10 @@ test: ## Run the script test suites that need no cluster and no AWS
 	@echo ""
 	@bash scripts/test-gateway-canary-logic.sh
 	@echo ""
+	@bash scripts/test-crd-diff-gate.sh
+	@echo ""
+	@bash scripts/test-cilium-schema-gate.sh
+	@echo ""
 	@if command -v go >/dev/null 2>&1; then \
 	  echo "=== node-readiness (Go) ==="; \
 	  (cd platform/node-readiness && go test ./...); \

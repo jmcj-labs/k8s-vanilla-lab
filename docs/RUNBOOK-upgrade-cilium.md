@@ -3,27 +3,19 @@
 **Pieza**: S2-4, **SEGUNDO** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa con tiempos y evidencia al ejecutarlo.
 **PRERREQUISITO DURO — GATE EJECUTABLE, no una nota**. Sin las CRDs en
-v1.6.x el operador de 1.20.1 no arranca su controlador de Gateway API y la
+v1.6.1 el operador de 1.20.1 no arranca su controlador de Gateway API y la
 puerta muere 18 s después de que helm diga `deployed` (ejecución fallida del
 23-ago; ADR-008 §1, INCIDENTS #17 8ª cara). Comprobarlo **antes de nada**:
 
 ```bash
-# Gate 1 — las tres CRDs que 1.20.1 EXIGE y v1.2.1 no tiene
-for CRD in tlsroutes backendtlspolicies; do
-  kubectl get crd "$CRD.gateway.networking.k8s.io" >/dev/null 2>&1 \
-    || { echo "✗ falta $CRD — 4b NO está completo. NO ejecutar 4a."; exit 1; }
-done
-kubectl get crd referencegrants.gateway.networking.k8s.io \
-  -o jsonpath='{.spec.versions[*].name}' | grep -qw v1 \
-  || { echo "✗ referencegrants no sirve v1 — 4b NO está completo. NO ejecutar 4a."; exit 1; }
+# Gates 1/2 — una sola implementación canónica: siete kinds sirviendo v1,
+# TLSRoute sirviendo exactamente v1+v1alpha2+v1alpha3 y bundle v1.6.1 en los
+# siete CRDs. Cada conjunto lleva recuento positivo; no hay copia jsonpath
+# inline que pueda volver a divergir del gate probado.
+bash scripts/verify-cilium-120-schema.sh
 
-# Gate 2 — el bundle instalado es v1.6.x
-kubectl get crd gateways.gateway.networking.k8s.io \
-  -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}' \
-  | grep -qE '^v1\.6\.' || { echo "✗ el bundle no es v1.6.x. NO ejecutar 4a."; exit 1; }
-
-# Gate 3 — y el controlador de 1.19 sigue TRABAJANDO sobre esas CRDs
-bash scripts/verify-gateway-controller.sh pre-4a || exit 1
+# Gate 3 — el controlador de 1.19 sigue TRABAJANDO sobre esas CRDs.
+bash scripts/verify-gateway-controller.sh pre-4a
 
 echo "✓ 4b confirmado: 4a puede proceder"
 ```

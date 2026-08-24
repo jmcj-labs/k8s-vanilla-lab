@@ -1,4 +1,4 @@
-# RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.x (escalonado)
+# RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.1 (escalonado, canal híbrido)
 
 **Pieza**: S2-4, **PRIMER** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa al ejecutarlo.
@@ -46,6 +46,34 @@ kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
 
 Verificar el manifiesto y verificar el objeto vivo no son la misma pregunta.
 
+## EL GATE DURO 6a/6b (obligatorio desde el escalón v1.5.1)
+
+Desde v1.5.1 el bundle estándar sirve TLSRoute **solo en `v1`**, tirando el
+`v1alpha2` que vigila Cilium 1.19.6. El overlay lo preserva — y estas dos
+comprobaciones, deliberadamente redundantes, verifican que lo hizo:
+
+```bash
+# 6a — el ESQUEMA: v1alpha2 realmente SERVIDA.
+#   NO usar jsonpath '[?(@.served)]': ese predicado filtra por que el CAMPO
+#   EXISTA, no por su valor, y devuelve versiones con served=false (probado
+#   sobre backendtlspolicies). Un gate que no distingue true de false no es
+#   un gate. jq compara el valor.
+SERVED=$(kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq -r '[.spec.versions[] | select(.served == true) | .name] | join(" ")')
+[ -n "$SERVED" ] || { echo "✗ no pude LEER las versiones servidas"; exit 1; }
+echo "$SERVED" | grep -qw v1alpha2 \
+  || { echo "✗ v1alpha2 NO servida (sirve: $SERVED) → ROLLBACK"; exit 1; }
+
+# 6b — el CONTROLADOR: lo que DECIDIÓ al leer ese esquema.
+kubectl -n kube-system logs deploy/cilium-operator --tail=-1 \
+  | grep -q "TLSRoute support is enabled" \
+  || { echo "✗ el operador NO habilita TLSRoute → PARAR y ROLLBACK"; exit 1; }
+```
+
+6a mira el esquema; 6b mira lo que el controlador **hizo** con él. Son dos
+preguntas distintas, y la 8ª cara de INCIDENTS #17 es precisamente el caso en
+que el esquema estaba bien y el controlador no se había enterado.
+
 ## LA VERIFICACIÓN TRAS CADA ESCALÓN: probar que el controlador TRABAJA
 
 **No** `Programmed=True`. **No** "no aparece el error de CRD en el log". Las
@@ -86,7 +114,21 @@ toque, testigo intacto— no está dado: se revierte esa CRD y se para.
 Upstream: *"Although it is usually safe to upgrade across multiple Gateway
 API minor versions at once, the safest and most widely tested path will
 involve upgrading one minor version at a time."* Con un Gateway sirviendo
-producción, se toma el camino probado: **v1.2 → v1.3 → v1.4 → v1.5 → v1.6**.
+producción, se toma el camino probado: ****v1.2.1 → v1.3.0 → v1.4.1 → v1.5.1 → v1.6.1**, con **canal híbrido**:
+CRDs requeridos del canal `standard` **más el CRD experimental de TLSRoute
+suelto** encima. Nunca el bundle experimental completo (arrastraría TCPRoute,
+UDPRoute y ServiceImport que no usamos).
+
+| escalón | qué se aplica |
+|---|---|
+| **v1.3.0** | `standard-install.yaml` + CRD experimental TLSRoute suelto (`v1alpha2`) |
+| **v1.4.1** | `standard-install.yaml` (entra `BackendTLSPolicy/v1`) + TLSRoute experimental |
+| **v1.5.1** | CRDs estándar requeridos **individuales, excluyendo TLSRoute** + TLSRoute experimental |
+| **v1.6.1** | igual que v1.5.1 — final: TLSRoute sirviendo `v1` **y** `v1alpha2` |
+
+Desde **v1.5.1** el bundle estándar incluye TLSRoute sirviendo **solo `v1`**,
+y sobrescribiría el overlay: por eso a partir de ahí se aplican los CRDs
+estándar individuales excluyendo TLSRoute (cilium/cilium#44920).
 
 **Corrección respecto al brief**: el salto v1.2→v1.3 se marcó como sensible
 por el cambio de forma de `Gateway.spec.infrastructure`. **Nosotros no
@@ -101,6 +143,32 @@ escalonado se mantiene por prudencia general, no por ese riesgo concreto.
 - **HTTPRoute y GRPCRoute ya pueden compartir hostname** (antes se
   desaconsejaba). Nos afecta: servimos ambos por `*.logistics.lab`.
 - TCPRoute/UDPRoute a GA y límites de TLSRoute: **no los usamos**.
+
+## Server-side apply SIN `--force-conflicts` por defecto
+
+El apply client-side no sirve: estas CRDs exceden el límite de la anotación
+`last-applied-configuration`. Pero `--force-conflicts` **no va por defecto**:
+arrebata campos a su gestor actual sin decir a quién, y en un esquema que
+sostiene la puerta de entrada eso es una transferencia de propiedad a ciegas.
+
+**Siempre `diff` primero:**
+
+```bash
+kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiesto>
+```
+
+- **Sin conflicto** → `apply` con las mismas banderas. Para CRDs nuevas no
+  debe haber conflicto en absoluto.
+- **Con conflicto** → **PARAR**. Identificar campo y gestor:
+  ```bash
+  kubectl get crd <nombre> -o json | jq '.metadata.managedFields[] | {manager, operation, fields: .fieldsV1 | keys}'
+  ```
+  Decidir la transferencia **deliberadamente** y solo entonces usar
+  `--force-conflicts` sobre el conjunto exacto de manifiestos cuyos campos y
+  gestores se revisaron. No extender nunca el force al overlay ni a otro
+  manifiesto por comodidad. La única excepción ejecutada fue el bundle standard
+  de v1.3.0: el mismo conflicto de anotaciones y el mismo manager se verificó
+  en sus cinco CRDs antes de autorizar el conjunto completo (evidencia abajo).
 
 ## Ejecución, por escalón
 
@@ -137,9 +205,133 @@ sustituye**:
 
 ## Rollback
 
-De v1.3 en adelante los cambios son aditivos. El escalón con riesgo real es
-el primero: **tener a mano el `standard-install.yaml` de v1.2.1** para
-revertirlo.
+De v1.3 en adelante los cambios son aditivos, pero **quitar una versión de
+`spec.versions` no basta**: el API server rechaza la CRD si esa versión sigue
+listada en `status.storedVersions`. Lo descubrimos en v1.4.1, donde el
+overlay movió la versión *storage* de TLSRoute de `v1alpha2` a `v1alpha3` y
+`storedVersions` acumuló ambas.
+
+La purga **no puede hacerse contra una versión que todavía no sea storage**:
+el API server exige que `status.storedVersions` contenga la versión marcada
+`storage:true`. El orden correcto, seguro solo con cero TLSRoutes, es:
+
+| Rollback | storage destino | ¿Transición/purga? |
+|---|---|---|
+| v1.6.1 → v1.5.1 | `v1` | no; no se retira la storage actual |
+| v1.5.1 → v1.4.1 | `v1alpha3` | sí: `v1` deja de existir en el destino |
+| v1.4.1 → v1.3.0 | `v1alpha2` | sí: `v1alpha3` deja de existir |
+| v1.3.0 → v1.2.1 | `v1alpha2` | no; storage no cambia |
+
+Para los dos casos con transición, construir primero un CRD intermedio desde
+el objeto vivo: conserva todas las versiones actuales y solo mueve
+`storage:true` a la versión destino. Ejemplo parametrizado:
+
+```bash
+FROM=v1.5.1
+TO=v1.4.1
+TARGET_STORAGE=v1alpha3       # v1alpha2 para v1.4.1→v1.3.0
+WORK=$(mktemp -d)
+trap 'rm -rf "${WORK}"' EXIT
+
+# Control positivo: la purga solo es segura porque no hay objetos que migrar.
+TLS_COUNT=$(kubectl get tlsroutes -A -o json | jq '.items | length')
+[ "${TLS_COUNT}" -eq 0 ] || { echo "ABORTAR: hay ${TLS_COUNT} TLSRoutes; migrar objetos antes del rollback"; exit 1; }
+
+kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq --arg target "${TARGET_STORAGE}" '
+      del(.metadata.creationTimestamp, .metadata.generation,
+          .metadata.managedFields, .metadata.resourceVersion,
+          .metadata.uid, .status)
+      | .spec.versions |= map(.storage = (.name == $target))' \
+  > "${WORK}/tlsroute-storage-transition.json"
+
+# DIFF primero, luego dry-run de servidor, y solo entonces mutación real.
+bash scripts/crd-diff-gate.sh "${WORK}/tlsroute-storage-transition.json" \
+  "TLSRoute storage ${FROM}→${TARGET_STORAGE}"
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  --dry-run=server -f "${WORK}/tlsroute-storage-transition.json" >/dev/null
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  -f "${WORK}/tlsroute-storage-transition.json"
+
+# El API server debe haber incorporado la nueva storage a storedVersions.
+kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq -e --arg target "${TARGET_STORAGE}" '
+      ([.spec.versions[] | select(.storage == true) | .name] == [$target]) and
+      (.status.storedVersions | index($target) != null)' >/dev/null \
+  || { echo "ABORTAR: la transición de storage no quedó acreditada"; exit 1; }
+
+# Con cero objetos y la storage destino ya activa, retirar versiones antiguas.
+kubectl patch crd tlsroutes.gateway.networking.k8s.io --subresource=status \
+  --type=merge -p "{\"status\":{\"storedVersions\":[\"${TARGET_STORAGE}\"]}}"
+
+TARGET_TLS="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/${TO}/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
+bash scripts/crd-diff-gate.sh "${TARGET_TLS}" "TLSRoute rollback ${FROM}→${TO}"
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  --dry-run=server -f "${TARGET_TLS}" >/dev/null
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade -f "${TARGET_TLS}"
+```
+
+Los manifiestos standard del escalón destino pasan por la misma pareja
+`crd-diff-gate.sh` + `kubectl apply --dry-run=server` **antes** de cualquier
+apply real. Si cualquier diff devuelve conflicto o error, se para: un
+rollback urgente no recibe permiso para saltarse el gate.
+
+El escalón con más riesgo sigue siendo el primero: **tener a mano el
+`standard-install.yaml` de v1.2.1**.
+
+## EJECUTADO — 2026-08-24, escalera completa
+
+| Escalón | Applies | Gate 6a/6b | Canary | Testigo acumulado |
+|---|---|---|---|---|
+| **v1.2.1 → v1.3.0** | bundle standard (`--force-conflicts`, transición client-side→server-side) + overlay TLSRoute `v1alpha2` | n/a (aún sin riesgo TLSRoute) · `TLSRoute support is enabled` aparece por primera vez | ✓ obs 1→2 | 1174/1174 |
+| **v1.3.0 → v1.4.1** | bundle standard + overlay · **sin force** | ✓ · 0 errores fatales | ✓ obs 1→2 | 1429/1429 |
+| **v1.4.1 → v1.5.1** | **6 CRDs individuales** (TLSRoute excluido) + overlay · sin force | ✓ **6a/6b** — el escalón que justifica la ruta híbrida | ✓ `Accepted=True` obs 1→2 | 2328/2328 |
+| **v1.5.1 → v1.6.1** | 6 individuales + overlay · sin force | ✓ **6a/6b** + **gate 7 SCHEMA READY FOR 4a** | ✓ `Accepted=True` obs 1→2 | **2726/2726** |
+
+### Incidencia real del primer escalón: conflicto y transferencia autorizada
+
+La fila v1.2.1→v1.3.0 **no fue limpia**. El diff se ejecutó primero sin force
+y terminó `rc=2` con `Error from server (Conflict)` sobre
+`gateway.networking.k8s.io/bundle-version`; se detuvo el escalón. Como
+`managedFields` no se muestra por defecto, se inspeccionó con
+`kubectl get crd ... -o yaml --show-managed-fields`: el propietario era
+`kubectl-client-side-apply`, rastro del bootstrap client-side, y sostenía las
+cuatro anotaciones afectadas en los cinco CRDs del bundle standard.
+
+La transferencia concreta de esas anotaciones a
+`gateway-api-crd-upgrade` se presentó a dirección y fue autorizada **antes**
+de ejecutar nada. Solo entonces se repitió el apply con
+`--force-conflicts`, limitado al bundle standard revisado; el overlay
+TLSRoute entró sin force. Era una transferencia necesaria: la anotación de
+bundle debía pasar de v1.2.1 a v1.3.0 y no existía un segundo actor
+contendiendo el campo. El efecto conocido queda aceptado y visible:
+`kubectl.kubernetes.io/last-applied-configuration` queda huérfana, ya no la
+mantiene ningún apply client-side y no se eliminó. En los tres escalones
+posteriores no hubo force porque los campos ya pertenecían al manager nuevo.
+
+**Veredicto del testigo, ventana única sobre los cuatro escalones**:
+
+```
+=== WITNESS WINDOW '4b-gwapi-crds' ===
+  from     : 2026-08-24T12:30:05Z
+  sent     : 2726
+  successful: 2726
+  max gap  : 3s between consecutive probes
+✓ VERDICT: sent == successful (2726/2726) — the entry path never broke
+```
+
+El `max gap` de 3 s importa tanto como el recuento: sin él, un 2726/2726 sobre
+una serie con agujeros no probaría nada del intervalo no observado.
+
+**Estado final** (`bundle=v1.6.1` en los siete):
+
+| CRD | stored | served |
+|---|---|---|
+| tlsroutes | v1alpha2, v1alpha3, v1 | **v1, v1alpha2, v1alpha3** |
+| referencegrants | v1beta1 | **v1**, v1beta1 |
+| backendtlspolicies | v1 | **v1** |
+| gatewayclasses / gateways / httproutes | v1 | v1, v1beta1 |
+| grpcroutes | v1 | v1 |
 
 ## Tiempos (pendiente)
 
