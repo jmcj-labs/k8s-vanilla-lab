@@ -236,9 +236,19 @@ cmd_stop() {
   endpoint=$(cat "${STATE_DIR}/endpoint") || FAIL "cannot read the window endpoint"
   command -v python3 >/dev/null 2>&1 || FAIL "python3 is absent: the verdict cannot be
   computed, which is not the same as a window that passed."
-  SERIES="${STATE_DIR}/series" LABEL="${label}" STARTED="${started}" \
-    ENDPOINT="${endpoint}" python3 "$(dirname "$0")/lib/witness-verdict.py" \
-    || FAIL "the verifier itself did not complete (exit $?) — no verdict was
+  # A red verdict and a crashed verifier BOTH exit non-zero, so the exit code
+  # alone cannot tell them apart — and reporting "the verifier did not
+  # complete" over a perfectly good FAIL is a lie told during an incident,
+  # when it is least affordable. The marker line is the discriminator: if the
+  # verdict was printed, the verifier finished and did its job.
+  local out rc
+  out=$(SERIES="${STATE_DIR}/series" LABEL="${label}" STARTED="${started}" \
+    ENDPOINT="${endpoint}" python3 "$(dirname "$0")/lib/witness-verdict.py" 2>&1) && rc=0 || rc=$?
+  printf '%s\n' "${out}"
+  if printf '%s' "${out}" | grep -q "VERDICT:"; then
+    return "${rc}"   # verdict rendered — pass it through, red or green
+  fi
+  FAIL "the verifier did NOT reach a verdict (exit ${rc}) — no verdict was
   produced, so this window has NOT passed."
 }
 
