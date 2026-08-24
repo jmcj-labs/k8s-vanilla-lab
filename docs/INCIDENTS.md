@@ -900,6 +900,33 @@ recorded as unknown.** The rollback recreated the DaemonSet pods, so the
 1.37.5 containers' logs were gone before anyone could read them. Recovering
 the door was the right call and this was its price. No cause is asserted.
 
+### ROOT CAUSE, corrected: it was the AGENT's datapath, not Envoy
+
+The first analysis blamed Envoy, because that was the hypothesis carried into
+the window. **The sampling data said otherwise and was misread.**
+
+```
+14:07:49Z  cilium 6/6      envoy 6/6     ← nothing rolled yet
+14:08:03Z  ← FIRST WITNESS FAILURE
+14:08:10Z  cilium 4/4 ROLLING   envoy 1/5
+14:08:31Z  cilium 6/6      envoy 1/5
+```
+
+The first failure lands inside the window where the **cilium-agent** DaemonSet
+was rolling, before any Envoy had been replaced. With strict kube-proxy
+replacement and no kube-proxy, **the NodePort is programmed by the agent's
+eBPF datapath**: when the agent restarts, the node's door shuts — Envoy never
+enters the story on that node.
+
+That reframes everything. It is not "Envoy 1.37.5 would not accept
+connections". It is "**every node loses its datapath while its agent
+restarts, and the load balancer keeps sending it traffic**", because the
+health check cannot see it. Envoy's own roll adds a second window on top, but
+the dominant one is the agent's.
+
+`maxUnavailable=1` was irrelevant, now for a sharper reason: it limits how
+many nodes roll at once, and losing even one costs its entire share.
+
 ### THE FINDING: the assumption underneath the plan was false
 
 The plan tolerated rolling Envoy because `externalTrafficPolicy: Cluster`
@@ -948,3 +975,21 @@ seconds; the assumption had been sitting in the plan for two days.
 And: **a health check that probes the wrong layer is worse than none**, because
 it manufactures confidence. TCP on a NodePort proves the datapath is
 programmed, not that anything behind it can answer.
+
+### The fix is a real readiness endpoint, and it does not exist yet
+
+Checked before designing on top of an assumption: both components already
+serve HTTP `/healthz` — the agent on 9879, Envoy on 9878, both
+`hostNetwork: true`. **But both bind to 127.0.0.1 only.** From the node's own
+address they return nothing:
+
+```
+LISTEN 127.0.0.1:9878   LISTEN 127.0.0.1:9879
+curl http://<node-ip>:9879/healthz → 000 (fail)
+curl http://127.0.0.1:9879/healthz → 200
+```
+
+So the NLB cannot reach them, and the fix is not "repoint the health check at
+a port that already exists" — the per-node readiness endpoint has to be
+built. That is TIEMPO 1 of the plan, and it is the reason the plan has three
+separately validated steps instead of one.
