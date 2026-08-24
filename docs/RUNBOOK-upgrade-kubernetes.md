@@ -15,7 +15,7 @@
 | Operadores contra 1.36 | ver ADR-008 | 5 acreditan; Strimzi es riesgo gestionado (abajo) |
 | Snapshot etcd fresco | Job desde `cronjob/etcd-backup` | ABORTAR: es el único rollback catastrófico |
 | Cilium ya en 1.20.x | `cilium version` | ABORTAR: 1.19 no acredita 1.36 |
-| Gateway API ya en v1.6.x | `kubectl get crd gateways...` | ABORTAR: orden contractual |
+| Gateway API en **v1.6.1 exacto** | `kubectl get crd gateways.gateway.networking.k8s.io -o json \| jq -r '.metadata.annotations["gateway.networking.k8s.io/bundle-version"]'` → debe ser `v1.6.1` | Si no lo es, 4b no está completo: ABORTAR (orden contractual 4b→4a→4c) |
 
 ### Pre-flight de datos (Strimzi, riesgo gestionado)
 
