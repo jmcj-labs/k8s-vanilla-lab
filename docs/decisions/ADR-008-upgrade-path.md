@@ -72,8 +72,45 @@ with reinforced validation and a fresh etcd snapshot first.
 Upstream guidance: *"Although it is usually safe to upgrade across multiple
 Gateway API minor versions at once, the safest and most widely tested path
 will involve upgrading one minor version at a time."* With a Gateway serving
-production traffic, we take the tested path: v1.2 → v1.3 → v1.4 → v1.5 → v1.6, **on Cilium 1.19.6**, one step at a time,
-with the witness open and the controller's liveness proven after each.
+production traffic, we take the tested path: **v1.2.1 → v1.3.0 → v1.4.1 → v1.5.1 → v1.6.1**, on Cilium 1.19.6, one step at
+a time, with the witness open across the whole ladder and the controller's
+liveness proven after each.
+
+**The channel is HYBRID, and this is the crux** (adjudicated 2026-08-24, and
+it corrects a false premise of mine): *required CRDs from the **standard**
+channel, plus the **standalone experimental TLSRoute CRD** on top.* Never the
+full experimental bundle, which would drag in TCPRoute, UDPRoute and
+ServiceImport that we do not use.
+
+Why, verified against the published bundles rather than the docs:
+
+| | `tlsroutes` | `referencegrants` | `backendtlspolicies` |
+|---|---|---|---|
+| v1.2.1 std (today) | absent | `v1beta1` | absent |
+| v1.3.0 std | absent | `v1beta1` | absent |
+| **v1.4.1 std** | absent | `v1beta1` | **`v1`** |
+| v1.5.1 std | `v1` only | `v1`+`v1beta1` | `v1` |
+| v1.6.1 std | `v1` only | `v1`+`v1beta1` | `v1` |
+| **experimental TLSRoute alone, v1.6.1** | **`v1`+`v1alpha2`** | — | — |
+
+Our own Cilium 1.19.6 operator states its contract at startup: it *requires*
+`v1` gatewayclasses/gateways/httproutes/grpcroutes and **`v1beta1`**
+referencegrants, and *optionally* watches **`v1alpha2` tlsroutes**. Cilium
+1.20.1 instead requires `referencegrants/**v1**`, `tlsroutes` and
+`backendtlspolicies`.
+
+So the only real hazard in the standard channel is that from **v1.5.1** it
+ships TLSRoute serving `v1` **only** — dropping the `v1alpha2` that 1.19
+watches (cilium/cilium#44920). Overlaying the standalone experimental
+TLSRoute CRD keeps `v1alpha2` served while `v1` arrives, so **both Cilium
+versions are satisfied simultaneously at v1.6.1** — which is precisely what
+makes 4a safe afterwards.
+
+> **Correction, recorded rather than quietly dropped**: an earlier draft of
+> this ADR called the standard channel a dead end "because it never brings
+> backendtlspolicies". That was false — v1.4.1 standard brings it at `v1`.
+> The only genuine problem was losing TLSRoute `v1alpha2` at v1.5.1+, and it
+> is solved by the overlay, not by switching the whole bundle.
 
 ### 4. Kubernetes target is 1.36.3
 

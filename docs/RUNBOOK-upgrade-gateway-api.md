@@ -1,4 +1,4 @@
-# RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.x (escalonado)
+# RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.1 (escalonado, canal híbrido)
 
 **Pieza**: S2-4, **PRIMER** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa al ejecutarlo.
@@ -86,7 +86,21 @@ toque, testigo intacto— no está dado: se revierte esa CRD y se para.
 Upstream: *"Although it is usually safe to upgrade across multiple Gateway
 API minor versions at once, the safest and most widely tested path will
 involve upgrading one minor version at a time."* Con un Gateway sirviendo
-producción, se toma el camino probado: **v1.2 → v1.3 → v1.4 → v1.5 → v1.6**.
+producción, se toma el camino probado: ****v1.2.1 → v1.3.0 → v1.4.1 → v1.5.1 → v1.6.1**, con **canal híbrido**:
+CRDs requeridos del canal `standard` **más el CRD experimental de TLSRoute
+suelto** encima. Nunca el bundle experimental completo (arrastraría TCPRoute,
+UDPRoute y ServiceImport que no usamos).
+
+| escalón | qué se aplica |
+|---|---|
+| **v1.3.0** | `standard-install.yaml` + CRD experimental TLSRoute suelto (`v1alpha2`) |
+| **v1.4.1** | `standard-install.yaml` (entra `BackendTLSPolicy/v1`) + TLSRoute experimental |
+| **v1.5.1** | CRDs estándar requeridos **individuales, excluyendo TLSRoute** + TLSRoute experimental |
+| **v1.6.1** | igual que v1.5.1 — final: TLSRoute sirviendo `v1` **y** `v1alpha2` |
+
+Desde **v1.5.1** el bundle estándar incluye TLSRoute sirviendo **solo `v1`**,
+y sobrescribiría el overlay: por eso a partir de ahí se aplican los CRDs
+estándar individuales excluyendo TLSRoute (cilium/cilium#44920).
 
 **Corrección respecto al brief**: el salto v1.2→v1.3 se marcó como sensible
 por el cambio de forma de `Gateway.spec.infrastructure`. **Nosotros no
@@ -101,6 +115,28 @@ escalonado se mantiene por prudencia general, no por ese riesgo concreto.
 - **HTTPRoute y GRPCRoute ya pueden compartir hostname** (antes se
   desaconsejaba). Nos afecta: servimos ambos por `*.logistics.lab`.
 - TCPRoute/UDPRoute a GA y límites de TLSRoute: **no los usamos**.
+
+## Server-side apply SIN `--force-conflicts` por defecto
+
+El apply client-side no sirve: estas CRDs exceden el límite de la anotación
+`last-applied-configuration`. Pero `--force-conflicts` **no va por defecto**:
+arrebata campos a su gestor actual sin decir a quién, y en un esquema que
+sostiene la puerta de entrada eso es una transferencia de propiedad a ciegas.
+
+**Siempre `diff` primero:**
+
+```bash
+kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiesto>
+```
+
+- **Sin conflicto** → `apply` con las mismas banderas. Para CRDs nuevas no
+  debe haber conflicto en absoluto.
+- **Con conflicto** → **PARAR**. Identificar campo y gestor:
+  ```bash
+  kubectl get crd <nombre> -o json | jq '.metadata.managedFields[] | {manager, operation, fields: .fieldsV1 | keys}'
+  ```
+  Decidir la transferencia **deliberadamente** y solo entonces
+  `--force-conflicts` **sobre ese CRD concreto**, nunca sobre el bundle.
 
 ## Ejecución, por escalón
 

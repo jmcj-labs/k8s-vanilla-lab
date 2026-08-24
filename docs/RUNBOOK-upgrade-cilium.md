@@ -3,7 +3,7 @@
 **Pieza**: S2-4, **SEGUNDO** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
 **Estado**: ESQUELETO — se completa con tiempos y evidencia al ejecutarlo.
 **PRERREQUISITO DURO — GATE EJECUTABLE, no una nota**. Sin las CRDs en
-v1.6.x el operador de 1.20.1 no arranca su controlador de Gateway API y la
+v1.6.1 el operador de 1.20.1 no arranca su controlador de Gateway API y la
 puerta muere 18 s después de que helm diga `deployed` (ejecución fallida del
 23-ago; ADR-008 §1, INCIDENTS #17 8ª cara). Comprobarlo **antes de nada**:
 
@@ -17,10 +17,18 @@ kubectl get crd referencegrants.gateway.networking.k8s.io \
   -o jsonpath='{.spec.versions[*].name}' | grep -qw v1 \
   || { echo "✗ referencegrants no sirve v1 — 4b NO está completo. NO ejecutar 4a."; exit 1; }
 
-# Gate 2 — el bundle instalado es v1.6.x
+# Gate 2 — el bundle instalado es EXACTAMENTE v1.6.1
 kubectl get crd gateways.gateway.networking.k8s.io \
   -o jsonpath='{.metadata.annotations.gateway\.networking\.k8s\.io/bundle-version}' \
-  | grep -qE '^v1\.6\.' || { echo "✗ el bundle no es v1.6.x. NO ejecutar 4a."; exit 1; }
+  | grep -qx 'v1.6.1' || { echo "✗ el bundle no es v1.6.1 exacto. NO ejecutar 4a."; exit 1; }
+
+# Gate 2b — TLSRoute sirve v1 (lo que exige 1.20) Y v1alpha2 (lo que vigila
+# 1.19). Si el overlay experimental se perdió, 1.19 se queda ciego a TLSRoute
+# ANTES de que 1.20 llegue a usarlo: la ventana en la que nadie lo sirve.
+SERVED=$(kubectl get crd tlsroutes.gateway.networking.k8s.io \
+  -o jsonpath='{range .spec.versions[?(@.served)]}{.name} {end}' 2>/dev/null)
+echo "$SERVED" | grep -qw v1 && echo "$SERVED" | grep -qw v1alpha2 \
+  || { echo "✗ tlsroutes no sirve v1 + v1alpha2 (sirve: $SERVED). NO ejecutar 4a."; exit 1; }
 
 # Gate 3 — y el controlador de 1.19 sigue TRABAJANDO sobre esas CRDs
 bash scripts/verify-gateway-controller.sh pre-4a || exit 1
