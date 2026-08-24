@@ -21,11 +21,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +37,32 @@ type upstream struct {
 	name    string
 	url     string
 	headers map[string]string
+
+	// anyStatus: the check passes on ANY HTTP response, whatever the code.
+	//
+	// This is the datapath probe's criterion, and the distinction is the
+	// whole point. We want to know "does this node's NodePort forward into a
+	// live Envoy", NOT "is the application healthy". A 404 from the Gateway
+	// is a PASS: it proves the BPF NodePort translation, the TLS termination
+	// and Envoy's filter chain all worked, and merely says no route matched.
+	// If the app fell over, the datapath is still fine and the node must
+	// STAY in the load balancer's pool — taking it out would turn an
+	// application outage into a network outage.
+	anyStatus bool
+
+	// insecureTLS: skip certificate verification. Only for the datapath
+	// probe, and it does not weaken anything: the Gateway's CA has an empty
+	// DN so verification cannot succeed at all (S1 finding), the peer is
+	// this same node, and what is being tested is whether bytes flow — not
+	// who the peer is.
+	insecureTLS bool
+
+	// tlsServerName forces the SNI sent on the handshake. Setting the Host
+	// HEADER does not do this: Go derives SNI from the URL's host, and for a
+	// bare IP literal it sends NO SNI at all. Envoy selects its filter chain
+	// by SNI, so without this the datapath probe could fail the handshake on
+	// a perfectly healthy node — the instrument inventing an outage.
+	tlsServerName string
 }
 
 // result of probing one upstream. ok is true ONLY on a clean HTTP 200.
@@ -45,12 +74,29 @@ type result struct {
 
 // probe performs one GET and reduces every possible outcome to ok/not-ok.
 // There is deliberately no branch that returns ok on an error path.
+func clientFor(u upstream, timeout time.Duration) *http.Client {
+	tr := &http.Transport{MaxIdleConnsPerHost: 2}
+	if u.insecureTLS || u.tlsServerName != "" {
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: u.insecureTLS, // #nosec G402 — see upstream.insecureTLS
+			ServerName:         u.tlsServerName,
+		}
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}
+}
+
 func probe(ctx context.Context, c *http.Client, u upstream) result {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.url, nil)
 	if err != nil {
 		return result{u.name, false, "request build failed: " + err.Error()}
 	}
 	for k, v := range u.headers {
+		// Go ignores a "Host" entry in Header — it must go on req.Host.
+		// Setting it in the map alone would silently send the URL's host.
+		if strings.EqualFold(k, "Host") {
+			req.Host = v
+			continue
+		}
 		req.Header.Set(k, v)
 	}
 	resp, err := c.Do(req)
@@ -67,6 +113,10 @@ func probe(ctx context.Context, c *http.Client, u upstream) result {
 	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10)); err != nil {
 		return result{u.name, false, fmt.Sprintf("read failed after HTTP %d: %v", resp.StatusCode, err)}
 	}
+	if u.anyStatus {
+		// Any answer at all means the path is alive end to end.
+		return result{u.name, true, fmt.Sprintf("HTTP %d (any status accepted)", resp.StatusCode)}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return result{u.name, false, fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	}
@@ -76,14 +126,14 @@ func probe(ctx context.Context, c *http.Client, u upstream) result {
 // checkAll probes every upstream concurrently and applies a STRICT AND.
 // Concurrency keeps the worst case at one timeout rather than the sum, which
 // matters when the health check interval is aggressive.
-func checkAll(ctx context.Context, c *http.Client, ups []upstream) (bool, []result) {
+func checkAll(ctx context.Context, timeout time.Duration, ups []upstream) (bool, []result) {
 	results := make([]result, len(ups))
 	var wg sync.WaitGroup
 	for i, u := range ups {
 		wg.Add(1)
 		go func(i int, u upstream) {
 			defer wg.Done()
-			results[i] = probe(ctx, c, u)
+			results[i] = probe(ctx, clientFor(u, timeout), u)
 		}(i, u)
 	}
 	wg.Wait()
@@ -100,12 +150,12 @@ func checkAll(ctx context.Context, c *http.Client, ups []upstream) (bool, []resu
 	return true, results
 }
 
-func handler(c *http.Client, ups []upstream, timeout time.Duration) http.HandlerFunc {
+func handler(ups []upstream, timeout time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
 
-		ok, results := checkAll(ctx, c, ups)
+		ok, results := checkAll(ctx, timeout, ups)
 
 		status := http.StatusServiceUnavailable
 		if ok {
@@ -154,25 +204,50 @@ func main() {
 		probeTimeout = d
 	}
 
+	// THE THIRD CHECK, and the reason V2 exists. Proven from Cilium's source
+	// (daemon/healthz/agenthealth.go + pkg/status/status_collector.go): the
+	// agent answers 200 when its own probes are initialised, not stale, and
+	// kvstore/runtime/k8s/CNI are fine. NOTHING in that set covers whether
+	// the NodePort BPF is programmed. Cilium's kube-proxy healthz does not
+	// help either — it piggy-backs on the same status and says so in a
+	// comment: "we can reasonably assume that the node networking is ready".
+	// That assumption is exactly what INCIDENTS #20 records as false.
+	//
+	// So we stop asking and we MEASURE: a real request to this node's own
+	// NodePort, over the address the load balancer uses.
+	nodeIP := os.Getenv("NODE_IP")
+	if nodeIP == "" {
+		log.Fatal("NODE_IP is empty: without it the datapath probe cannot run, " +
+			"and running without the datapath probe is the blind spot this exists to close")
+	}
+	nodePort := envOr("GATEWAY_NODEPORT", "30443")
+	// A hostname under the listener's suffix so SNI matches and TLS completes,
+	// but which no HTTPRoute claims — so the Gateway answers 404 from its own
+	// filter chain and the probe never depends on an application.
+	probeHost := envOr("DATAPATH_PROBE_HOST", "datapath-probe.logistics.lab")
+
 	ups := []upstream{
 		// `brief: true` mirrors Cilium's own readinessProbe: the short answer
 		// about this agent, not a cluster-wide health survey that would make
 		// one node's readiness depend on another's.
 		{name: "agent", url: agentURL, headers: map[string]string{"brief": "true"}},
 		{name: "envoy", url: envoyURL},
-	}
-
-	client := &http.Client{
-		Timeout: probeTimeout,
-		Transport: &http.Transport{
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 2,
+		{
+			name:        "datapath",
+			url:         fmt.Sprintf("https://%s/", net.JoinHostPort(nodeIP, nodePort)),
+			// Host header AND SNI: the first selects the virtual host, the
+			// second selects Envoy's filter chain. They are different things
+			// and both are needed.
+			headers:       map[string]string{"Host": probeHost},
+			tlsServerName: probeHost,
+			anyStatus:     true,
+			insecureTLS:   true,
 		},
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handler(client, ups, probeTimeout))
-	mux.HandleFunc("/", handler(client, ups, probeTimeout))
+	mux.HandleFunc("/healthz", handler(ups, probeTimeout))
+	mux.HandleFunc("/", handler(ups, probeTimeout))
 
 	// TIME BUDGET, and the ordering between these is the whole point:
 	//

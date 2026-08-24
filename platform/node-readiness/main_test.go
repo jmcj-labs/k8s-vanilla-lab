@@ -82,7 +82,6 @@ func TestReadinessDecisionTable(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &http.Client{Timeout: timeout}
 			ups := []upstream{
 				{name: "agent", url: tc.agentURL, headers: map[string]string{"brief": "true"}},
 				{name: "envoy", url: tc.envoyURL},
@@ -90,7 +89,7 @@ func TestReadinessDecisionTable(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
-			got, results := checkAll(ctx, client, ups)
+			got, results := checkAll(ctx, timeout, ups)
 			if got != tc.wantOK {
 				t.Fatalf("got ok=%v, want %v (results: %+v)", got, tc.wantOK, results)
 			}
@@ -101,7 +100,7 @@ func TestReadinessDecisionTable(t *testing.T) {
 // An empty upstream list verifies NOTHING, so it must not be a pass. Without
 // this, a misconfiguration that produced no upstreams would report ready.
 func TestEmptyUpstreamsIsNotReady(t *testing.T) {
-	ok, _ := checkAll(context.Background(), &http.Client{Timeout: time.Second}, nil)
+	ok, _ := checkAll(context.Background(), time.Second, nil)
 	if ok {
 		t.Fatal("an empty upstream list reported ready; nothing was verified")
 	}
@@ -123,7 +122,7 @@ func TestHandlerStatusCodes(t *testing.T) {
 		{"not-ready-is-503", down.URL, http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := handler(&http.Client{Timeout: time.Second}, []upstream{
+			h := handler([]upstream{
 				{name: "agent", url: up.URL},
 				{name: "envoy", url: tc.envoyURL},
 			}, time.Second)
@@ -146,7 +145,7 @@ func TestAgentBriefHeaderIsSent(t *testing.T) {
 	}))
 	defer s.Close()
 
-	_, _ = checkAll(context.Background(), &http.Client{Timeout: time.Second},
+	_, _ = checkAll(context.Background(), time.Second,
 		[]upstream{{name: "agent", url: s.URL, headers: map[string]string{"brief": "true"}}})
 
 	select {
@@ -182,7 +181,7 @@ func TestAlwaysAnswersWithinBudget(t *testing.T) {
 	const budget = 500 * time.Millisecond
 
 	h := http.TimeoutHandler(
-		http.HandlerFunc(handler(&http.Client{Timeout: probeTimeout}, []upstream{
+		http.HandlerFunc(handler([]upstream{
 			{name: "agent", url: hung.URL},
 			{name: "envoy", url: hung.URL},
 		}, probeTimeout)),
@@ -206,4 +205,65 @@ func TestAlwaysAnswersWithinBudget(t *testing.T) {
 		t.Fatalf("answered in %s, beyond the budget of %s", elapsed, budget)
 	}
 	t.Logf("hung upstreams -> HTTP 503 in %s (budget %s)", elapsed, budget)
+}
+
+// THE TEST THAT WAS MISSING, and the reason V2 exists.
+//
+// Both /healthz endpoints answer 200 while the node's NodePort does not
+// forward. That is precisely the blind spot INCIDENTS #20 documents: the
+// agent reports itself healthy on a set of concerns that does not include
+// whether the datapath is programmed. Before the third probe, this state
+// produced a 200 and kept a dead node in the load balancer's pool.
+func TestDatapathDownIsNotReadyEvenWhenHealthzSayOK(t *testing.T) {
+	okAgent := stub(http.StatusOK, 0)
+	okEnvoy := stub(http.StatusOK, 0)
+	defer okAgent.Close()
+	defer okEnvoy.Close()
+
+	ups := []upstream{
+		{name: "agent", url: okAgent.URL, headers: map[string]string{"brief": "true"}},
+		{name: "envoy", url: okEnvoy.URL},
+		// Nothing listening: the NodePort does not forward.
+		{name: "datapath", url: deadURL(t), anyStatus: true, insecureTLS: true},
+	}
+	ok, results := checkAll(context.Background(), 300*time.Millisecond, ups)
+	if ok {
+		t.Fatalf("reported READY with a dead datapath — the #20 blind spot is back (%+v)", results)
+	}
+	// And the control: the two healthz must still be reported as fine, so we
+	// know the failure was attributed to the right check.
+	for _, r := range results {
+		if r.name != "datapath" && !r.ok {
+			t.Fatalf("check %q failed too; this test must isolate the datapath (%+v)", r.name, results)
+		}
+	}
+}
+
+// The datapath probe passes on ANY status, because the Gateway answering 404
+// proves the path while saying nothing about the application. If the app
+// falls over, the datapath is still fine and the node must STAY in the pool:
+// removing it would turn an application outage into a network one.
+func TestDatapathAcceptsAnyHTTPStatus(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusOK} {
+		s := stub(code, 0)
+		ok, results := checkAll(context.Background(), time.Second,
+			[]upstream{{name: "datapath", url: s.URL, anyStatus: true}})
+		s.Close()
+		if !ok {
+			t.Fatalf("HTTP %d from the Gateway was treated as a datapath failure (%+v)", code, results)
+		}
+	}
+}
+
+// …but anyStatus must NOT leak into the health checks: a 503 from the agent
+// is still a failure. Without this, one careless field would disable the
+// strictness everywhere.
+func TestAnyStatusDoesNotLeakIntoHealthChecks(t *testing.T) {
+	bad := stub(http.StatusServiceUnavailable, 0)
+	defer bad.Close()
+	ok, _ := checkAll(context.Background(), time.Second,
+		[]upstream{{name: "agent", url: bad.URL}}) // anyStatus deliberately false
+	if ok {
+		t.Fatal("a 503 from the agent was accepted; strictness leaked away")
+	}
 }

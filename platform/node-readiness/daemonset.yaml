@@ -76,6 +76,18 @@ spec:
             - {name: AGENT_HEALTH_URL, value: "http://127.0.0.1:9879/healthz"}
             - {name: ENVOY_HEALTH_URL, value: "http://127.0.0.1:9878/healthz"}
             - {name: PROBE_TIMEOUT,    value: "2s"}
+            # The node's own address, which is what the NLB targets. The
+            # datapath probe must use it, not 127.0.0.1: loopback may not
+            # traverse the same NodePort path, and a probe that tests a
+            # different path than the load balancer uses proves nothing.
+            - name: NODE_IP
+              valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+            - {name: GATEWAY_NODEPORT, value: "30443"}
+            # A hostname under the listener's suffix so SNI matches and TLS
+            # completes, that NO HTTPRoute claims — the Gateway answers 404
+            # from its own filter chain and the probe never depends on an app.
+            # NEVER create a route for this name.
+            - {name: DATAPATH_PROBE_HOST, value: "datapath-probe.logistics.lab"}
           ports:
             - {name: readiness, containerPort: 9890, hostPort: 9890, protocol: TCP}
           securityContext:
