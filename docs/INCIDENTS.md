@@ -863,3 +863,88 @@ Concretely, in this repository:
 three distinct outcomes and a decision table in
 `scripts/test-crd-diff-gate.sh`) and `scripts/verify-cilium-120-schema.sh`
 (control assertion, jq value comparison, unreadable separated from wrong).
+
+---
+
+## 20. `externalTrafficPolicy: Cluster` had nothing to fall back to
+
+**When**: 2026-08-24, second attempt at 4a (Cilium 1.19.6 → 1.20.1).
+**Severity**: entry path degraded ~4 min, recovered by rollback in 67s. No
+data loss. The cluster was a lab.
+
+### It was NOT a repeat of 2026-08-23
+
+That matters first, because the reflex is to assume it was. The 23rd failed
+because Cilium 1.20.1's operator would not start its Gateway API controller
+against v1.2.1 CRDs, and every rolled Envoy came up with **no TLS secret** —
+83 probes classified `transport:tls`.
+
+This time: the entry gate was green before touching helm (7 kinds served at
+`v1`, `bundle-version v1.6.1`), and the witness recorded **zero
+`transport:tls`**. 4b fixed the cause of that night and it did not come back.
+This is a different failure.
+
+### What happened
+
+`helm upgrade` to 1.20.1 with `envoy.updateStrategy.rollingUpdate.maxUnavailable=1`.
+The rollout behaved exactly as designed — one Envoy at a time, 1/5, 2/5, 5/5,
+6/6 — and helm reported `Upgrade complete`. The witness froze successes at 68
+and accumulated 49 failures: **36 `transport`** (connection refused/reset), 9
+`grpc`, 4 `timeout`. Longest consecutive failure run: **35 probes**, far past
+the 10 that the pre-agreed discriminator called "door down, roll back now".
+Rolled back at the operator's call; Envoy back on v1.36.9 in 67s, traffic
+healthy 4s later.
+
+**Root cause of why the new Envoy would not serve is NOT KNOWN, and is
+recorded as unknown.** The rollback recreated the DaemonSet pods, so the
+1.37.5 containers' logs were gone before anyone could read them. Recovering
+the door was the right call and this was its price. No cause is asserted.
+
+### THE FINDING: the assumption underneath the plan was false
+
+The plan tolerated rolling Envoy because `externalTrafficPolicy: Cluster`
+would forward traffic from a node whose Envoy was down to a node whose Envoy
+was up. **It cannot.** Verified on the live cluster after recovery:
+
+- `Service infra/cilium-gateway-shared-gw` has **no selector**, and its only
+  endpoint is a placeholder address bound to **no node** (0 endpoints carry a
+  `nodeName`). `Cluster` policy distributes across an endpoint list; here
+  there is no list to distribute across.
+- The `CiliumEnvoyConfig` for the Gateway has **no `nodeSelector`**: the
+  listener is programmed into **each node's local Envoy**. Traffic entering a
+  node's NodePort is served by *that node's* Envoy or not at all.
+- The NLB health check is **TCP on the NodePort (30443)**, and Cilium
+  programs that NodePort on every node **independently of the local Envoy's
+  health**. So the check passes while Envoy cannot serve — the NLB has no way
+  to notice.
+
+So losing one Envoy does not cost a fraction of capacity that peers absorb.
+It costs **the whole share of traffic the NLB sends to that node** — roughly
+a third, with three workers — for as long as that Envoy is down, and the load
+balancer keeps sending it.
+
+Which is exactly what the timeline shows: the first failure landed
+**7 seconds before** the first updated Envoy was even observed, and never
+recovered until rollback. The degradation began with the FIRST node rolled,
+not on accumulation. `maxUnavailable=1` was not too generous — it was
+irrelevant to the failure mode.
+
+### A number that was wrong in the earlier analysis
+
+The 2026-08-23 write-up said the NLB takes "~30s" to remove a failed target.
+That came from misreading the AWS CLI's alphabetical key ordering. The real
+configuration is `interval=30s, unhealthy threshold=3` → **up to 90 seconds**,
+plus a 10s deregistration delay. Three times the assumed blind window — and
+moot anyway, since the TCP check cannot detect this failure at all.
+
+### What generalises
+
+**A fallback path is a claim about the system, and claims get verified before
+they are relied upon.** "Cluster policy will absorb it" was inherited from how
+Services normally work, and was never checked against how Cilium's Gateway
+actually wires its data plane. The instrument caught the consequence in
+seconds; the assumption had been sitting in the plan for two days.
+
+And: **a health check that probes the wrong layer is worse than none**, because
+it manufactures confidence. TCP on a NodePort proves the datapath is
+programmed, not that anything behind it can answer.
