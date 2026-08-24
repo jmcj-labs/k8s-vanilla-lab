@@ -173,9 +173,27 @@ sustituye**:
 
 ## Rollback
 
-De v1.3 en adelante los cambios son aditivos. El escalón con riesgo real es
-el primero: **tener a mano el `standard-install.yaml` de v1.2.1** para
-revertirlo.
+De v1.3 en adelante los cambios son aditivos, pero **quitar una versión de
+`spec.versions` no basta**: el API server rechaza la CRD si esa versión sigue
+listada en `status.storedVersions`. Lo descubrimos en v1.4.1, donde el
+overlay movió la versión *storage* de TLSRoute de `v1alpha2` a `v1alpha3` y
+`storedVersions` acumuló ambas.
+
+**Purga previa, obligatoria cuando el rollback elimina una versión** (segura
+solo con 0 objetos de ese tipo — compruébalo primero):
+
+```bash
+kubectl get tlsroutes -A --no-headers | wc -l      # DEBE ser 0
+kubectl patch crd tlsroutes.gateway.networking.k8s.io --subresource=status \
+  --type=merge -p '{"status":{"storedVersions":["v1alpha2"]}}'
+# … y SOLO entonces aplicar el manifiesto de la versión anterior
+```
+
+Sin ese paso el rollback se atasca con un error que no menciona
+`storedVersions` en su primera línea y cuesta media hora entender.
+
+El escalón con más riesgo sigue siendo el primero: **tener a mano el
+`standard-install.yaml` de v1.2.1**.
 
 ## Tiempos (pendiente)
 
