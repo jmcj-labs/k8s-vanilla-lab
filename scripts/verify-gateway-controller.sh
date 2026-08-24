@@ -28,7 +28,12 @@
 # conditions, on purpose: those are the very field that lied.
 set -euo pipefail
 
-NS="${CANARY_NS:-infra}"
+# The canary MUST live where the Gateway's listener admits routes from, or
+# Accepted can never be True and the signal stays ambiguous. Our listener
+# selects namespace `logistics` explicitly, so `infra` (where the Gateway
+# itself lives) is the wrong home for it.
+NS="${CANARY_NS:-logistics}"
+GW_NS="${GATEWAY_NS:-infra}"
 GW="${GATEWAY_NAME:-shared-gw}"
 CONTROLLER="${GATEWAY_CONTROLLER:-io.cilium/gateway-controller}"
 TIMEOUT="${CANARY_TIMEOUT:-90}"
@@ -40,8 +45,8 @@ OK()   { echo "  ✓ $*"; }
 FAIL() { echo "✗ $*" >&2; exit 1; }
 
 command -v kubectl >/dev/null 2>&1 || FAIL "kubectl is absent"
-kubectl get gateway "${GW}" -n "${NS}" >/dev/null 2>&1 \
-  || FAIL "gateway ${NS}/${GW} not found — nothing to attach a canary to"
+kubectl get gateway "${GW}" -n "${GW_NS}" >/dev/null 2>&1 \
+  || FAIL "gateway ${GW_NS}/${GW} not found — nothing to attach a canary to"
 
 cleanup() { kubectl delete httproute "${NAME}" -n "${NS}" --ignore-not-found >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -58,8 +63,16 @@ metadata:
   labels: {app.kubernetes.io/managed-by: witness-canary}
 spec:
   parentRefs:
-    - name: ${GW}
-  hostnames: ["canary-${suffix}.witness.invalid"]
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ${GW}
+      namespace: ${GW_NS}
+  # Hostname under the listener's own suffix so Accepted=True is REACHABLE.
+  # With an unmatched hostname the controller answers Accepted=False for a
+  # perfectly benign reason, and on a step that fails you cannot tell
+  # "reconciled and accepted" from "reconciled and rejected the hostname" —
+  # ambiguity is exactly what you cannot afford mid-ladder.
+  hostnames: ["canary-${suffix}.logistics.lab"]
   rules:
     - matches:
         - path: {type: PathPrefix, value: /witness-${suffix}}
@@ -108,7 +121,12 @@ apply_canary one
 GEN1=$(read_gen)
 case "${GEN1}" in ''|*[!0-9]*) FAIL "could not read the canary's generation ('${GEN1}')" ;; esac
 RES=$(await_observed "${GEN1}" "acknowledged the new route")
-OK "controller wrote status on a BRAND NEW route: observedGeneration=${RES%%|*} Accepted=${RES##*|} (generation ${GEN1})"
+[ "${RES##*|}" = "True" ] || FAIL "the controller reconciled the canary but did NOT accept it
+  (Accepted=${RES##*|}). With a hostname under the listener's suffix and the
+  canary in an admitted namespace there is no benign reason left for this —
+  investigate before taking the step.
+  reason: $(kubectl get httproute "${NAME}" -n "${NS}" -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].reason}' 2>/dev/null)"
+OK "controller wrote status on a BRAND NEW route: Accepted=True observedGeneration=${RES%%|*} (generation ${GEN1})"
 
 # ── 2. Change: generation advances and the controller must FOLLOW it ──
 log "changing the canary so its generation advances"
