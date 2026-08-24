@@ -163,8 +163,12 @@ kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiest
   ```bash
   kubectl get crd <nombre> -o json | jq '.metadata.managedFields[] | {manager, operation, fields: .fieldsV1 | keys}'
   ```
-  Decidir la transferencia **deliberadamente** y solo entonces
-  `--force-conflicts` **sobre ese CRD concreto**, nunca sobre el bundle.
+  Decidir la transferencia **deliberadamente** y solo entonces usar
+  `--force-conflicts` sobre el conjunto exacto de manifiestos cuyos campos y
+  gestores se revisaron. No extender nunca el force al overlay ni a otro
+  manifiesto por comodidad. La única excepción ejecutada fue el bundle standard
+  de v1.3.0: el mismo conflicto de anotaciones y el mismo manager se verificó
+  en sus cinco CRDs antes de autorizar el conjunto completo (evidencia abajo).
 
 ## Ejecución, por escalón
 
@@ -207,18 +211,70 @@ listada en `status.storedVersions`. Lo descubrimos en v1.4.1, donde el
 overlay movió la versión *storage* de TLSRoute de `v1alpha2` a `v1alpha3` y
 `storedVersions` acumuló ambas.
 
-**Purga previa, obligatoria cuando el rollback elimina una versión** (segura
-solo con 0 objetos de ese tipo — compruébalo primero):
+La purga **no puede hacerse contra una versión que todavía no sea storage**:
+el API server exige que `status.storedVersions` contenga la versión marcada
+`storage:true`. El orden correcto, seguro solo con cero TLSRoutes, es:
+
+| Rollback | storage destino | ¿Transición/purga? |
+|---|---|---|
+| v1.6.1 → v1.5.1 | `v1` | no; no se retira la storage actual |
+| v1.5.1 → v1.4.1 | `v1alpha3` | sí: `v1` deja de existir en el destino |
+| v1.4.1 → v1.3.0 | `v1alpha2` | sí: `v1alpha3` deja de existir |
+| v1.3.0 → v1.2.1 | `v1alpha2` | no; storage no cambia |
+
+Para los dos casos con transición, construir primero un CRD intermedio desde
+el objeto vivo: conserva todas las versiones actuales y solo mueve
+`storage:true` a la versión destino. Ejemplo parametrizado:
 
 ```bash
-kubectl get tlsroutes -A --no-headers | wc -l      # DEBE ser 0
+FROM=v1.5.1
+TO=v1.4.1
+TARGET_STORAGE=v1alpha3       # v1alpha2 para v1.4.1→v1.3.0
+WORK=$(mktemp -d)
+trap 'rm -rf "${WORK}"' EXIT
+
+# Control positivo: la purga solo es segura porque no hay objetos que migrar.
+TLS_COUNT=$(kubectl get tlsroutes -A -o json | jq '.items | length')
+[ "${TLS_COUNT}" -eq 0 ] || { echo "ABORTAR: hay ${TLS_COUNT} TLSRoutes; migrar objetos antes del rollback"; exit 1; }
+
+kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq --arg target "${TARGET_STORAGE}" '
+      del(.metadata.creationTimestamp, .metadata.generation,
+          .metadata.managedFields, .metadata.resourceVersion,
+          .metadata.uid, .status)
+      | .spec.versions |= map(.storage = (.name == $target))' \
+  > "${WORK}/tlsroute-storage-transition.json"
+
+# DIFF primero, luego dry-run de servidor, y solo entonces mutación real.
+bash scripts/crd-diff-gate.sh "${WORK}/tlsroute-storage-transition.json" \
+  "TLSRoute storage ${FROM}→${TARGET_STORAGE}"
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  --dry-run=server -f "${WORK}/tlsroute-storage-transition.json" >/dev/null
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  -f "${WORK}/tlsroute-storage-transition.json"
+
+# El API server debe haber incorporado la nueva storage a storedVersions.
+kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq -e --arg target "${TARGET_STORAGE}" '
+      ([.spec.versions[] | select(.storage == true) | .name] == [$target]) and
+      (.status.storedVersions | index($target) != null)' >/dev/null \
+  || { echo "ABORTAR: la transición de storage no quedó acreditada"; exit 1; }
+
+# Con cero objetos y la storage destino ya activa, retirar versiones antiguas.
 kubectl patch crd tlsroutes.gateway.networking.k8s.io --subresource=status \
-  --type=merge -p '{"status":{"storedVersions":["v1alpha2"]}}'
-# … y SOLO entonces aplicar el manifiesto de la versión anterior
+  --type=merge -p "{\"status\":{\"storedVersions\":[\"${TARGET_STORAGE}\"]}}"
+
+TARGET_TLS="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/${TO}/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
+bash scripts/crd-diff-gate.sh "${TARGET_TLS}" "TLSRoute rollback ${FROM}→${TO}"
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade \
+  --dry-run=server -f "${TARGET_TLS}" >/dev/null
+kubectl apply --server-side --field-manager=gateway-api-crd-upgrade -f "${TARGET_TLS}"
 ```
 
-Sin ese paso el rollback se atasca con un error que no menciona
-`storedVersions` en su primera línea y cuesta media hora entender.
+Los manifiestos standard del escalón destino pasan por la misma pareja
+`crd-diff-gate.sh` + `kubectl apply --dry-run=server` **antes** de cualquier
+apply real. Si cualquier diff devuelve conflicto o error, se para: un
+rollback urgente no recibe permiso para saltarse el gate.
 
 El escalón con más riesgo sigue siendo el primero: **tener a mano el
 `standard-install.yaml` de v1.2.1**.
@@ -231,6 +287,27 @@ El escalón con más riesgo sigue siendo el primero: **tener a mano el
 | **v1.3.0 → v1.4.1** | bundle standard + overlay · **sin force** | ✓ · 0 errores fatales | ✓ obs 1→2 | 1429/1429 |
 | **v1.4.1 → v1.5.1** | **6 CRDs individuales** (TLSRoute excluido) + overlay · sin force | ✓ **6a/6b** — el escalón que justifica la ruta híbrida | ✓ `Accepted=True` obs 1→2 | 2328/2328 |
 | **v1.5.1 → v1.6.1** | 6 individuales + overlay · sin force | ✓ **6a/6b** + **gate 7 SCHEMA READY FOR 4a** | ✓ `Accepted=True` obs 1→2 | **2726/2726** |
+
+### Incidencia real del primer escalón: conflicto y transferencia autorizada
+
+La fila v1.2.1→v1.3.0 **no fue limpia**. El diff se ejecutó primero sin force
+y terminó `rc=2` con `Error from server (Conflict)` sobre
+`gateway.networking.k8s.io/bundle-version`; se detuvo el escalón. Como
+`managedFields` no se muestra por defecto, se inspeccionó con
+`kubectl get crd ... -o yaml --show-managed-fields`: el propietario era
+`kubectl-client-side-apply`, rastro del bootstrap client-side, y sostenía las
+cuatro anotaciones afectadas en los cinco CRDs del bundle standard.
+
+La transferencia concreta de esas anotaciones a
+`gateway-api-crd-upgrade` se presentó a dirección y fue autorizada **antes**
+de ejecutar nada. Solo entonces se repitió el apply con
+`--force-conflicts`, limitado al bundle standard revisado; el overlay
+TLSRoute entró sin force. Era una transferencia necesaria: la anotación de
+bundle debía pasar de v1.2.1 a v1.3.0 y no existía un segundo actor
+contendiendo el campo. El efecto conocido queda aceptado y visible:
+`kubectl.kubernetes.io/last-applied-configuration` queda huérfana, ya no la
+mantiene ningún apply client-side y no se eliminó. En los tres escalones
+posteriores no hubo force porque los campos ya pertenecían al manager nuevo.
 
 **Veredicto del testigo, ventana única sobre los cuatro escalones**:
 

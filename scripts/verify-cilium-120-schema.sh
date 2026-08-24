@@ -62,26 +62,45 @@ echo "  CONTROL ASSERTION: expected ${EXPECTED_COUNT} kinds serving ${REQUIRED_V
   afterwards comes up with no listeners, no routes and no TLS secret."
 
 # The overlay's whole purpose: 1.19 must keep working until 1.20 replaces it.
-TLS_SERVED=$(kubectl get crd "tlsroutes.${G}" -o json 2>/dev/null \
-  | jq -r '[.spec.versions[] | select(.served == true) | .name] | join(" ")' || true)
-[ -n "${TLS_SERVED}" ] || FAIL "could not read tlsroutes' served versions at all"
-echo "${TLS_SERVED}" | grep -qw v1alpha2 \
-  || FAIL "tlsroutes serves ${TLS_SERVED} but NOT v1alpha2 — Cilium 1.19 watches
-  v1alpha2 and would go blind to TLSRoute BEFORE 1.20 arrives to use v1.
-  That window is the one the hybrid channel exists to close."
-echo "  ✓ and v1alpha2 is still served, so 1.19 keeps working until 1.20 lands"
+# At the pinned final rung TLSRoute serves EXACTLY these three versions. Check
+# the count as a positive control, then every name: an empty/broken jq cannot
+# pass, and neither can an unexpected fourth version.
+EXPECTED_TLS_COUNT=3
+EXPECTED_TLS_VERSIONS="v1 v1alpha2 v1alpha3"
+TLS_GATE=$(kubectl get crd "tlsroutes.${G}" -o json 2>/dev/null \
+  | jq -r '([.spec.versions[] | select(.served == true) | .name] | sort) as $v
+      | "\($v | length)|\($v | join(" "))"' || true)
+[ -n "${TLS_GATE}" ] || FAIL "could not read tlsroutes' served versions at all"
+TLS_COUNT=${TLS_GATE%%|*}
+TLS_SERVED=${TLS_GATE#*|}
+case "${TLS_COUNT}" in ''|*[!0-9]*) FAIL "tlsroutes served-version count is unreadable: '${TLS_COUNT}'" ;; esac
+echo "  CONTROL ASSERTION: expected ${EXPECTED_TLS_COUNT} TLSRoute versions, found ${TLS_COUNT} (${TLS_SERVED})"
+[ "${TLS_COUNT}" -eq "${EXPECTED_TLS_COUNT}" ] \
+  || FAIL "tlsroutes serves ${TLS_COUNT} versions (${TLS_SERVED}), expected exactly ${EXPECTED_TLS_COUNT}"
+for V in ${EXPECTED_TLS_VERSIONS}; do
+  echo "${TLS_SERVED}" | grep -qw "${V}" \
+    || FAIL "tlsroutes serves ${TLS_SERVED} but NOT ${V}"
+done
+echo "  ✓ tlsroutes serves exactly v1 + v1alpha2 + v1alpha3; 1.19 remains covered until 1.20 lands"
 
 # The dots in an annotation KEY must be escaped in jsonpath, or it reads them
 # as nested fields and returns empty — which then looks like "wrong version"
 # rather than "broken query". Read it with jq instead: no escaping to get
 # wrong, and an empty result is distinguishable from a missing annotation.
-BUNDLE=$(kubectl get crd "gateways.${G}" -o json 2>/dev/null \
-  | jq -r --arg k "${G}/bundle-version" '.metadata.annotations[$k] // ""' || true)
-[ -n "${BUNDLE}" ] || FAIL "could not READ bundle-version at all — the check itself
-  failed, which is not the same as the version being wrong"
-[ "${BUNDLE}" = "v1.6.1" ] \
-  || FAIL "bundle-version is '${BUNDLE}', not the pinned v1.6.1"
-echo "  ✓ bundle-version is exactly v1.6.1"
+BUNDLE_FOUND=0
+for K in ${REQUIRED_KINDS}; do
+  BUNDLE=$(kubectl get crd "${K}.${G}" -o json 2>/dev/null \
+    | jq -r --arg k "${G}/bundle-version" '.metadata.annotations[$k] // ""' || true)
+  [ -n "${BUNDLE}" ] || FAIL "could not READ bundle-version on ${K} at all — the
+  check itself failed, which is not the same as the version being wrong"
+  [ "${BUNDLE}" = "v1.6.1" ] \
+    || FAIL "${K} bundle-version is '${BUNDLE}', not the pinned v1.6.1"
+  BUNDLE_FOUND=$((BUNDLE_FOUND + 1))
+done
+echo "  CONTROL ASSERTION: expected ${EXPECTED_COUNT} CRDs at bundle v1.6.1, found ${BUNDLE_FOUND}"
+[ "${BUNDLE_FOUND}" -eq "${EXPECTED_COUNT}" ] \
+  || FAIL "bundle-version control count failed: expected ${EXPECTED_COUNT}, found ${BUNDLE_FOUND}"
+echo "  ✓ bundle-version is exactly v1.6.1 on all seven CRDs"
 
 echo ""
 log "=== SCHEMA READY FOR 4a ==="

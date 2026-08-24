@@ -136,7 +136,11 @@ case "${GEN2}" in ''|*[!0-9]*) FAIL "could not read the canary's generation afte
 [ "${GEN2}" -gt "${GEN1}" ] || FAIL "the spec change did not advance generation (${GEN1} → ${GEN2});
   this proves nothing about the controller — fix the canary, not the cluster"
 RES2=$(await_observed "${GEN2}" "followed the change")
-OK "controller FOLLOWED a live change: generation ${GEN1} → ${GEN2}, observedGeneration=${RES2%%|*}"
+[ "${RES2##*|}" = "True" ] || FAIL "the controller followed generation ${GEN2} but
+  changed Accepted to ${RES2##*|}. Following a rejected mutation is not a
+  healthy two-generation canary; investigate before taking the step.
+  reason: $(kubectl get httproute "${NAME}" -n "${NS}" -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].reason}' 2>/dev/null)"
+OK "controller FOLLOWED a live change: generation ${GEN1} → ${GEN2}, Accepted=True observedGeneration=${RES2%%|*}"
 
 echo ""
 log "=== CONTROLLER PROVEN WORKING — it reconciled a change made just now ==="

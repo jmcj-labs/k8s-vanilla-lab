@@ -863,3 +863,59 @@ Concretely, in this repository:
 three distinct outcomes and a decision table in
 `scripts/test-crd-diff-gate.sh`) and `scripts/verify-cilium-120-schema.sh`
 (control assertion, jq value comparison, unreadable separated from wrong).
+
+---
+
+## 20. El mensaje del commit afirmó cambios que su diff no contenía
+
+**Cuándo**: 2026-08-24, cruce final del PR #72.
+**Severidad**: bloqueó el merge; tres correcciones, incluida la retirada de
+un gate fail-silent de 4a, se daban por hechas sin estar en el árbol.
+
+### Qué pasó
+
+El commit `6d7db347` describía cuatro fixes con detalle. Su diff real
+modificaba una sola línea de `docs/RUNBOOK-upgrade-kubernetes.md`: la
+corrección `v1.6.x` → `v1.6.1`. La evidencia del conflicto v1.3.0, el
+control positivo de TLSRoute y el rollback instrumentado no aparecían en
+ningún fichero. El gate inline de 4a conservaba además el mismo jsonpath
+fail-silent que INCIDENTS #19 acababa de prohibir.
+
+CI estaba verde y los 39 tests pasaban. Ese verde era correcto sobre el
+árbol que recibió; no comprobaba que la narración del commit correspondiera
+al árbol. El fallo estaba un nivel por encima del código: la descripción del
+trabajo se leyó como evidencia de que el trabajo existía.
+
+### Mecanismo acreditado y límite de la evidencia
+
+El reflog muestra checkout hacia `fix/canary-positive-signal` y creación del
+commit en el mismo segundo. El commit y su índice contenían solo el cambio de
+4c, y no hay blob inalcanzable con los otros tres textos. Eso acredita que
+los fixes no llegaron al commit ni al índice que lo produjo. Git ya no
+permite distinguir con honestidad entre «nunca se editaron» y «se editaron
+fuera del árbol o se descartaron antes de añadirlos»; afirmar uno de esos
+mecanismos sería inventar una causa que la evidencia no conserva.
+
+La causa de proceso que sí queda demostrada es que se escribió y empujó el
+mensaje desde la intención, sin contrastarlo con el índice ni con el commit
+resultante. Faltaron las dos aserciones que habrían parado el push:
+
+```bash
+git diff --cached --name-status       # antes de commit: ¿están TODOS los ficheros?
+git show --stat --oneline HEAD        # después: ¿el commit contiene lo que afirma?
+```
+
+### La regla
+
+**Un mensaje de commit es una afirmación no verificada hasta contrastarlo
+contra su propio diff.** El CI valida el árbol, no la fidelidad de la
+descripción del árbol. Por tanto:
+
+1. El autor verifica `git diff --cached` por fichero antes de crear el commit.
+2. Verifica `git show --stat` y el diff concreto inmediatamente después.
+3. El mensaje referencia los paths/secciones que implementan cada afirmación.
+4. El revisor lee el diff y los ficheros; nunca firma desde el mensaje o el
+   cuerpo del PR, aunque CI esté verde.
+
+Este es INCIDENTS #19 aplicado a la evidencia misma: «no vi trabajo ausente»
+no equivale a «el trabajo está presente». La aserción positiva es el diff.
