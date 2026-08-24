@@ -62,6 +62,15 @@ test: ## Run the script test suites that need no cluster and no AWS
 	@bash scripts/test-witness-liveness.sh
 	@echo ""
 	@bash scripts/test-gateway-canary-logic.sh
+	@echo ""
+	@if command -v go >/dev/null 2>&1; then \
+	  echo "=== node-readiness (Go) ==="; \
+	  (cd platform/node-readiness && go test ./...); \
+	else \
+	  echo "=== node-readiness (Go) ==="; \
+	  echo "  OMITIDO: go ausente. Esto NO es un pase — es un no-ejecutado."; \
+	  exit 1; \
+	fi
 
 plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each on known-after-apply — INCIDENTS #11)
 	@STACK=tofu/envs/lab; \
