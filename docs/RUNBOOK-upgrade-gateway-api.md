@@ -223,6 +223,39 @@ Sin ese paso el rollback se atasca con un error que no menciona
 El escalón con más riesgo sigue siendo el primero: **tener a mano el
 `standard-install.yaml` de v1.2.1**.
 
+## EJECUTADO — 2026-08-24, escalera completa
+
+| Escalón | Applies | Gate 6a/6b | Canary | Testigo acumulado |
+|---|---|---|---|---|
+| **v1.2.1 → v1.3.0** | bundle standard (`--force-conflicts`, transición client-side→server-side) + overlay TLSRoute `v1alpha2` | n/a (aún sin riesgo TLSRoute) · `TLSRoute support is enabled` aparece por primera vez | ✓ obs 1→2 | 1174/1174 |
+| **v1.3.0 → v1.4.1** | bundle standard + overlay · **sin force** | ✓ · 0 errores fatales | ✓ obs 1→2 | 1429/1429 |
+| **v1.4.1 → v1.5.1** | **6 CRDs individuales** (TLSRoute excluido) + overlay · sin force | ✓ **6a/6b** — el escalón que justifica la ruta híbrida | ✓ `Accepted=True` obs 1→2 | 2328/2328 |
+| **v1.5.1 → v1.6.1** | 6 individuales + overlay · sin force | ✓ **6a/6b** + **gate 7 SCHEMA READY FOR 4a** | ✓ `Accepted=True` obs 1→2 | **2726/2726** |
+
+**Veredicto del testigo, ventana única sobre los cuatro escalones**:
+
+```
+=== WITNESS WINDOW '4b-gwapi-crds' ===
+  from     : 2026-08-24T12:30:05Z
+  sent     : 2726
+  successful: 2726
+  max gap  : 3s between consecutive probes
+✓ VERDICT: sent == successful (2726/2726) — the entry path never broke
+```
+
+El `max gap` de 3 s importa tanto como el recuento: sin él, un 2726/2726 sobre
+una serie con agujeros no probaría nada del intervalo no observado.
+
+**Estado final** (`bundle=v1.6.1` en los siete):
+
+| CRD | stored | served |
+|---|---|---|
+| tlsroutes | v1alpha2, v1alpha3, v1 | **v1, v1alpha2, v1alpha3** |
+| referencegrants | v1beta1 | **v1**, v1beta1 |
+| backendtlspolicies | v1 | **v1** |
+| gatewayclasses / gateways / httproutes | v1 | v1, v1beta1 |
+| grpcroutes | v1 | v1 |
+
 ## Tiempos (pendiente)
 
 | Escalón | Tiempo | Veredicto del testigo |
