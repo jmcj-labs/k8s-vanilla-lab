@@ -174,10 +174,40 @@ func main() {
 	mux.HandleFunc("/healthz", handler(client, ups, probeTimeout))
 	mux.HandleFunc("/", handler(client, ups, probeTimeout))
 
+	// TIME BUDGET, and the ordering between these is the whole point:
+	//
+	//   probeTimeout (2s)  <  handlerBudget (5s)  <  WriteTimeout (8s)  <  HC interval (10s)
+	//
+	// The load balancer must never read "health check timed out" — that is
+	// ambiguous, and an ambiguous answer during a rollout is what this whole
+	// endpoint exists to eliminate. It must read a status code, and if the
+	// node is not ready that code is 503.
+	//
+	// http.TimeoutHandler guarantees an answer within handlerBudget: if the
+	// handler has not written by then it emits 503 itself. WriteTimeout sits
+	// ABOVE it on purpose — if the server killed the connection first, the
+	// 503 would never make it onto the wire and the client would see a
+	// timeout, which is exactly the outcome being designed out.
+	const (
+		handlerBudget = 5 * time.Second
+		writeTimeout  = 8 * time.Second
+	)
+	timed := http.TimeoutHandler(mux, handlerBudget,
+		"not ready\nreadiness check exceeded its own deadline\n")
+
 	srv := &http.Server{
-		Addr:              listen,
-		Handler:           mux,
+		Addr:    listen,
+		Handler: timed,
+		// Headers: guards against a client that opens a connection and dribbles.
 		ReadHeaderTimeout: 3 * time.Second,
+		// Whole request. GETs here have no body, but bounding it costs nothing.
+		ReadTimeout: 5 * time.Second,
+		// THE ONE THAT WAS MISSING: a client that never reads the response
+		// cannot hold a handler — and its goroutine and fd — open forever.
+		WriteTimeout: writeTimeout,
+		// Keep-alive connections must not accumulate either.
+		IdleTimeout:    30 * time.Second,
+		MaxHeaderBytes: 16 << 10,
 	}
 	log.Printf("node-readiness listening on %s (agent=%s envoy=%s timeout=%s)",
 		listen, agentURL, envoyURL, probeTimeout)

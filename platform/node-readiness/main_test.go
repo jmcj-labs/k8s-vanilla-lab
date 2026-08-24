@@ -158,3 +158,52 @@ func TestAgentBriefHeaderIsSent(t *testing.T) {
 		t.Fatal("upstream was never called")
 	}
 }
+
+// THE GUARANTEE THE LOAD BALANCER DEPENDS ON: whatever the upstreams do, the
+// aggregator answers with a STATUS CODE inside its budget. If it ever let the
+// health check time out instead, the balancer would read an ambiguous result
+// during exactly the rollout this endpoint exists to make unambiguous.
+func TestAlwaysAnswersWithinBudget(t *testing.T) {
+	// An upstream that never answers at all.
+	//
+	// DEFER ORDER MATTERS and cost a hung test once: defers run LIFO, and
+	// httptest's Close() waits for in-flight requests. Registering Close()
+	// FIRST means it runs LAST — after close(block) has released the handler.
+	// The other order deadlocks: Close() waits for a handler that is waiting
+	// for a channel that Close() is blocking the closing of.
+	block := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	defer hung.Close()
+	defer close(block)
+
+	const probeTimeout = 200 * time.Millisecond
+	const budget = 500 * time.Millisecond
+
+	h := http.TimeoutHandler(
+		http.HandlerFunc(handler(&http.Client{Timeout: probeTimeout}, []upstream{
+			{name: "agent", url: hung.URL},
+			{name: "envoy", url: hung.URL},
+		}, probeTimeout)),
+		budget, "not ready\ndeadline\n")
+
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	start := time.Now()
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("the aggregator did not answer at all: %v", err)
+	}
+	defer resp.Body.Close()
+	elapsed := time.Since(start)
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("hung upstreams produced HTTP %d, want 503", resp.StatusCode)
+	}
+	if elapsed > budget+time.Second {
+		t.Fatalf("answered in %s, beyond the budget of %s", elapsed, budget)
+	}
+	t.Logf("hung upstreams -> HTTP 503 in %s (budget %s)", elapsed, budget)
+}
