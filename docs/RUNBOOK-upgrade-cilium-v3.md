@@ -7,8 +7,9 @@
 
 > **El cambio de estrategia.** v1 y v2 buscaban que el balanceador **detectara**
 > el nodo caído. Esto es imposible de hacer bien en esta topología: el HC del
-> NLB en TCP es ciego a Envoy, y en HTTPS no puede validar un CA de DN vacío ni
-> manda SNI. Así que dejamos de depender de la detección y pasamos al
+> NLB en TCP es ciego a Envoy, y el HTTPS nativo no permite enviar el SNI/Host
+> que exige el listener del Gateway. Así que dejamos de depender de la
+> detección y pasamos al
 > **drenaje proactivo**: se saca el nodo del pool ANTES de tocarlo y se
 > devuelve DESPUÉS de comprobar que sirve. El balanceador no tiene que
 > adivinar nada.
@@ -50,14 +51,18 @@ suposición que llevamos dos intentos pagando.
 helm upgrade cilium cilium/cilium --version 1.19.6 \
   --namespace kube-system -f /tmp/cilium-live-values.yaml \
   --set updateStrategy.type=OnDelete \
+  --set updateStrategy.rollingUpdate=null \
   --set envoy.updateStrategy.type=OnDelete \
+  --set envoy.updateStrategy.rollingUpdate=null \
   --wait --timeout 5m
 
 # VERIFICACIÓN DURA, con aserción de control (INCIDENTS #19)
 for D in cilium cilium-envoy; do
   T=$(kubectl -n kube-system get ds "$D" -o jsonpath='{.spec.updateStrategy.type}')
+  R=$(kubectl -n kube-system get ds "$D" -o jsonpath='{.spec.updateStrategy.rollingUpdate}')
   echo "  $D → $T"
   [ "$T" = "OnDelete" ] || { echo "✗ $D NO está en OnDelete → NO CONTINUAR"; exit 1; }
+  [ -z "$R" ] || { echo "✗ $D conserva rollingUpdate bajo OnDelete → NO CONTINUAR"; exit 1; }
 done
 
 # Y que la fase 1 no rodó nada: mismas imágenes, mismos pods
@@ -74,7 +79,9 @@ kubectl -n kube-system get pods -l k8s-app=cilium -o jsonpath='{range .items[*]}
 helm upgrade cilium cilium/cilium --version 1.20.1 \
   --namespace kube-system -f /tmp/cilium-live-values.yaml \
   --set updateStrategy.type=OnDelete \
+  --set updateStrategy.rollingUpdate=null \
   --set envoy.updateStrategy.type=OnDelete \
+  --set envoy.updateStrategy.rollingUpdate=null \
   --set upgradeCompatibility=1.19 \
   --wait --timeout 10m
 ```
@@ -104,9 +111,9 @@ TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
 # 2.1 SACAR del pool
 aws elbv2 deregister-targets --region eu-west-1 --target-group-arn "$TG" --targets Id=$I
 
-# 2.2 ESPERAR a que el drenaje termine de verdad — no dormir un número.
-#     'draining' → 'unused' es la transición que dice que no quedan
-#     conexiones en vuelo. Con timeout, y el timeout es FALLO.
+# 2.2 ESPERAR la transición de AWS 'draining' → 'unused'; no inferirla de un
+#     sleep. Es el gate de baja del target configurado para esta ceremonia,
+#     con timeout, y el timeout es FALLO.
 for i in $(seq 1 20); do
   S=$(aws elbv2 describe-target-health --region eu-west-1 --target-group-arn "$TG" \
       --targets Id=$I --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
@@ -136,48 +143,87 @@ kubectl -n kube-system get pods --field-selector spec.nodeName=$W \
   -o custom-columns='POD:.metadata.name,IMG:.spec.containers[0].image'
 #   → cilium v1.20.1 y cilium-envoy v1.37.x
 
-# 2.6 PROBAR EL DATAPATH DE ESE NODO — el camino real, no una condición.
-#     Aquí sí controlamos el cliente, así que el problema que hundió el
-#     agregador (el HC del NLB no puede con TLS selfsigned ni manda SNI) no
-#     existe: usamos curl con -k y --connect-to contra ESE nodo.
-NODE_IP=$(kubectl get node $W -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-curl -sS -k --max-time 10 \
-  --connect-to "datapath-probe.logistics.lab:443:${NODE_IP}:30443" \
-  -o /dev/null -w '  datapath %{http_code}\n' \
-  https://datapath-probe.logistics.lab/
-#   → CUALQUIER código HTTP es PASS: prueba NodePort + TLS + cadena de Envoy.
-#     Un 404 es el resultado esperado (ninguna ruta reclama ese nombre) y
-#     demuestra el datapath sin depender de la app.
-#   → 000 / fallo de conexión = ese nodo NO sirve → ir a §4, NO re-registrar.
-
-# 2.7 DEVOLVER al pool y esperar healthy
+# 2.6 DEVOLVER al pool y esperar healthy. La prueba decisiva ocurre DESPUÉS:
+#     debe incluir al nodo dentro del camino real del NLB, no un hairpin.
 aws elbv2 register-targets --region eu-west-1 --target-group-arn "$TG" \
   --targets Id=$I,Port=30443
 aws elbv2 wait target-in-service --region eu-west-1 --target-group-arn "$TG" --targets Id=$I
 
-# 2.8 CIERRE DEL NODO: los 3 healthy otra vez, y el testigo intacto
+# 2.7 ASERCIÓN DE CAPACIDAD: los 3 healthy otra vez
 H=$(aws elbv2 describe-target-health --region eu-west-1 --target-group-arn "$TG" \
     --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' --output text)
 echo "  esperaba 3 healthy, encontré $H"
 [ "$H" -eq 3 ] || { echo "✗ PARAR"; exit 1; }
-bash scripts/witness-traffic.sh status
+
+# 2.8 PROBATION SOSTENIDA YA REINTEGRADO — 30 ciclos durante >=60 s,
+#     cubriendo dos intervalos nominales de 30 s del HC además del waiter.
+#     Cada `once` exige HTTP Y gRPC OK por la puerta pública. Son conexiones
+#     nuevas contra el sistema con el nodo otra vez elegible en el NLB: no es
+#     una prueba hairpin ni una única petición afortunada.
+PROBE_N=30
+PROBE_SLEEP=2
+PROBE_STARTED=$(date +%s)
+for n in $(seq 1 "$PROBE_N"); do
+  echo "  probation $n/$PROBE_N para $W"
+  bash "$REPO_ROOT/scripts/witness-traffic.sh" once || {
+    echo "✗ probation falló con $W reintegrado → PAUSAR; no tocar el siguiente nodo"
+    exit 1
+  }
+  sleep "$PROBE_SLEEP"
+done
+PROBE_ELAPSED=$(( $(date +%s) - PROBE_STARTED ))
+echo "  control: esperaba 30 ciclos en >=60 s; ejecuté $PROBE_N en ${PROBE_ELAPSED}s"
+[ "$PROBE_N" -eq 30 ] && [ "$PROBE_ELAPSED" -ge 60 ] || {
+  echo "✗ la probation no cubrió su presupuesto mínimo → PAUSAR"; exit 1;
+}
+
+# 2.9 SEGUNDA RED: el testigo continuo tampoco puede haber visto UN fallo.
+#     `status` es informativo; la igualdad siguiente es el gate fail-closed.
+bash "$REPO_ROOT/scripts/witness-traffic.sh" status
+SERIES="${WITNESS_STATE_DIR}/series"
+[ -s "$SERIES" ] || { echo "✗ serie del testigo ausente/vacía → PAUSAR"; exit 1; }
+SENT=$(awk '$3!="event"{n++} END{print n+0}' "$SERIES")
+SUCCESSFUL=$(awk '$3!="event" && $4=="ok"{n++} END{print n+0}' "$SERIES")
+echo "  control testigo: sent=$SENT successful=$SUCCESSFUL"
+[ "$SENT" -gt 0 ] && [ "$SENT" -eq "$SUCCESSFUL" ] || {
+  echo "✗ el testigo registró pérdida → PAUSAR; no tocar el siguiente nodo"; exit 1;
+}
 ```
 
-**Entre nodo y nodo se para y se mira el testigo.** Si la racha de fallos
-consecutivos llega a **≥10**, se aborta y se va a §4 (discriminador validado:
-23-ago → 128, 24-ago → 35, 4b → 0).
+**Cada nodo se reintegra y supera probation ANTES de drenar el siguiente.** Así
+el pool alterna 3→2→3 y nunca baja de dos targets sirviendo. Rodar los tres y
+devolverlos al final degradaría el pool a 2→1→0; queda prohibido.
+
+La mezcla transitoria —por ejemplo, un worker 1.20.1 y dos 1.19.6— es la
+forma normal de un upgrade consecutivo y dura solo hasta el siguiente nodo.
+Los datapaths y Envoy son locales a cada nodo; no comparten estado de conexión
+que tenga que migrar entre versiones, y HTTP/gRPC no tienen afinidad a una
+versión de Cilium. El plano común sigue siendo Kubernetes con las mismas CRDs
+v1.6.1, y `upgradeCompatibility=1.19` mantiene compatibles los defaults durante
+la convivencia. Es el modelo que describe la
+[guía oficial de upgrade de Cilium](https://docs.cilium.io/en/stable/operations/upgrade/):
+convergencia progresiva de todos los componentes, no sustitución simultánea.
+El estado final, y solo el final, exige seis nodos en 1.20.1.
+
+**Un solo fallo ya invalida cero-pérdida y pausa el rollout.** La racha **≥10**
+se conserva únicamente como clasificador forense del patrón (23-ago → 128,
+24-ago → 35, 4b → 0), nunca como permiso para continuar tras 1–9 pérdidas.
 
 ## 3. Los control planes — plano separado
 
-**Hallazgo de Codex, y hay que acotarlo con honestidad.** Los agentes de los
-CPs también ruedan. Lo que NO está establecido es cuánto afecta al API server:
-`kube-apiserver` es un pod estático en `hostNetwork` escuchando directamente
-en `:6443`, y el NLB apunta a `IP-del-CP:6443` como target de instancia — ese
-camino **no** es un Service ni pasa por traducción de NodePort. Es plausible
-que el reinicio del agente no lo corte.
+**Cinturón sobre tirantes.** `kubeadm` genera `kube-apiserver` como pod estático
+y lo enlaza a la dirección anunciada del nodo en `:6443`; Cilium documenta que
+un pod `hostNetwork` usa directamente la IP del host y no es un pod cuya red
+configure el CNI. El target del NLB es precisamente `IP-del-CP:6443`: no es un
+Service ni atraviesa la traducción NodePort/KPR que falló en los workers. Por
+eso el reinicio del agente **no debería** tirar ese API server. Fuentes:
+[fase kubeadm del API server](https://kubernetes.io/docs/reference/setup-tools/kubeadm/generated/kubeadm_init/kubeadm_init_phase_control-plane_apiserver/)
+y [pods hostNetwork en Cilium](https://docs.cilium.io/en/stable/operations/troubleshooting/#ensure-the-pod-is-managed-by-cilium).
 
-**Pero "es plausible" es exactamente lo que nos ha costado dos intentos**, así
-que se drena igual: cuesta 30 segundos por CP y elimina la pregunta.
+No convertimos ese "debería" en una suposición operacional: el CP se saca del
+TG del API, se espera `unused` y se añade **30 s completos** antes de tocar su
+agente. Son 90 s de margen total para los tres CPs, a cambio de no exponer el
+endpoint a una premisa no ejercitada.
 
 **Por qué uno a uno es seguro**: etcd tiene 3 miembros y **tolera perder uno**
 manteniendo quórum; los otros 2 CPs siguen sirviendo el API. Es el mismo
@@ -197,7 +243,16 @@ echo "  esperaba 3 etcd Running, encontré $ETCD"
 
 # 3.2 Drenar ESE CP del target group del API
 aws elbv2 deregister-targets --region eu-west-1 --target-group-arn "$TGAPI" --targets Id=$J
-#     … esperar 'unused' con el mismo bucle de §2.2
+for i in $(seq 1 20); do
+  S=$(aws elbv2 describe-target-health --region eu-west-1 --target-group-arn "$TGAPI" \
+      --targets Id=$J --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
+  echo "  $J → $S"
+  [ "$S" = "unused" ] && break
+  sleep 5
+done
+[ "$S" = "unused" ] || { echo "✗ $J no terminó de drenar → PARAR"; exit 1; }
+echo "  margen CP: 30 s fuera del pool antes de tocar el agente"
+sleep 30
 
 # 3.3 Aserción: quedan 2 CPs healthy sirviendo el API
 HA=$(aws elbv2 describe-target-health --region eu-west-1 --target-group-arn "$TGAPI" \
@@ -254,7 +309,8 @@ kubectl -n kube-system exec <pod-cilium-del-nodo> -- cilium-dbg status --all-add
 con `OnDelete` **no hay `helm rollback` por nodo** — el rollback de helm cambia
 la plantilla y hay que borrar los pods igualmente. Procedimiento:
 `helm rollback cilium -n kube-system` → borrar a mano los pods de los nodos ya
-rodados → esperar Ready → probar el datapath de cada uno (§2.6) → re-registrar.
+rodados → esperar Ready → re-registrar y superar la probation de cada uno
+(§2.8).
 Medido en intentos anteriores: **67 s** (24-ago) y **86 s** (23-ago), pero
 aquellos eran RollingUpdate; con OnDelete el tiempo lo marca el operador.
 
@@ -265,29 +321,67 @@ sería meter una segunda variable en mitad de un incidente.
 ## 5. Instrumentación en vivo — arranca ANTES de la fase 1
 
 ```bash
-mkdir -p /tmp/4a-v3 && cd /tmp/4a-v3
-kubectl -n kube-system logs ds/cilium-envoy -f --prefix --timestamps > envoy-all.log 2>&1 &
-kubectl -n kube-system logs ds/cilium       -f --prefix --timestamps > agent-all.log 2>&1 &
-kubectl -n kube-system get events -w > events.log 2>&1 &
+REPO_ROOT=$(git rev-parse --show-toplevel)
+export WITNESS_STATE_DIR="/tmp/witness-${CLUSTER_NAME:-k8s-vanilla-lab}"
+command -v grpcurl >/dev/null 2>&1 || {
+  echo "✗ grpcurl es obligatorio en 4a: sin él no existe testigo gRPC"; exit 1;
+}
+
+mkdir -p /tmp/4a-v3
+kubectl -n kube-system logs -l k8s-app=cilium-envoy -c cilium-envoy \
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-all.log 2>&1 &
+kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent \
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-all.log 2>&1 &
+kubectl -n kube-system get events -w > /tmp/4a-v3/events.log 2>&1 &
 # muestreador cada 5s: ambos DaemonSets, pods por nodo, y salud de AMBOS
 # target groups (Gateway y API) — el del API es nuevo en v3, por §3
-bash sampler.sh > sampler.log 2>&1 &
+SAMPLE_GW_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
+  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-gw-tg" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+SAMPLE_API_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
+  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-api-tg" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+[ "$SAMPLE_GW_TG" != "None" ] && [ "$SAMPLE_API_TG" != "None" ] || {
+  echo "✗ no se pudieron resolver ambos target groups para el muestreador"; exit 1;
+}
+(
+  while true; do
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    kubectl -n kube-system get ds cilium cilium-envoy \
+      -o custom-columns='DS:.metadata.name,DESIRED:.status.desiredNumberScheduled,READY:.status.numberReady,UPDATED:.status.updatedNumberScheduled'
+    kubectl -n kube-system get pods -l 'k8s-app in (cilium,cilium-envoy)' \
+      -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,READY:.status.containerStatuses[0].ready,START:.status.startTime'
+    aws elbv2 describe-target-health --region eu-west-1 \
+      --target-group-arn "$SAMPLE_GW_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
+    aws elbv2 describe-target-health --region eu-west-1 \
+      --target-group-arn "$SAMPLE_API_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
+    sleep 5
+  done
+) > /tmp/4a-v3/sampler.log 2>&1 &
+
+# En el testigo normal, GRPC_EVERY=5 significa una sonda gRPC cada ~10 s
+# (HTTP va cada 2 s). Una ventana de nodo dura minutos y eso detectaría una
+# caída sostenida, pero el 4a original empezó por gRPC y un fallo breve podría
+# caber entre dos muestras. Durante 4a se elimina esa ventana: 1 gRPC por CADA
+# ciclo HTTP durante los seis nodos.
+WITNESS_GRPC_EVERY=1 bash "$REPO_ROOT/scripts/witness-traffic.sh" start "4a-v3-drenaje"
 ```
 
 El testigo se abre **antes de la fase 1** con etiqueta `4a-v3-drenaje` y **no
-se cierra hasta el final de los seis nodos**.
+se cierra hasta el final de los seis nodos**. La probation de §2.8 añade además
+30 ciclos explícitos que exigen HTTP y gRPC OK después de cada reintegración;
+el testigo continuo es una segunda red independiente, no su sustituto.
 
 ## 6. Qué esperamos en el testigo, y por qué esta vez sí
 
 **Cero pérdida es ahora una expectativa razonable, no una esperanza**: en
-ningún instante se toca un nodo que esté recibiendo tráfico. El nodo sale del
-pool, se prueba que no le llega nada, se rueda, se prueba que sirve, y solo
-entonces vuelve.
+ningún instante se rueda un target que siga en el pool. AWS confirma su baja,
+se rueda, vuelve a registrarse y no se permite tocar el siguiente hasta que
+supere la probation sostenida con el testigo paralelo intacto.
 
-**El límite honesto que queda**: durante `register-targets` hay una ventana en
-la que el NLB empieza a mandar tráfico al nodo recién devuelto. Si su datapath
-estuviera *funcionando a medias* —no roto del todo, que §2.6 detectaría— habría
-pérdida. La sonda de §2.6 es una petición; no prueba las mil siguientes.
-
-Discriminador, sin cambios: racha **1-3** = reconexión · **≥10** = puerta
-caída, abortar.
+**El límite honesto que queda**: ninguna muestra finita demuestra las mil
+peticiones futuras. Lo que sí eliminamos es el salto de fe de una sola sonda:
+tras `register-targets`, el nodo participa en el tráfico real durante al menos
+60 s y 30 ciclos HTTP+gRPC consecutivos, mientras el testigo continuo observa
+el mismo NLB en paralelo. Cualquier fallo pausa; no existe presupuesto de
+pérdida aceptable.

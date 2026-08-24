@@ -1,8 +1,8 @@
 // NOT DEPLOYED — kept as the record of an investigation, not as a component.
 //
 // The readiness aggregator was designed for a health check the NLB cannot
-// perform in this topology: TCP is blind to Envoy, and HTTPS cannot work
-// because the Gateway's CA has an empty DN and the NLB's check sends no SNI.
+// perform in this topology: TCP is blind to Envoy, and the native HTTPS check
+// cannot send the SNI/Host required by the Gateway listener.
 // 4a therefore stopped relying on DETECTION and moved to proactive DRAINING
 // (docs/RUNBOOK-upgrade-cilium-v3.md): the node leaves the pool before it is
 // touched and returns only after it is proven to serve.
@@ -10,9 +10,9 @@
 // What survives here is worth more than the binary: the comments below record
 // what was proven from Cilium's own source — that the agent's /healthz does
 // NOT cover NodePort datapath programming, and that Cilium's kube-proxy
-// healthz "reasonably assumes" it. That is INCIDENTS #20, and the same probe
-// this file built is now step 2.6 of the drain runbook, run with curl by an
-// operator who controls the TLS client.
+// healthz "reasonably assumes" it. That is INCIDENTS #20. The drain runbook
+// supersedes this component with a sustained HTTP+gRPC probation through the
+// real NLB after each target is re-registered (step 2.8).
 //
 // Command node-readiness answers ONE question about the node it runs on:
 // can this node serve Gateway traffic right now?
