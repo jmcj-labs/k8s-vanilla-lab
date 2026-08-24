@@ -793,3 +793,73 @@ new subpath is not complete until the thing that deletes it has been re-read.
 Worth stating because the mistake is structurally invisible: nothing fails,
 nothing warns, and the evidence only shows up if someone counts what remains
 after a destroy — which is exactly why that count belongs in the ceremony.
+
+---
+
+## 19. The verification that matched nothing and called it clean
+
+**When**: 2026-08-24, driving the 4b CRD ladder.
+**Severity**: none reached a decision — every instance was caught, three of
+them by a second, independent check that happened to disagree.
+
+### The pattern
+
+A verification query is written to answer "is the bad thing present?". It
+matches nothing. Nothing is reported. Everyone reads that as "clean".
+
+But **a query that matches zero and a state that is absent look identical**,
+and the query can be broken in ways that are invisible precisely because a
+broken query produces the same silence as a healthy system. This is
+INCIDENTS #17 in a different costume: not a condition that decides "fine"
+when it cannot tell, but a *question* that cannot tell and is read as "fine".
+
+Four in one day, all mine, all in ad-hoc checks written while executing:
+
+1. **`grep -c conflict` over a server-side diff** reported four conflicts
+   that did not exist. All four were prose inside the OpenAPI schema — the
+   listener condition `Reason: Conflicted`. Counting a word is not detecting
+   a state. *(This one failed loud, not silent — the opposite direction, same
+   root: the query did not mean what it looked like.)*
+2. **`^[+-]\s+- name: v[0-9]`** to check whether any API version was
+   withdrawn. The dash in the pattern is on a different YAML line, so it
+   matched **neither additions nor removals**. It reported "no version is
+   withdrawn" while also failing to see `referencegrants` gaining `v1`. Only
+   noticing that the *addition* was missing exposed it.
+3. **jsonpath over an annotation key with dots** (`bundle-version`) returned
+   empty, because unescaped dots read as nested fields. It failed closed —
+   but as "wrong version", not as "I could not read it".
+4. **The worst, inside the gate itself.** The 6a gate that justifies the
+   entire hybrid channel used
+   `jsonpath='{range .spec.versions[?(@.served)]}'`. That predicate filters
+   on **the field existing, not on its value**: `backendtlspolicies` returned
+   `v1 v1alpha3` when `v1alpha3` has `served: false`. So the gate asked "is
+   v1alpha2 among the versions?" instead of "is v1alpha2 SERVED?" — and would
+   have passed a `v1alpha2` with `served: false`, the exact state it exists
+   to prevent. Its conclusion happened to be right, confirmed by two
+   independent checks, but it was right by luck.
+
+### The rule
+
+**Every verification that could match zero when it should match something
+carries a positive control assertion: "expected N, found N".** Not "I did not
+find the bad thing" — that sentence is true both when the system is healthy
+and when the question is broken.
+
+Concretely, in this repository:
+
+- Assert counts, do not infer from silence
+  (`scripts/verify-cilium-120-schema.sh` prints
+  `CONTROL ASSERTION: expected 7 kinds serving v1, found 7` and fails if not).
+- Prefer `jq` with an explicit value comparison (`select(.served == true)`)
+  over kubectl jsonpath predicates, which test presence rather than value.
+- Separate "I could not read it" from "the value is wrong" — they are
+  different failures with different responses.
+- When a check is cheap, run the *opposite* query too: the reason defect 2
+  was found is that the addition it should have seen was also missing.
+
+### Where it is enforced
+
+`scripts/crd-diff-gate.sh` (anchored `^Error from server (Conflict)`, with
+three distinct outcomes and a decision table in
+`scripts/test-crd-diff-gate.sh`) and `scripts/verify-cilium-120-schema.sh`
+(control assertion, jq value comparison, unreadable separated from wrong).

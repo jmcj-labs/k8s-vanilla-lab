@@ -46,6 +46,34 @@ kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
 
 Verificar el manifiesto y verificar el objeto vivo no son la misma pregunta.
 
+## EL GATE DURO 6a/6b (obligatorio desde el escalón v1.5.1)
+
+Desde v1.5.1 el bundle estándar sirve TLSRoute **solo en `v1`**, tirando el
+`v1alpha2` que vigila Cilium 1.19.6. El overlay lo preserva — y estas dos
+comprobaciones, deliberadamente redundantes, verifican que lo hizo:
+
+```bash
+# 6a — el ESQUEMA: v1alpha2 realmente SERVIDA.
+#   NO usar jsonpath '[?(@.served)]': ese predicado filtra por que el CAMPO
+#   EXISTA, no por su valor, y devuelve versiones con served=false (probado
+#   sobre backendtlspolicies). Un gate que no distingue true de false no es
+#   un gate. jq compara el valor.
+SERVED=$(kubectl get crd tlsroutes.gateway.networking.k8s.io -o json \
+  | jq -r '[.spec.versions[] | select(.served == true) | .name] | join(" ")')
+[ -n "$SERVED" ] || { echo "✗ no pude LEER las versiones servidas"; exit 1; }
+echo "$SERVED" | grep -qw v1alpha2 \
+  || { echo "✗ v1alpha2 NO servida (sirve: $SERVED) → ROLLBACK"; exit 1; }
+
+# 6b — el CONTROLADOR: lo que DECIDIÓ al leer ese esquema.
+kubectl -n kube-system logs deploy/cilium-operator --tail=-1 \
+  | grep -q "TLSRoute support is enabled" \
+  || { echo "✗ el operador NO habilita TLSRoute → PARAR y ROLLBACK"; exit 1; }
+```
+
+6a mira el esquema; 6b mira lo que el controlador **hizo** con él. Son dos
+preguntas distintas, y la 8ª cara de INCIDENTS #17 es precisamente el caso en
+que el esquema estaba bien y el controlador no se había enterado.
+
 ## LA VERIFICACIÓN TRAS CADA ESCALÓN: probar que el controlador TRABAJA
 
 **No** `Programmed=True`. **No** "no aparece el error de CRD en el log". Las
