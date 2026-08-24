@@ -866,7 +866,7 @@ three distinct outcomes and a decision table in
 
 ---
 
-## 20. El mensaje del commit afirmó cambios que su diff no contenía
+## 21. El mensaje del commit afirmó cambios que su diff no contenía
 
 **Cuándo**: 2026-08-24, cruce final del PR #72.
 **Severidad**: bloqueó el merge; tres correcciones, incluida la retirada de
