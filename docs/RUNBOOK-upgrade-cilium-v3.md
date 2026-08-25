@@ -37,6 +37,46 @@ Verificado, no supuesto.
   `/healthz` no cubre la programación del NodePort (INCIDENTS #20).
 - **Nada que revertir** en `tofu/`, en el SG de workers ni en el target group.
 
+## 0.a Inicialización — TODO lo que las fases consumen, antes de usarlo
+
+Prueba del operador virgen: el runbook debe correr **de arriba abajo** sin
+saltar hacia delante ni depender de residuos de intentos anteriores. Lo que
+antes vivía en §5 —y las fases ya consumían— se crea aquí.
+
+```bash
+set -euo pipefail
+export REPO_ROOT=$(git rev-parse --show-toplevel)
+export CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
+export AWS_REGION="${AWS_REGION:-eu-west-1}"
+export WITNESS_STATE_DIR="/tmp/witness-${CLUSTER_NAME}"
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/${CLUSTER_NAME}.conf}"
+
+# Directorio limpio: un residuo de un intento previo se leería como evidencia
+# de este. Si existe, se archiva en vez de mezclarse.
+[ -d /tmp/4a-v3 ] && mv /tmp/4a-v3 "/tmp/4a-v3.prev.$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p /tmp/4a-v3
+: > /tmp/4a-v3/instrumentation.pids     # registro ÚNICO de toda la instrumentación
+
+command -v grpcurl >/dev/null 2>&1 || {
+  echo "✗ grpcurl es obligatorio en 4a: sin él no existe testigo gRPC"; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "✗ jq es obligatorio"; exit 1; }
+
+# Helper usado por §2.5b y §3.4b: abre captura sobre los pods NUEVOS de un nodo.
+capture_new_pods() {
+  local NODE="$1"
+  for APP in cilium cilium-envoy; do
+    local POD
+    POD=$(kubectl -n kube-system get pods -l k8s-app=$APP \
+          --field-selector spec.nodeName="$NODE" -o jsonpath='{.items[0].metadata.name}')
+    [ -n "$POD" ] || { echo "✗ no encuentro el pod $APP nuevo en $NODE → PARAR"; exit 1; }
+    kubectl -n kube-system logs "$POD" -f --timestamps \
+      > "/tmp/4a-v3/${APP}-${NODE}-POST.log" 2>&1 &
+    echo "$!" >> /tmp/4a-v3/instrumentation.pids
+    echo "  captura abierta sobre $POD → ${APP}-${NODE}-POST.log"
+  done
+}
+```
+
 ## 0.b Pre-flight — y es quien CREA `/tmp/cilium-live-values.yaml`
 
 Sin este paso las dos fases de helm corren con un `-f` que no existe. Es el
@@ -196,19 +236,10 @@ kubectl -n kube-system get pods --field-selector spec.nodeName=$W \
   -o custom-columns='POD:.metadata.name,IMG:.spec.containers[0].image'
 #   → cilium v1.20.1 y cilium-envoy v1.37.x
 
-# 2.5b RELANZAR LA CAPTURA SOBRE LOS PODS NUEVOS DE ESTE NODO. El seguimiento
-#      agregado de §5 no los alcanza (se enganchó a los viejos), así que el
-#      seguimiento de los 1.20.1 se abre aquí, por nodo, en cuanto nacen.
-for APP in cilium cilium-envoy; do
-  POD=$(kubectl -n kube-system get pods -l k8s-app=$APP \
-        --field-selector spec.nodeName=$W -o jsonpath='{.items[0].metadata.name}')
-  [ -n "$POD" ] || { echo "✗ no encuentro el pod $APP nuevo en $W → PARAR"; exit 1; }
-  kubectl -n kube-system logs "$POD" -f --timestamps \
-    > "/tmp/4a-v3/${APP}-${W}-POST.log" 2>&1 &
-  echo "$!" >> /tmp/4a-v3/post-capture.pids
-  echo "  captura abierta sobre $POD → ${APP}-${W}-POST.log"
-done
-
+# 2.5b CAPTURA SOBRE LOS PODS NUEVOS DE ESTE NODO. El seguimiento agregado
+#      de §0.c no los alcanza (se enganchó a los viejos), así que el de los
+#      1.20.1 se abre aquí, por nodo, en cuanto nacen.
+capture_new_pods "$W"
 # 2.6 DEVOLVER al pool y esperar healthy. La prueba decisiva ocurre DESPUÉS:
 #     debe incluir al nodo dentro del camino real del NLB, no un hairpin.
 aws elbv2 register-targets --region eu-west-1 --target-group-arn "$TG" \
@@ -346,6 +377,12 @@ READY_CP=$(kubectl -n kube-system get pods --field-selector spec.nodeName=$C \
 echo "  control: esperaba 2 pods Ready en $C, encontré $READY_CP"
 [ "$READY_CP" -eq 2 ] || { echo "✗ PARAR"; exit 1; }
 
+# 3.5b CAPTURA SOBRE LOS PODS NUEVOS DE ESTE CP — obligatorio, no residual.
+#      Cubrir 6 de 12 pods nuevos deja ciega la mitad más crítica: si 4a-v3
+#      falla en un control plane, necesitamos sus logs EN VIVO igual que los
+#      perdimos con el Envoy 1.37.5 el 24-ago.
+capture_new_pods "$C"
+
 # 3.6 EL API DE ESE CP RESPONDE DE VERDAD — autenticado, no solo TLS.
 #     401/403 acreditan que hay TLS y un servidor, NO que el API sirva: son
 #     rechazos. Se exige 200 con el token del propio kubeconfig.
@@ -413,13 +450,8 @@ sería meter una segunda variable en mitad de un incidente.
 ## 5. Instrumentación en vivo — arranca ANTES de la fase 1
 
 ```bash
-REPO_ROOT=$(git rev-parse --show-toplevel)
-export WITNESS_STATE_DIR="/tmp/witness-${CLUSTER_NAME:-k8s-vanilla-lab}"
-command -v grpcurl >/dev/null 2>&1 || {
-  echo "✗ grpcurl es obligatorio en 4a: sin él no existe testigo gRPC"; exit 1;
-}
-
-mkdir -p /tmp/4a-v3
+# REPO_ROOT, WITNESS_STATE_DIR, /tmp/4a-v3 y el gate de grpcurl ya están
+# creados en §0.a — este bloque solo AÑADE capturas al registro único.
 # LÍNEA BASE, y solo eso. `kubectl logs -l ... -f` se engancha a los pods que
 # EXISTEN al lanzarlo: no sigue a los que nacen después. Como el drenaje
 # sustituye los doce, este seguimiento cubre los 1.19.6 y PERDERÍA los 1.20.1
@@ -427,9 +459,12 @@ mkdir -p /tmp/4a-v3
 # Se conserva por el "antes", y NO se afirma que siga a los seis.
 kubectl -n kube-system logs -l k8s-app=cilium-envoy -c cilium-envoy \
   -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-PRE.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
 kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent \
   -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-PRE.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
 kubectl -n kube-system get events -w > /tmp/4a-v3/events.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
 # muestreador cada 5s: ambos DaemonSets, pods por nodo, y salud de AMBOS
 # target groups (Gateway y API) — el del API es nuevo en v3, por §3
 SAMPLE_GW_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
@@ -455,6 +490,7 @@ SAMPLE_API_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
     sleep 5
   done
 ) > /tmp/4a-v3/sampler.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
 
 # En el testigo normal, GRPC_EVERY=5 significa una sonda gRPC cada ~10 s
 # (HTTP va cada 2 s). Una ventana de nodo dura minutos y eso detectaría una
@@ -497,10 +533,30 @@ kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep -q 'KubeProxyR
 # 4. El controlador de Gateway API está VIVO — canary, NUNCA Programmed (8ª cara)
 bash scripts/verify-gateway-controller.sh post-4a || { echo "✗ controlador muerto → §4"; exit 1; }
 
-# 5. Rutas de la app con observedGeneration al día
-kubectl get httproute,grpcroute -A -o json | jq -r '.items[] |
-  "\(.kind) \(.metadata.name) gen=\(.metadata.generation) " +
-  ([.status.parents[]?.conditions[]?|"\(.type)=\(.status)(obs:\(.observedGeneration))"]|join(" "))'
+# 5. RUTAS: aserción, no impresión. Un campo impreso no es un campo
+#    verificado — esa confusión es la 8ª cara. Sale ≠0 si alguna ruta tiene
+#    observedGeneration desfasado, le falta parent o condición, o no está
+#    Accepted+ResolvedRefs. Y con CONTROL POSITIVO: una lista vacía satisface
+#    vacuamente "ninguna mala", así que se exige el conjunto esperado.
+kubectl get httproute,grpcroute -A -o json | jq -e '
+  def bad:
+    .metadata.generation as $g
+    | ((.status.parents // []) | length) == 0
+      or (any(.status.parents[];
+            ((.conditions // []) | length) == 0
+            or any(.conditions[]; (.observedGeneration // -1) != $g)
+            or ((any(.conditions[]; .type=="Accepted"     and .status=="True")) | not)
+            or ((any(.conditions[]; .type=="ResolvedRefs" and .status=="True")) | not)
+         ));
+  (.items | length) >= 2 and ([ .items[] | select(bad) ] | length) == 0
+' >/dev/null || {
+  echo "✗ rutas no vigentes o conjunto incompleto — detalle:"
+  kubectl get httproute,grpcroute -A -o json | jq -r '.items[] |
+    "   \(.kind) \(.metadata.name) gen=\(.metadata.generation) " +
+    ([.status.parents[]?.conditions[]?|"\(.type)=\(.status)(obs:\(.observedGeneration))"]|join(" "))'
+  exit 1
+}
+echo "  ✓ rutas: >=2 presentes, todas Accepted+ResolvedRefs con obs==gen"
 
 # 6. Hubble responde
 kubectl -n kube-system get deploy hubble-relay -o jsonpath='{.status.readyReplicas}' | grep -q '^[1-9]' \
@@ -509,12 +565,23 @@ kubectl -n kube-system get deploy hubble-relay -o jsonpath='{.status.readyReplic
 # 7. VEREDICTO del testigo — cierra la ventana de los seis nodos
 bash "$REPO_ROOT/scripts/witness-traffic.sh" stop
 
-# 8. Instrumentación: parar y verificar que paró
-for f in /tmp/4a-v3/*.pids; do while read -r P; do kill "$P" 2>/dev/null; done < "$f"; done
-pkill -f 'kubectl -n kube-system logs' 2>/dev/null
-LEFT=$(pgrep -fc 'kubectl -n kube-system logs' 2>/dev/null || echo 0)
-echo "  control: esperaba 0 capturas vivas, quedan $LEFT"
-[ "$LEFT" -eq 0 ] || echo "  ⚠ quedan capturas colgadas: mátalas antes de cerrar"
+# 8. INSTRUMENTACIÓN PARADA DE VERDAD. El bloque declara que nada es
+#    opcional; entonces el código FALLA, no advierte. Y LEFT cuenta TODOS los
+#    tipos —logs, events -w, muestreador—, no solo kubectl logs.
+while read -r P; do [ -n "$P" ] && kill "$P" 2>/dev/null; done < /tmp/4a-v3/instrumentation.pids
+sleep 3
+while read -r P; do [ -n "$P" ] && kill -9 "$P" 2>/dev/null; done < /tmp/4a-v3/instrumentation.pids
+sleep 2
+count_instrumentation() {
+  { pgrep -f 'kubectl -n kube-system logs' || true
+    pgrep -f 'kubectl -n kube-system get events -w' || true
+    pgrep -f '4a-v3/sampler' || true
+    while read -r P; do [ -n "$P" ] && kill -0 "$P" 2>/dev/null && echo "$P"; done < /tmp/4a-v3/instrumentation.pids
+  } | sort -u | grep -c . || true
+}
+LEFT=$(count_instrumentation)
+echo "  control: esperaba 0 procesos de instrumentación vivos, quedan $LEFT"
+[ "$LEFT" -eq 0 ] || { echo "✗ instrumentación colgada: la ceremonia NO está cerrada"; exit 1; }
 ls -la /tmp/4a-v3/ | tail -n +2
 ```
 
