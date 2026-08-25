@@ -21,8 +21,15 @@ MODE="${1:-}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
 AWS_REGION="${AWS_REGION:-eu-west-1}"
+
+# EL SCRIPT FIJA SU PROPIO ENTORNO. Heredarlo de la terminal permite que una
+# ventana nueva —o una con AWS_PROFILE de otro perfil— apunte a un cluster
+# distinto a mitad de ceremonia. La ceremonia decide contra qué habla.
+export AWS_PROFILE="${AWS_PROFILE_OVERRIDE:-k8s-vanilla-lab}"
+export KUBECONFIG="${KUBECONFIG_OVERRIDE:-$HOME/.kube/${CLUSTER_NAME}.conf}"
+[ -r "$KUBECONFIG" ] || { echo "✗ no puedo leer KUBECONFIG=$KUBECONFIG (make kubeconfig)" >&2; exit 1; }
+
 WITNESS_STATE_DIR="${WITNESS_STATE_DIR:-/tmp/witness-${CLUSTER_NAME}}"
-STATE_DIR="${LADDER_STATE_DIR:-/tmp/4b-ladder}"
 FM=gateway-api-crd-upgrade
 STD=https://github.com/kubernetes-sigs/gateway-api/releases/download
 EXP=https://raw.githubusercontent.com/kubernetes-sigs/gateway-api
@@ -35,7 +42,54 @@ FAIL() { echo "✗ $*" >&2; exit 1; }
 overlay() { echo "$EXP/$1/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"; }
 indiv()   { echo "$EXP/$1/config/crd/standard/gateway.networking.k8s.io_$2.yaml"; }
 
+# ── IDENTIDAD DE LA CEREMONIA ───────────────────────────────────────────────
+# El estado en disco se ata al CLUSTER, no a una ruta fija. Sin esto, una
+# encarnación nueva heredaría el stage de la anterior y creería ir por v1.5.1
+# sobre un cluster que acaba de nacer en v1.2.1.
+cluster_uid() { kubectl get ns kube-system -o jsonpath='{.metadata.uid}' 2>/dev/null; }
+api_endpoint() { kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null; }
+
+CUID="$(cluster_uid)"; APIEP="$(api_endpoint)"
+[ -n "$CUID" ] && [ -n "$APIEP" ] || FAIL "no puedo identificar el cluster (¿kubeconfig válido?)"
+STATE_DIR="${LADDER_STATE_DIR:-/tmp/4b-ladder-${CUID}}"
 mkdir -p "$STATE_DIR"
+
+IDFILE="$STATE_DIR/identity"
+if [ -f "$IDFILE" ]; then
+  read -r OLD_UID OLD_EP < "$IDFILE"
+  [ "$OLD_UID" = "$CUID" ] && [ "$OLD_EP" = "$APIEP" ] \
+    || FAIL "el estado de $STATE_DIR pertenece a OTRA ceremonia
+  guardado: uid=$OLD_UID endpoint=$OLD_EP
+  actual:   uid=$CUID endpoint=$APIEP
+  Borra el directorio si de verdad quieres empezar de cero."
+else
+  printf '%s %s\n' "$CUID" "$APIEP" > "$IDFILE"
+fi
+
+# ── MÁQUINA DE ESTADOS ──────────────────────────────────────────────────────
+# stage = el último escalón CERRADO. Cada subcomando exige el anterior EXACTO,
+# así que v1.6.1 sobre un cluster en v1.2.1 se rechaza ANTES de tocar nada.
+STAGE_FILE="$STATE_DIR/stage"
+[ -f "$STAGE_FILE" ] || echo "none" > "$STAGE_FILE"
+stage_get() { cat "$STAGE_FILE"; }
+stage_set() {   # atómico: temp + mv, para que un corte no deje media transición
+  local tmp; tmp="$(mktemp "$STATE_DIR/.stage.XXXXXX")"
+  printf '%s\n' "$1" > "$tmp"; mv -f "$tmp" "$STAGE_FILE"
+  OK "stage → $1"
+}
+require_stage() {   # $1 = stage exigido, $2 = etiqueta del escalón
+  local cur; cur="$(stage_get)"
+  [ "$cur" = "$1" ] || FAIL "[$2] este escalón exige stage='$1' y el actual es '$cur'.
+  La escalera NO se salta: ejecuta los escalones en orden."
+}
+# El bundle que DEBE quedar tras cada escalón, comprobado antes de avanzar.
+expect_bundle() {   # $1 = versión esperada, $2 = etiqueta
+  local B
+  B=$(kubectl get crd gateways.gateway.networking.k8s.io -o json \
+      | jq -r '.metadata.annotations["gateway.networking.k8s.io/bundle-version"] // ""')
+  echo "  [$2] bundle tras aplicar: $B (esperado $1)"
+  [ "$B" = "$1" ] || FAIL "[$2] el esquema resultante NO es $1"
+}
 
 # ── EL TESTIGO NO PUEDE ESTAR MUERTO ────────────────────────────────────────
 # Idéntica lección a la del propio testigo (INCIDENTS #17, 6ª cara): si el
@@ -56,7 +110,9 @@ gate_witness() {
   ($LAST → $SENT): el testigo está PARADO, no limpio"
   [ "$AGE" -le "$TOL" ] || FAIL "[$tag] latido de ${AGE}s (tolerancia ${TOL}s): el bucle murió"
   [ "$SENT" -eq "$OK_N" ] || FAIL "[$tag] el testigo registró PÉRDIDA ($((SENT-OK_N)) fallos)"
-  echo "$SENT" > "$STATE_DIR/last_sent"     # solo se actualiza TRAS pasar
+  # LAST_SENT vive en STATE_DIR, que cuelga del UID del cluster: no puede
+  # arrastrarse de otra encarnación. Y solo avanza TRAS pasar los tres gates.
+  echo "$SENT" > "$STATE_DIR/last_sent"
   OK "[$tag] testigo vivo, creciendo y sin pérdida"
 }
 
@@ -109,7 +165,14 @@ backup_state() {
   mkdir -p "$D"
   local K
   for K in $SIX tlsroutes; do
-    kubectl get "$K.gateway.networking.k8s.io" -A -o yaml > "$D/objects-$K.yaml" 2>/dev/null || true
+    # Solo se tolera NotFound (tlsroutes aún no existe en los primeros
+    # escalones). Cualquier otro error del API es un backup incompleto.
+    if ! kubectl get "$K.gateway.networking.k8s.io" -A -o yaml > "$D/objects-$K.yaml" 2>"$D/err-$K"; then
+      grep -qi "NotFound\|the server doesn't have a resource type" "$D/err-$K" \
+        || FAIL "backup de $K falló por algo que NO es NotFound: $(head -1 "$D/err-$K")"
+      rm -f "$D/objects-$K.yaml"
+    fi
+    rm -f "$D/err-$K"
   done
   kubectl get crd -o json | jq '[.items[]|select(.spec.group=="gateway.networking.k8s.io")]' > "$D/crds.json"
   kubectl get crd -o json | jq -r '.items[]|select(.spec.group=="gateway.networking.k8s.io")
@@ -139,12 +202,27 @@ cmd_gate() {
   [ "$AG" -eq 6 ] && [ "$AGT" -eq 6 ] && [ "$EV" -eq 6 ] && [ "$EVT" -eq 6 ] \
     || FAIL "el DaemonSet no está sano en los 6 nodos"
 
-  OPIMG=$(kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.spec.template.spec.containers[0].image}')
-  case "$OPIMG" in *v1.19.6*) : ;; *) FAIL "el operador NO es 1.19.6 ($OPIMG)" ;; esac
+  # IMÁGENES DE LOS PODS REALES, no de la plantilla: un rollout a medias deja
+  # pods VIEJOS en Ready, y la plantilla ya anuncia la versión nueva. Contar
+  # los que corren la esperada es lo único que distingue ambos casos.
+  local EVIMG_OK OPPODS OPIMG_OK UR
+  EVIMG_OK=$(kubectl -n kube-system get pods -l k8s-app=cilium-envoy \
+    -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' | grep -c 'v1\.36\.9' || true)
+  echo "  control: esperaba 6 pods cilium-envoy en v1.36.9, encontré $EVIMG_OK"
+  [ "$EVIMG_OK" -eq 6 ] || FAIL "los pods de cilium-envoy no corren la imagen de 1.19.6"
+
+  OPPODS=$(kubectl -n kube-system get pods -l io.cilium/app=operator --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  OPIMG_OK=$(kubectl -n kube-system get pods -l io.cilium/app=operator \
+    -o jsonpath='{range .items[*]}{.spec.containers[0].image}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}' \
+    | grep -c 'v1\.19\.6.*true' || true)
   RR=$(kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.status.readyReplicas}')
   DR=$(kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.spec.replicas}')
-  echo "  control: operador $OPIMG readyReplicas=$RR/$DR"
-  [ "${RR:-0}" -eq "${DR:-0}" ] && [ "${RR:-0}" -ge 1 ] || FAIL "el operador no está completo"
+  UR=$(kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.status.updatedReplicas}')
+  echo "  control: operador pods=$OPPODS en-version-y-Ready=$OPIMG_OK ready=$RR updated=$UR desired=$DR"
+  [ "${RR:-0}" -eq "${DR:-0}" ] && [ "${UR:-0}" -eq "${DR:-0}" ] && [ "${RR:-0}" -ge 1 ] \
+    || FAIL "el operador no está completo (rollout a medias)"
+  [ "$OPIMG_OK" -eq "$OPPODS" ] && [ "$OPPODS" -ge 1 ] \
+    || FAIL "algún pod del operador NO corre v1.19.6"
 
   kubectl get crd -o json | jq -e '
     [ .items[] | select(.spec.group=="gateway.networking.k8s.io")
@@ -168,9 +246,24 @@ apply_bundle_v130() {
   INFRA=$(kubectl -n infra get gateway shared-gw -o jsonpath='{.spec.infrastructure}')
   [ -z "$INFRA" ] || FAIL "spec.infrastructure NO vacío ('$INFRA') — revisar v1.3 antes de subir"
 
-  local RC=0
-  bash "$REPO_ROOT/scripts/crd-diff-gate.sh" "$STD/v1.3.0/standard-install.yaml" standard-v1.3.0 || RC=$?
+  local RC=0 DOUT="$STATE_DIR/diff-standard-v1.3.0.txt"
+  CRD_DIFF_OUT="$DOUT" bash "$REPO_ROOT/scripts/crd-diff-gate.sh" \
+    "$STD/v1.3.0/standard-install.yaml" standard-v1.3.0 || RC=$?
   [ "$RC" -eq 3 ] || FAIL "esperaba rc=3 (conflicto conocido), obtuve rc=$RC"
+
+  # EL DIFF DICE QUÉ CONFLICTO ES, y rc=3 solo dice que hubo alguno. Se exige
+  # el conjunto EXACTO autorizado: un único campo (bundle-version) y un único
+  # manager (kubectl-client-side-apply). Cualquier campo o manager de más
+  # significa que estaríamos forzando algo que nadie revisó.
+  local FIELDS MANAGERS
+  FIELDS=$(grep -oE '\.metadata\.annotations\.[^ ,]+' "$DOUT" | sort -u | tr '\n' ' ')
+  MANAGERS=$(grep -oE 'conflict with "[^"]+"' "$DOUT" | sed 's/conflict with //;s/"//g' | sort -u | tr '\n' ' ')
+  echo "  campos en conflicto:   ${FIELDS:-<ninguno>}"
+  echo "  managers en conflicto: ${MANAGERS:-<ninguno>}"
+  [ "$(echo $FIELDS)" = ".metadata.annotations.gateway.networking.k8s.io/bundle-version" ] \
+    || FAIL "el conflicto NO se limita a bundle-version — force NO autorizado"
+  [ "$(echo $MANAGERS)" = "kubectl-client-side-apply" ] \
+    || FAIL "hay managers en conflicto además del del bootstrap — force NO autorizado"
 
   # EL FORCE SE ACOTA EN LAS CINCO, no en una. rc=3 solo dice "algún
   # conflicto"; autorizar el force del bundle sin mirar las cinco permitiría
@@ -200,8 +293,13 @@ apply_bundle_v141() {
 apply_individual() {   # $1 = versión (v1.5.1 | v1.6.1)
   local V="$1" K
   for K in $SIX; do
-    curl -sfL "$(indiv "$V" "$K")" | grep -q "kind: TLSRoute" \
-      && FAIL "$K de $V trae TLSRoute — URL equivocada"
+    # A FICHERO ANTES DE GREP: `curl | grep -q` cierra la tubería al primer
+    # match y curl muere con SIGPIPE, que bajo `set -o pipefail` aborta la
+    # ceremonia por haber encontrado justo lo que buscaba.
+    local TMPM; TMPM="$(mktemp)"
+    curl -sfL "$(indiv "$V" "$K")" -o "$TMPM" || FAIL "no pude descargar $K de $V"
+    if grep -q "kind: TLSRoute" "$TMPM"; then rm -f "$TMPM"; FAIL "$K de $V trae TLSRoute — URL equivocada"; fi
+    rm -f "$TMPM"
     bash "$REPO_ROOT/scripts/crd-diff-gate.sh" "$(indiv "$V" "$K")" "$K-$V"
   done
   bash "$REPO_ROOT/scripts/crd-diff-gate.sh" "$(overlay "$V")" "tlsroute-$V"
@@ -209,22 +307,53 @@ apply_individual() {   # $1 = versión (v1.5.1 | v1.6.1)
   kubectl apply --server-side --field-manager=$FM -f "$(overlay "$V")"   # el overlay, EL ÚLTIMO
 }
 
+restart_operator() {
+  kubectl -n kube-system rollout restart deploy/cilium-operator >/dev/null
+  kubectl -n kube-system rollout status deploy/cilium-operator --timeout=120s >/dev/null
+}
+
 case "$MODE" in
-  gate)   cmd_gate ;;
-  v1.3.0) log "=== escalón v1.2.1 → v1.3.0 ==="; backup_state v1.3.0; apply_bundle_v130
-          kubectl -n kube-system rollout restart deploy/cilium-operator >/dev/null
-          kubectl -n kube-system rollout status deploy/cilium-operator --timeout=120s >/dev/null
-          close_rung v1.3.0 ;;
-  v1.4.1) log "=== escalón v1.3.0 → v1.4.1 ==="; backup_state v1.4.1; apply_bundle_v141
-          kubectl -n kube-system rollout restart deploy/cilium-operator >/dev/null
-          kubectl -n kube-system rollout status deploy/cilium-operator --timeout=120s >/dev/null
-          close_rung v1.4.1 ;;
-  v1.5.1|v1.6.1)
-          log "=== escalón → $MODE (6 individuales, TLSRoute excluido) ==="
-          backup_state "$MODE"; apply_individual "$MODE"
-          gate_6ab "$MODE"; close_rung "$MODE" ;;
-  final)  log "=== cierre de la escalera ==="
+  prepare)
+          log "=== FASE 0 — la app viva y el testigo midiendo ==="
+          bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
+          ;;
+  gate)   cmd_gate; stage_set initial ;;
+
+  v1.3.0) require_stage initial v1.3.0
+          log "=== escalón v1.2.1 → v1.3.0 ==="
+          backup_state v1.3.0; apply_bundle_v130; restart_operator
+          expect_bundle v1.3.0 v1.3.0
+          close_rung v1.3.0; stage_set v1.3.0 ;;
+
+  v1.4.1) require_stage v1.3.0 v1.4.1
+          log "=== escalón v1.3.0 → v1.4.1 ==="
+          backup_state v1.4.1; apply_bundle_v141; restart_operator
+          expect_bundle v1.4.1 v1.4.1
+          close_rung v1.4.1; stage_set v1.4.1 ;;
+
+  v1.5.1) require_stage v1.4.1 v1.5.1
+          log "=== escalón v1.4.1 → v1.5.1 (6 individuales, TLSRoute excluido) ==="
+          backup_state v1.5.1; apply_individual v1.5.1
+          expect_bundle v1.5.1 v1.5.1
+          gate_6ab v1.5.1; close_rung v1.5.1; stage_set v1.5.1 ;;
+
+  v1.6.1) require_stage v1.5.1 v1.6.1
+          log "=== escalón v1.5.1 → v1.6.1 (6 individuales, TLSRoute excluido) ==="
+          backup_state v1.6.1; apply_individual v1.6.1
+          expect_bundle v1.6.1 v1.6.1
+          gate_6ab v1.6.1; close_rung v1.6.1; stage_set v1.6.1 ;;
+
+  final)  require_stage v1.6.1 final
+          log "=== cierre de la escalera ==="
           bash "$REPO_ROOT/scripts/verify-cilium-120-schema.sh" || FAIL "el esquema NO está listo para 4a"
-          bash "$REPO_ROOT/scripts/witness-traffic.sh" stop ;;
-  *) echo "uso: $0 {gate|v1.3.0|v1.4.1|v1.5.1|v1.6.1|final}" >&2; exit 2 ;;
+          bash "$REPO_ROOT/scripts/witness-traffic.sh" stop
+          stage_set final ;;
+
+  status) echo "  cluster uid : $CUID"
+          echo "  endpoint    : $APIEP"
+          echo "  estado      : $STATE_DIR"
+          echo "  stage       : $(stage_get)"
+          echo "  last_sent   : $(cat "$STATE_DIR/last_sent" 2>/dev/null || echo '-')" ;;
+
+  *) echo "uso: $0 {prepare|gate|v1.3.0|v1.4.1|v1.5.1|v1.6.1|final|status}" >&2; exit 2 ;;
 esac
