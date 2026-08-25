@@ -37,6 +37,20 @@ Verificado, no supuesto.
   `/healthz` no cubre la programación del NodePort (INCIDENTS #20).
 - **Nada que revertir** en `tofu/`, en el SG de workers ni en el target group.
 
+## 0.b Pre-flight — y es quien CREA `/tmp/cilium-live-values.yaml`
+
+Sin este paso las dos fases de helm corren con un `-f` que no existe. Es el
+mismo script que pasó en los dos intentos anteriores: captura los values
+**vivos**, valida los críticos, rechaza un `k8sServiceHost` que sea IP
+(ADR-007) y exige el DaemonSet de pre-flight listo en los 6 nodos, con el
+timeout como fallo.
+
+```bash
+bash scripts/preflight-cilium-upgrade.sh 1.20.1
+[ -s /tmp/cilium-live-values.yaml ] || { echo "✗ el pre-flight no dejó values → PARAR"; exit 1; }
+bash scripts/verify-cilium-120-schema.sh || { echo "✗ el esquema no cumple 1.20.1 → PARAR"; exit 1; }
+```
+
 ## 1. Paso previo: `OnDelete` confirmado ANTES de tocar versiones
 
 El riesgo que esto evita: si el mismo `helm upgrade` introdujera `OnDelete`
@@ -47,6 +61,30 @@ suposición que llevamos dos intentos pagando.
 **Dos fases de helm, y la primera NO cambia versiones:**
 
 ```bash
+# 1.0 SNAPSHOT DE REFERENCIA — el conjunto exacto nodo/UID/startTime/imagen de
+#     AMBOS DaemonSets. Sin esto, "no rodó nada" es una impresión; con esto es
+#     una igualdad que un comando puede negar.
+snapshot_pods() {
+  kubectl -n kube-system get pods -l 'k8s-app in (cilium,cilium-envoy)' \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}|{.metadata.labels.k8s-app}|{.metadata.uid}|{.status.startTime}|{.spec.containers[0].image}{"\n"}{end}' \
+    | sort
+}
+snapshot_pods > /tmp/4a-v3/pods-before.txt
+N=$(wc -l < /tmp/4a-v3/pods-before.txt | tr -d ' ')
+echo "  control: esperaba 12 pods (6 agentes + 6 envoy), capturé $N"
+[ "$N" -eq 12 ] || { echo "✗ el snapshot no cubre los 12 pods → NO CONTINUAR"; exit 1; }
+
+# Reutilizable tras CADA helm: igualdad estricta contra el snapshot.
+assert_nothing_rolled() {
+  snapshot_pods > /tmp/4a-v3/pods-after-$1.txt
+  if diff -u /tmp/4a-v3/pods-before.txt /tmp/4a-v3/pods-after-$1.txt; then
+    echo "  ✓ $1: mismos UID y startTime en los 12 pods — NADA rodó"
+  else
+    echo "✗ $1: el conjunto de pods CAMBIÓ. helm rodó por su cuenta → PARAR"
+    exit 1
+  fi
+}
+
 # FASE 1 — misma versión 1.19.6, solo la estrategia. Nada debe rodar.
 helm upgrade cilium cilium/cilium --version 1.19.6 \
   --namespace kube-system -f /tmp/cilium-live-values.yaml \
@@ -65,11 +103,8 @@ for D in cilium cilium-envoy; do
   [ -z "$R" ] || { echo "✗ $D conserva rollingUpdate bajo OnDelete → NO CONTINUAR"; exit 1; }
 done
 
-# Y que la fase 1 no rodó nada: mismas imágenes, mismos pods
-kubectl -n kube-system get ds cilium cilium-envoy \
-  -o custom-columns='NAME:.metadata.name,IMG:.spec.template.spec.containers[0].image,READY:.status.numberReady'
-kubectl -n kube-system get pods -l k8s-app=cilium -o jsonpath='{range .items[*]}{.metadata.name} {.status.startTime}{"\n"}{end}'
-#   → las startTime deben ser ANTERIORES a la fase 1
+# Y que la fase 1 no rodó nada — EJECUTABLE, no una lectura a ojo
+assert_nothing_rolled fase1
 ```
 
 **Solo con `OnDelete` confirmado en ambos** se pasa a la fase 2.
@@ -84,6 +119,24 @@ helm upgrade cilium cilium/cilium --version 1.20.1 \
   --set envoy.updateStrategy.rollingUpdate=null \
   --set upgradeCompatibility=1.19 \
   --wait --timeout 10m
+
+# 1.2 LA GARANTÍA DE QUE MANDA EL DRENAJE Y NO HELM: plantilla NUEVA, pods
+#     VIEJOS. Las dos mitades son aserciones; ninguna es prosa.
+assert_nothing_rolled fase2          # los 12 pods siguen siendo los mismos
+
+for D in cilium:1.20.1 cilium-envoy:v1.37; do
+  DS=${D%%:*}; WANT=${D##*:}
+  TPL=$(kubectl -n kube-system get ds "$DS" -o jsonpath='{.spec.template.spec.containers[0].image}')
+  echo "  plantilla $DS → $TPL (esperaba contener $WANT)"
+  case "$TPL" in *"$WANT"*) : ;; *) echo "✗ la plantilla de $DS NO es la nueva → PARAR"; exit 1 ;; esac
+done
+
+RUNNING_NEW=$(kubectl -n kube-system get pods -l 'k8s-app in (cilium,cilium-envoy)' \
+  -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' \
+  | grep -cE '1\.20\.1|v1\.37' || true)
+echo "  control: esperaba 0 pods ya en la versión nueva, encontré $RUNNING_NEW"
+[ "$RUNNING_NEW" -eq 0 ] || { echo "✗ algún pod YA rodó: OnDelete no está conteniendo → PARAR"; exit 1; }
+echo "  ✓ plantilla nueva + pods viejos: el orden lo controla el drenaje"
 ```
 
 > **`upgradeCompatibility=1.19`** es un hallazgo del post-mortem del 24-ago que
@@ -142,6 +195,19 @@ kubectl -n kube-system get pods --field-selector spec.nodeName=$W \
   -l 'k8s-app in (cilium,cilium-envoy)' \
   -o custom-columns='POD:.metadata.name,IMG:.spec.containers[0].image'
 #   → cilium v1.20.1 y cilium-envoy v1.37.x
+
+# 2.5b RELANZAR LA CAPTURA SOBRE LOS PODS NUEVOS DE ESTE NODO. El seguimiento
+#      agregado de §5 no los alcanza (se enganchó a los viejos), así que el
+#      seguimiento de los 1.20.1 se abre aquí, por nodo, en cuanto nacen.
+for APP in cilium cilium-envoy; do
+  POD=$(kubectl -n kube-system get pods -l k8s-app=$APP \
+        --field-selector spec.nodeName=$W -o jsonpath='{.items[0].metadata.name}')
+  [ -n "$POD" ] || { echo "✗ no encuentro el pod $APP nuevo en $W → PARAR"; exit 1; }
+  kubectl -n kube-system logs "$POD" -f --timestamps \
+    > "/tmp/4a-v3/${APP}-${W}-POST.log" 2>&1 &
+  echo "$!" >> /tmp/4a-v3/post-capture.pids
+  echo "  captura abierta sobre $POD → ${APP}-${W}-POST.log"
+done
 
 # 2.6 DEVOLVER al pool y esperar healthy. La prueba decisiva ocurre DESPUÉS:
 #     debe incluir al nodo dentro del camino real del NLB, no un hairpin.
@@ -268,15 +334,41 @@ kubectl -n kube-system delete pod -l k8s-app=cilium-envoy --field-selector spec.
 kubectl -n kube-system wait --for=condition=Ready pod \
   -l k8s-app=cilium --field-selector spec.nodeName=$C --timeout=180s
 
-# 3.5 Ese CP vuelve a servir el API por su propia IP, antes de re-registrarlo
-CP_IP=$(kubectl get node $C -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-curl -sS -k --max-time 10 -o /dev/null -w '  api %{http_code}\n' https://${CP_IP}:6443/readyz
-#   → 401 o 403 es PASS: el API contestó. 000 = no sirve → NO re-registrar.
+# 3.5 AMBOS pods de ese CP Ready y en la versión nueva
+for APP in cilium cilium-envoy; do
+  kubectl -n kube-system wait --for=condition=Ready pod \
+    -l k8s-app=$APP --field-selector spec.nodeName=$C --timeout=180s \
+    || { echo "✗ $APP no volvió Ready en $C → NO re-registrar, ir a §4"; exit 1; }
+done
+READY_CP=$(kubectl -n kube-system get pods --field-selector spec.nodeName=$C \
+  -l 'k8s-app in (cilium,cilium-envoy)' \
+  -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' | grep -c true)
+echo "  control: esperaba 2 pods Ready en $C, encontré $READY_CP"
+[ "$READY_CP" -eq 2 ] || { echo "✗ PARAR"; exit 1; }
 
-# 3.6 Devolver y esperar
+# 3.6 EL API DE ESE CP RESPONDE DE VERDAD — autenticado, no solo TLS.
+#     401/403 acreditan que hay TLS y un servidor, NO que el API sirva: son
+#     rechazos. Se exige 200 con el token del propio kubeconfig.
+CP_IP=$(kubectl get node $C -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+CODE=$(kubectl get --raw='/readyz' --server="https://${CP_IP}:6443" \
+         --insecure-skip-tls-verify=true 2>/dev/null | tr -d '\n')
+echo "  /readyz autenticado en $CP_IP → '${CODE}'"
+[ "$CODE" = "ok" ] || { echo "✗ ese CP NO sirve el API (esperaba 'ok') → NO re-registrar, ir a §4"; exit 1; }
+
+# 3.7 ETCD SANO COMO COMANDO, no como comentario
+ETCD_OK=$(kubectl -n kube-system exec ds/cilium -- true 2>/dev/null; \
+  kubectl -n kube-system get pods -l component=etcd \
+    -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' | grep -c true)
+echo "  control: esperaba 3 etcd Ready, encontré $ETCD_OK"
+[ "$ETCD_OK" -eq 3 ] || { echo "✗ quórum degradado → PARAR"; exit 1; }
+
+# 3.8 Devolver al pool y exigir los TRES targets del API healthy
 aws elbv2 register-targets --region eu-west-1 --target-group-arn "$TGAPI" --targets Id=$J,Port=6443
 aws elbv2 wait target-in-service --region eu-west-1 --target-group-arn "$TGAPI" --targets Id=$J
-# 3.7 etcd 3/3 y 3 CPs healthy antes del siguiente
+HA=$(aws elbv2 describe-target-health --region eu-west-1 --target-group-arn "$TGAPI" \
+     --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' --output text)
+echo "  control: esperaba 3 CPs healthy antes del siguiente, encontré $HA"
+[ "$HA" -eq 3 ] || { echo "✗ PARAR, no tocar el siguiente CP"; exit 1; }
 ```
 
 > **Orden entre planos**: primero los **workers** (donde vive el tráfico que el
@@ -328,10 +420,15 @@ command -v grpcurl >/dev/null 2>&1 || {
 }
 
 mkdir -p /tmp/4a-v3
+# LÍNEA BASE, y solo eso. `kubectl logs -l ... -f` se engancha a los pods que
+# EXISTEN al lanzarlo: no sigue a los que nacen después. Como el drenaje
+# sustituye los doce, este seguimiento cubre los 1.19.6 y PERDERÍA los 1.20.1
+# — justo los que importan si algo falla, que es la lección del 24-ago.
+# Se conserva por el "antes", y NO se afirma que siga a los seis.
 kubectl -n kube-system logs -l k8s-app=cilium-envoy -c cilium-envoy \
-  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-all.log 2>&1 &
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-PRE.log 2>&1 &
 kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent \
-  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-all.log 2>&1 &
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-PRE.log 2>&1 &
 kubectl -n kube-system get events -w > /tmp/4a-v3/events.log 2>&1 &
 # muestreador cada 5s: ambos DaemonSets, pods por nodo, y salud de AMBOS
 # target groups (Gateway y API) — el del API es nuevo en v3, por §3
@@ -371,6 +468,70 @@ El testigo se abre **antes de la fase 1** con etiqueta `4a-v3-drenaje` y **no
 se cierra hasta el final de los seis nodos**. La probation de §2.8 añade además
 30 ciclos explícitos que exigen HTTP y gRPC OK después de cada reintegración;
 el testigo continuo es una segunda red independiente, no su sustituto.
+
+## 5.b CIERRE FINAL — ejecutable, tras los seis nodos
+
+Nada de esto es opcional, y ninguna línea es prosa.
+
+```bash
+# 1. Los DOCE pods en la versión objetivo
+AG=$(kubectl -n kube-system get pods -l k8s-app=cilium \
+     -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' | grep -c '1\.20\.1')
+EV=$(kubectl -n kube-system get pods -l k8s-app=cilium-envoy \
+     -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' | grep -c 'v1\.37')
+echo "  control: esperaba 6 agentes y 6 envoy en destino; encontré $AG y $EV"
+[ "$AG" -eq 6 ] && [ "$EV" -eq 6 ] || { echo "✗ PARAR"; exit 1; }
+
+# 2. Ambos DaemonSets convergidos: updated == desired
+for D in cilium cilium-envoy; do
+  U=$(kubectl -n kube-system get ds $D -o jsonpath='{.status.updatedNumberScheduled}')
+  W=$(kubectl -n kube-system get ds $D -o jsonpath='{.status.desiredNumberScheduled}')
+  echo "  $D updated=$U desired=$W"
+  [ "$U" = "$W" ] || { echo "✗ $D no convergió → PARAR"; exit 1; }
+done
+
+# 3. KPR estricto sigue en pie
+kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep -q 'KubeProxyReplacement:.*True' \
+  || { echo "✗ KPR degradado → PARAR"; exit 1; }
+
+# 4. El controlador de Gateway API está VIVO — canary, NUNCA Programmed (8ª cara)
+bash scripts/verify-gateway-controller.sh post-4a || { echo "✗ controlador muerto → §4"; exit 1; }
+
+# 5. Rutas de la app con observedGeneration al día
+kubectl get httproute,grpcroute -A -o json | jq -r '.items[] |
+  "\(.kind) \(.metadata.name) gen=\(.metadata.generation) " +
+  ([.status.parents[]?.conditions[]?|"\(.type)=\(.status)(obs:\(.observedGeneration))"]|join(" "))'
+
+# 6. Hubble responde
+kubectl -n kube-system get deploy hubble-relay -o jsonpath='{.status.readyReplicas}' | grep -q '^[1-9]' \
+  || { echo "✗ hubble-relay sin réplicas listas"; exit 1; }
+
+# 7. VEREDICTO del testigo — cierra la ventana de los seis nodos
+bash "$REPO_ROOT/scripts/witness-traffic.sh" stop
+
+# 8. Instrumentación: parar y verificar que paró
+for f in /tmp/4a-v3/*.pids; do while read -r P; do kill "$P" 2>/dev/null; done < "$f"; done
+pkill -f 'kubectl -n kube-system logs' 2>/dev/null
+LEFT=$(pgrep -fc 'kubectl -n kube-system logs' 2>/dev/null || echo 0)
+echo "  control: esperaba 0 capturas vivas, quedan $LEFT"
+[ "$LEFT" -eq 0 ] || echo "  ⚠ quedan capturas colgadas: mátalas antes de cerrar"
+ls -la /tmp/4a-v3/ | tail -n +2
+```
+
+### Decisión EXPLÍCITA sobre `updateStrategy`
+
+Al terminar, los DaemonSets **quedan en `OnDelete`**. Eso no es un residuo: es
+un estado que alguien tiene que **decidir**, y dejarlo sin decidir significa
+que el próximo upgrade rodará —o no— según lo que nadie eligió.
+
+| Opción | Consecuencia |
+|---|---|
+| **Conservar `OnDelete`** | Ningún cambio de plantilla rueda solo. Más seguro, pero **un parche de seguridad tampoco se aplicará** hasta que alguien borre pods a mano |
+| **Restaurar `RollingUpdate`** | Vuelve el comportamiento por defecto — y con él el modo de fallo de 4a, si algún día se rueda sin drenar |
+
+**Hay que escribir cuál se elige y por qué**, aquí, con fecha. Un DaemonSet en
+`OnDelete` que nadie recuerda es una bomba de relojería silenciosa: parecerá
+que los upgrades futuros "no hacen nada".
 
 ## 6. Qué esperamos en el testigo, y por qué esta vez sí
 
