@@ -279,6 +279,26 @@ rollback urgente no recibe permiso para saltarse el gate.
 El escalón con más riesgo sigue siendo el primero: **tener a mano el
 `standard-install.yaml` de v1.2.1**.
 
+## DEUDA — el bootstrap pinea v1.2.1, así que 4b es un ESTADO, no un hito
+
+`bootstrap/control-plane.yaml` instala **Gateway API v1.2.1**. La escalera de
+4b se ejecutó **in situ sobre un cluster vivo**, y ese estado murió con el
+`tofu destroy`. Lo que quedó en el repo son runbooks y evidencia — **no un
+bootstrap que reproduzca el resultado**.
+
+**Consecuencia operativa**: cada encarnación nueva del cluster nace en v1.2.1
+y **necesita reejecutar esta escalera antes de 4a**. Descubierto el 25-ago al
+ir a arrancar 4a-v3 sobre un cluster fresco: la premisa "el cluster nace en
+v1.6.1" era falsa, y el gate de entrada de 4a habría fallado exactamente como
+el 23-ago.
+
+**Candidato de arreglo**: pinear **v1.6.1 por el canal híbrido** (los CRDs
+estándar requeridos + el overlay experimental de TLSRoute) en el bootstrap,
+para que el cluster nazca ya en el estado que 4a exige. **PR propio con su
+propia validación** — cambia el camino probado, porque 4b se validó *subiendo
+escalón a escalón* desde v1.2.1, no naciendo en v1.6.1. Post-S2, o cuando
+moleste lo suficiente.
+
 ## EJECUTADO — 2026-08-24, escalera completa
 
 | Escalón | Applies | Gate 6a/6b | Canary | Testigo acumulado |
