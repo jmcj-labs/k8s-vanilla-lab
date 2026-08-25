@@ -18,6 +18,72 @@
 > oficial de kubernetes-sigs), no Cilium. El escalón se aplica con `kubectl
 > apply` del `standard-install.yaml` de cada versión.
 
+## FASE 0 — la app viva y el testigo midiendo, ANTES de tocar una sola CRD
+
+**Esto no estaba escrito y hacía falta.** El pre-escalón de
+`spec.infrastructure` consulta el Gateway vivo, y el testigo **no puede
+sondear un cluster sin rutas**: abierto contra un cluster recién creado, su
+`once` falla con 404 o —peor— parece medir algo. El orden vivía en la cabeza
+del operador; ahora vive aquí.
+
+```bash
+export AWS_PROFILE=k8s-vanilla-lab
+export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+
+# 0.1 Repo 2 desplegado y sus rutas publicadas
+gh workflow run deploy.yml --repo jmcj-labs/logistics-lab
+#     … esperar verde, luego:
+kubectl get httproute,grpcroute -A --no-headers | wc -l   # DEBE ser 2
+
+# 0.2 Cadena viva: un CORONATION por el Gateway, 201 + los DOS eventos
+#     (comando completo en docs/RUNBOOK-post-apply.md §2b)
+
+# 0.3 traffic-generator en loop
+kubectl -n logistics get pods -l app.kubernetes.io/name=traffic-generator
+
+# 0.4 grpcurl es prerrequisito DURO: sin él `once` devuelve "skip" en gRPC y
+#     pasa igual, degradando el testigo a solo-HTTP sin avisar.
+command -v grpcurl >/dev/null 2>&1 || { echo "✗ falta grpcurl"; exit 1; }
+
+# 0.5 Testigo abierto Y VERIFICADO midiendo
+bash scripts/witness-traffic.sh start "4b-gwapi-crds"
+bash scripts/witness-traffic.sh status
+#     → sent subiendo entre dos lecturas, successful a la par, MEASURING
+```
+
+## GATE DE ESTADO DE PARTIDA — ¿arranco donde debo?
+
+Un operador que sigue este runbook necesita saber que el cluster está donde
+el runbook supone. **Sin esto, ejecutarlo sobre un estado equivocado produce
+fallos que parecen del runbook y no lo son.**
+
+```bash
+# Cilium 1.19.6 — la escalera sube CRDs BAJO esta versión, no otra
+kubectl -n kube-system get ds cilium -o jsonpath='{.spec.template.spec.containers[0].image}' \
+  | grep -q 'v1\.19\.6' || { echo "✗ Cilium no es 1.19.6 → este runbook no aplica"; exit 1; }
+
+# CRDs en v1.2.1 — el punto de partida de la escalera
+B=$(kubectl get crd gateways.gateway.networking.k8s.io -o json \
+    | jq -r '.metadata.annotations["gateway.networking.k8s.io/bundle-version"]')
+echo "  bundle actual: $B (esperado v1.2.1)"
+[ "$B" = "v1.2.1" ] || { echo "✗ el punto de partida no es v1.2.1 → PARAR"; exit 1; }
+
+# Contrato del operador de 1.19: v1beta1 referencegrants, v1alpha2 tlsroutes opcional
+kubectl -n kube-system logs deploy/cilium-operator --tail=-1 \
+  | grep -c "Required GatewayAPI resources are not found"   # → 0
+
+# La app viva y el testigo midiendo (Fase 0)
+R=$(kubectl get httproute,grpcroute -A --no-headers | wc -l | tr -d ' ')
+echo "  control: esperaba 2 rutas, encontré $R"
+[ "$R" -eq 2 ] || { echo "✗ Repo 2 no está desplegado → hacer FASE 0"; exit 1; }
+bash scripts/witness-traffic.sh status | grep -q MEASURING \
+  || { echo "✗ el testigo no está midiendo → hacer FASE 0"; exit 1; }
+```
+
+> **NOTA DE ESTADO (25-ago)**: `bootstrap/control-plane.yaml` pinea v1.2.1, así
+> que **cada encarnación nueva del cluster necesita esta escalera otra vez**.
+> 4b es un ESTADO del cluster, no un hito alcanzado una vez. Ver §DEUDA.
+
 ## ORDEN DE LA VENTANA: el testigo se abre ANTES del primer `kubectl apply`
 
 El hueco potencial empieza con **el primer cambio de esquema**, no después de
@@ -135,7 +201,7 @@ por el cambio de forma de `Gateway.spec.infrastructure`. **Nosotros no
 usamos ese campo** (verificado en el manifiesto; reverificar en vivo). El
 escalonado se mantiene por prudencia general, no por ese riesgo concreto.
 
-## Qué cambia en lo que SÍ usamos (v1.6.0)
+## Qué cambia en lo que SÍ usamos (v1.6.1)
 
 - **HTTPRoute**: `retry.codes` debe ser único y `retry.attempts >= 1`;
   prohibidos filtros CORS repetidos del mismo tipo. Son **validaciones más
@@ -170,14 +236,86 @@ kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiest
   de v1.3.0: el mismo conflicto de anotaciones y el mismo manager se verificó
   en sus cinco CRDs antes de autorizar el conjunto completo (evidencia abajo).
 
-## Ejecución, por escalón
+## Ejecución, por escalón — COMANDOS LITERALES
 
-El testigo se abrió **una vez, antes del primer escalón** (§ORDEN DE LA
-VENTANA) y sigue abierto durante toda la escalera: no se cierra entre
-escalones, porque el hueco puede caer justo en la transición.
+El testigo se abrió **una vez, antes del primer escalón** (§FASE 0) y sigue
+abierto durante toda la escalera: no se cierra entre escalones, porque el
+hueco puede caer justo en la transición.
+
+> **Un comando genérico aquí es un bug, no una comodidad.** Una versión
+> anterior de esta sección daba `standard-install.yaml` para los cuatro
+> escalones. Ejecutado tal cual, en **v1.5.1 y v1.6.1 pisaría el overlay** y
+> dejaría a Cilium 1.19.6 ciego a TLSRoute — exactamente lo que la ruta
+> híbrida existe para impedir. Los comandos van completos, por escalón.
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.X.Y/standard-install.yaml
+export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+FM=gateway-api-crd-upgrade
+STD=https://github.com/kubernetes-sigs/gateway-api/releases/download
+EXP=https://raw.githubusercontent.com/kubernetes-sigs/gateway-api
+OVERLAY() { echo "$EXP/$1/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"; }
+INDIV()   { echo "$EXP/$1/config/crd/standard/gateway.networking.k8s.io_$2.yaml"; }
+SIX="gatewayclasses gateways httproutes grpcroutes referencegrants backendtlspolicies"
+```
+
+### Escalón 1 — v1.2.1 → v1.3.0  (bundle + overlay, con `--force-conflicts`)
+
+```bash
+# Backup e inventario primero (§Rollback), luego diff-first:
+bash scripts/crd-diff-gate.sh "$STD/v1.3.0/standard-install.yaml" standard-v1.3.0
+#   → ESPERADO: conflicto en bundle-version. Es la transición del manager del
+#     bootstrap (kubectl-client-side-apply) al nuestro. PARAR, inspeccionar
+#     `kubectl get crd ... --show-managed-fields`, y solo entonces forzar.
+bash scripts/crd-diff-gate.sh "$(OVERLAY v1.3.0)" tlsroute-v1.3.0   # sin conflicto
+
+kubectl apply --server-side --field-manager=$FM --force-conflicts \
+  -f "$STD/v1.3.0/standard-install.yaml"
+kubectl apply --server-side --field-manager=$FM -f "$(OVERLAY v1.3.0)"   # SIN force
+```
+
+### Escalón 2 — v1.3.0 → v1.4.1  (bundle + overlay, SIN force)
+
+```bash
+bash scripts/crd-diff-gate.sh "$STD/v1.4.1/standard-install.yaml" standard-v1.4.1
+bash scripts/crd-diff-gate.sh "$(OVERLAY v1.4.1)" tlsroute-v1.4.1
+#   → sin conflictos: bundle-version ya es nuestro desde el escalón 1
+
+kubectl apply --server-side --field-manager=$FM -f "$STD/v1.4.1/standard-install.yaml"
+kubectl apply --server-side --field-manager=$FM -f "$(OVERLAY v1.4.1)"
+#   entra BackendTLSPolicy/v1
+```
+
+### Escalones 3 y 4 — v1.5.1 y v1.6.1  (6 CRDs INDIVIDUALES + overlay)
+
+**Aquí NO se aplica el bundle.** Desde v1.5.1 incluye TLSRoute sirviendo solo
+`v1` y sobrescribiría el overlay (cilium/cilium#44920).
+
+```bash
+for V in v1.5.1 v1.6.1; do
+  for K in $SIX; do bash scripts/crd-diff-gate.sh "$(INDIV $V $K)" "$K-$V" || exit 1; done
+  bash scripts/crd-diff-gate.sh "$(OVERLAY $V)" "tlsroute-$V" || exit 1
+
+  # GUARDA: ningún manifiesto estándar puede traer TLSRoute
+  for K in $SIX; do
+    curl -sfL "$(INDIV $V $K)" | grep -q "kind: TLSRoute" \
+      && { echo "✗ $K trae TLSRoute — URL equivocada, PARAR"; exit 1; }
+  done
+
+  for K in $SIX; do kubectl apply --server-side --field-manager=$FM -f "$(INDIV $V $K)"; done
+  kubectl apply --server-side --field-manager=$FM -f "$(OVERLAY $V)"   # el overlay, EL ÚLTIMO
+  # … y aquí van el reinicio del operador + gate 6a/6b + canary (secciones siguientes)
+done
+```
+
+### Tras CADA escalón, sin excepción
+
+```bash
+kubectl -n kube-system rollout restart deploy/cilium-operator
+kubectl -n kube-system rollout status deploy/cilium-operator --timeout=120s
+# GATE 6a/6b (obligatorio desde v1.5.1 — ver §EL GATE DURO)
+# CANARY de dos generaciones:
+bash scripts/verify-gateway-controller.sh <escalon>
+bash scripts/witness-traffic.sh status     # enviadas == exitosas
 ```
 
 ## Verificación tras CADA escalón (no solo al final)
