@@ -91,6 +91,64 @@ bash scripts/preflight-cilium-upgrade.sh 1.20.1
 bash scripts/verify-cilium-120-schema.sh || { echo "✗ el esquema no cumple 1.20.1 → PARAR"; exit 1; }
 ```
 
+## 0.c Instrumentación en vivo — arranca ANTES de la fase 1
+
+```bash
+# REPO_ROOT, WITNESS_STATE_DIR, /tmp/4a-v3 y el gate de grpcurl ya están
+# creados en §0.a — este bloque solo AÑADE capturas al registro único.
+# LÍNEA BASE, y solo eso. `kubectl logs -l ... -f` se engancha a los pods que
+# EXISTEN al lanzarlo: no sigue a los que nacen después. Como el drenaje
+# sustituye los doce, este seguimiento cubre los 1.19.6 y PERDERÍA los 1.20.1
+# — justo los que importan si algo falla, que es la lección del 24-ago.
+# Se conserva por el "antes", y NO se afirma que siga a los seis.
+kubectl -n kube-system logs -l k8s-app=cilium-envoy -c cilium-envoy \
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-PRE.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
+kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent \
+  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-PRE.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
+kubectl -n kube-system get events -w > /tmp/4a-v3/events.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
+# muestreador cada 5s: ambos DaemonSets, pods por nodo, y salud de AMBOS
+# target groups (Gateway y API) — el del API es nuevo en v3, por §3
+SAMPLE_GW_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
+  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-gw-tg" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+SAMPLE_API_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
+  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-api-tg" \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+[ "$SAMPLE_GW_TG" != "None" ] && [ "$SAMPLE_API_TG" != "None" ] || {
+  echo "✗ no se pudieron resolver ambos target groups para el muestreador"; exit 1;
+}
+(
+  while true; do
+    date -u +%Y-%m-%dT%H:%M:%SZ
+    kubectl -n kube-system get ds cilium cilium-envoy \
+      -o custom-columns='DS:.metadata.name,DESIRED:.status.desiredNumberScheduled,READY:.status.numberReady,UPDATED:.status.updatedNumberScheduled'
+    kubectl -n kube-system get pods -l 'k8s-app in (cilium,cilium-envoy)' \
+      -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,READY:.status.containerStatuses[0].ready,START:.status.startTime'
+    aws elbv2 describe-target-health --region eu-west-1 \
+      --target-group-arn "$SAMPLE_GW_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
+    aws elbv2 describe-target-health --region eu-west-1 \
+      --target-group-arn "$SAMPLE_API_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
+    sleep 5
+  done
+) > /tmp/4a-v3/sampler.log 2>&1 &
+echo "$!" >> /tmp/4a-v3/instrumentation.pids
+
+# En el testigo normal, GRPC_EVERY=5 significa una sonda gRPC cada ~10 s
+# (HTTP va cada 2 s). Una ventana de nodo dura minutos y eso detectaría una
+# caída sostenida, pero el 4a original empezó por gRPC y un fallo breve podría
+# caber entre dos muestras. Durante 4a se elimina esa ventana: 1 gRPC por CADA
+# ciclo HTTP durante los seis nodos.
+WITNESS_GRPC_EVERY=1 bash "$REPO_ROOT/scripts/witness-traffic.sh" start "4a-v3-drenaje"
+```
+
+El testigo se abre **antes de la fase 1** con etiqueta `4a-v3-drenaje` y **no
+se cierra hasta el final de los seis nodos**. La probation de §2.8 añade además
+30 ciclos explícitos que exigen HTTP y gRPC OK después de cada reintegración;
+el testigo continuo es una segunda red independiente, no su sustituto.
+
 ## 1. Paso previo: `OnDelete` confirmado ANTES de tocar versiones
 
 El riesgo que esto evita: si el mismo `helm upgrade` introdujera `OnDelete`
@@ -447,65 +505,8 @@ aquellos eran RollingUpdate; con OnDelete el tiempo lo marca el operador.
 toda la escalera de 4b, con el gate 6a/6b verde en cada escalón. Degradarlas
 sería meter una segunda variable en mitad de un incidente.
 
-## 5. Instrumentación en vivo — arranca ANTES de la fase 1
 
-```bash
-# REPO_ROOT, WITNESS_STATE_DIR, /tmp/4a-v3 y el gate de grpcurl ya están
-# creados en §0.a — este bloque solo AÑADE capturas al registro único.
-# LÍNEA BASE, y solo eso. `kubectl logs -l ... -f` se engancha a los pods que
-# EXISTEN al lanzarlo: no sigue a los que nacen después. Como el drenaje
-# sustituye los doce, este seguimiento cubre los 1.19.6 y PERDERÍA los 1.20.1
-# — justo los que importan si algo falla, que es la lección del 24-ago.
-# Se conserva por el "antes", y NO se afirma que siga a los seis.
-kubectl -n kube-system logs -l k8s-app=cilium-envoy -c cilium-envoy \
-  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/envoy-PRE.log 2>&1 &
-echo "$!" >> /tmp/4a-v3/instrumentation.pids
-kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent \
-  -f --prefix --timestamps --max-log-requests=12 > /tmp/4a-v3/agent-PRE.log 2>&1 &
-echo "$!" >> /tmp/4a-v3/instrumentation.pids
-kubectl -n kube-system get events -w > /tmp/4a-v3/events.log 2>&1 &
-echo "$!" >> /tmp/4a-v3/instrumentation.pids
-# muestreador cada 5s: ambos DaemonSets, pods por nodo, y salud de AMBOS
-# target groups (Gateway y API) — el del API es nuevo en v3, por §3
-SAMPLE_GW_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
-  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-gw-tg" \
-  --query 'TargetGroups[0].TargetGroupArn' --output text)
-SAMPLE_API_TG=$(aws elbv2 describe-target-groups --region eu-west-1 \
-  --names "${CLUSTER_NAME:-k8s-vanilla-lab}-api-tg" \
-  --query 'TargetGroups[0].TargetGroupArn' --output text)
-[ "$SAMPLE_GW_TG" != "None" ] && [ "$SAMPLE_API_TG" != "None" ] || {
-  echo "✗ no se pudieron resolver ambos target groups para el muestreador"; exit 1;
-}
-(
-  while true; do
-    date -u +%Y-%m-%dT%H:%M:%SZ
-    kubectl -n kube-system get ds cilium cilium-envoy \
-      -o custom-columns='DS:.metadata.name,DESIRED:.status.desiredNumberScheduled,READY:.status.numberReady,UPDATED:.status.updatedNumberScheduled'
-    kubectl -n kube-system get pods -l 'k8s-app in (cilium,cilium-envoy)' \
-      -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,READY:.status.containerStatuses[0].ready,START:.status.startTime'
-    aws elbv2 describe-target-health --region eu-west-1 \
-      --target-group-arn "$SAMPLE_GW_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
-    aws elbv2 describe-target-health --region eu-west-1 \
-      --target-group-arn "$SAMPLE_API_TG" --query 'TargetHealthDescriptions[*].[Target.Id,TargetHealth.State]' --output text
-    sleep 5
-  done
-) > /tmp/4a-v3/sampler.log 2>&1 &
-echo "$!" >> /tmp/4a-v3/instrumentation.pids
-
-# En el testigo normal, GRPC_EVERY=5 significa una sonda gRPC cada ~10 s
-# (HTTP va cada 2 s). Una ventana de nodo dura minutos y eso detectaría una
-# caída sostenida, pero el 4a original empezó por gRPC y un fallo breve podría
-# caber entre dos muestras. Durante 4a se elimina esa ventana: 1 gRPC por CADA
-# ciclo HTTP durante los seis nodos.
-WITNESS_GRPC_EVERY=1 bash "$REPO_ROOT/scripts/witness-traffic.sh" start "4a-v3-drenaje"
-```
-
-El testigo se abre **antes de la fase 1** con etiqueta `4a-v3-drenaje` y **no
-se cierra hasta el final de los seis nodos**. La probation de §2.8 añade además
-30 ciclos explícitos que exigen HTTP y gRPC OK después de cada reintegración;
-el testigo continuo es una segunda red independiente, no su sustituto.
-
-## 5.b CIERRE FINAL — ejecutable, tras los seis nodos
+## 5. CIERRE FINAL — ejecutable, tras los seis nodos
 
 Nada de esto es opcional, y ninguna línea es prosa.
 
@@ -538,7 +539,11 @@ bash scripts/verify-gateway-controller.sh post-4a || { echo "✗ controlador mue
 #    observedGeneration desfasado, le falta parent o condición, o no está
 #    Accepted+ResolvedRefs. Y con CONTROL POSITIVO: una lista vacía satisface
 #    vacuamente "ninguna mala", así que se exige el conjunto esperado.
-kubectl get httproute,grpcroute -A -o json | jq -e '
+#    IDENTIDAD, no recuento: `length >= 2` lo satisfacen dos HTTPRoutes sanas,
+#    una ruta de otro namespace o un nombre equivocado. Se compara el CONJUNTO
+#    EXACTO de kind/namespace/name — así una ruta de más también es noticia.
+WANT_ROUTES='["GRPCRoute/logistics/routing","HTTPRoute/logistics/shipments-api"]'
+kubectl get httproute,grpcroute -A -o json | jq -e --argjson want "$WANT_ROUTES" '
   def bad:
     .metadata.generation as $g
     | ((.status.parents // []) | length) == 0
@@ -548,15 +553,16 @@ kubectl get httproute,grpcroute -A -o json | jq -e '
             or ((any(.conditions[]; .type=="Accepted"     and .status=="True")) | not)
             or ((any(.conditions[]; .type=="ResolvedRefs" and .status=="True")) | not)
          ));
-  (.items | length) >= 2 and ([ .items[] | select(bad) ] | length) == 0
+  ([ .items[] | "\(.kind)/\(.metadata.namespace)/\(.metadata.name)" ] | sort) as $have
+  | ($have == ($want | sort)) and ([ .items[] | select(bad) ] | length) == 0
 ' >/dev/null || {
-  echo "✗ rutas no vigentes o conjunto incompleto — detalle:"
+  echo "✗ conjunto de rutas distinto del esperado, o no vigentes — detalle:"
   kubectl get httproute,grpcroute -A -o json | jq -r '.items[] |
     "   \(.kind) \(.metadata.name) gen=\(.metadata.generation) " +
     ([.status.parents[]?.conditions[]?|"\(.type)=\(.status)(obs:\(.observedGeneration))"]|join(" "))'
   exit 1
 }
-echo "  ✓ rutas: >=2 presentes, todas Accepted+ResolvedRefs con obs==gen"
+echo "  ✓ rutas: conjunto EXACTO esperado, Accepted+ResolvedRefs con obs==gen"
 
 # 6. Hubble responde
 kubectl -n kube-system get deploy hubble-relay -o jsonpath='{.status.readyReplicas}' | grep -q '^[1-9]' \
@@ -568,9 +574,21 @@ bash "$REPO_ROOT/scripts/witness-traffic.sh" stop
 # 8. INSTRUMENTACIÓN PARADA DE VERDAD. El bloque declara que nada es
 #    opcional; entonces el código FALLA, no advierte. Y LEFT cuenta TODOS los
 #    tipos —logs, events -w, muestreador—, no solo kubectl logs.
-while read -r P; do [ -n "$P" ] && kill "$P" 2>/dev/null; done < /tmp/4a-v3/instrumentation.pids
+#    OJO con `set -euo pipefail`: `kill` a un proceso YA MUERTO devuelve 1 y
+#    aborta el bloque. Y morir es lo normal aquí — las capturas PRE terminan
+#    solas cuando sus pods desaparecen. El bloque que demuestra que la
+#    instrumentación paró no puede reventar precisamente porque paró bien.
+while read -r P; do
+  [ -n "$P" ] || continue
+  kill "$P" 2>/dev/null || true          # TERM a todos, tolerando los ya muertos
+done < /tmp/4a-v3/instrumentation.pids
 sleep 3
-while read -r P; do [ -n "$P" ] && kill -9 "$P" 2>/dev/null; done < /tmp/4a-v3/instrumentation.pids
+while read -r P; do
+  [ -n "$P" ] || continue
+  kill -0 "$P" 2>/dev/null || continue   # KILL SOLO a los supervivientes
+  kill -9 "$P" 2>/dev/null || true
+done < /tmp/4a-v3/instrumentation.pids
+wait 2>/dev/null || true
 sleep 2
 count_instrumentation() {
   { pgrep -f 'kubectl -n kube-system logs' || true
