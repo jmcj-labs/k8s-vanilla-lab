@@ -63,6 +63,8 @@ test: ## Run the script test suites that need no cluster and no AWS
 	@echo ""
 	@bash scripts/test-gateway-canary-logic.sh
 	@echo ""
+	@bash scripts/test-4b-flow.sh
+	@echo ""
 	@bash scripts/test-crd-diff-gate.sh
 	@echo ""
 	@bash scripts/test-cilium-schema-gate.sh

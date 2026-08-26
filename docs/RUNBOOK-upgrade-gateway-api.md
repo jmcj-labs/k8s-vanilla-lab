@@ -1,7 +1,7 @@
 # RUNBOOK — 4b: Gateway API CRDs v1.2.1 → v1.6.1 (escalonado, canal híbrido)
 
 **Pieza**: S2-4, **PRIMER** movimiento (reordenado 2026-08-23) · **ADR**: [ADR-008](decisions/ADR-008-upgrade-path.md)
-**Estado**: ESQUELETO — se completa al ejecutarlo.
+**Estado**: EJECUTADO 2026-08-24 y reejecutable — ver §EJECUTADO.
 **Corre sobre Cilium 1.19.6**, NO sobre 1.20.1.
 
 > **Por qué este movimiento va primero ahora.** 4a se ejecutó el 23-ago y
@@ -15,20 +15,122 @@
 > e INCIDENTS #17 (8ª cara).
 
 > Las CRDs las instalamos **nosotros** (`bootstrap/control-plane.yaml`, release
-> oficial de kubernetes-sigs), no Cilium. El escalón se aplica con `kubectl
-> apply` del `standard-install.yaml` de cada versión.
+> oficial de kubernetes-sigs), no Cilium. El escalón NO es siempre el mismo comando: desde **v1.5.1** el bundle
+> estándar sirve TLSRoute solo en `v1` y hay que aplicar los CRDs
+> individuales excluyendo TLSRoute. Comandos literales en §Ejecución.
 
-## ORDEN DE LA VENTANA: el testigo se abre ANTES del primer `kubectl apply`
 
-El hueco potencial empieza con **el primer cambio de esquema**, no después de
-él. Un testigo abierto tras aplicar la primera CRD no puede afirmar nada
-sobre el intervalo en que esa CRD entró.
+> ## ⚠ NO SE PEGA NADA DE ESTE DOCUMENTO EN UNA TERMINAL
+>
+> La ceremonia es `scripts/run-4b-rung.sh`. Todo lo que aparece abajo en
+> bloques es **referencia**: variables como `$REPO_ROOT` o
+> `$WITNESS_STATE_DIR` se definen **dentro del script**, en un proceso hijo,
+> y **no existen en el shell del operador**. Pegar un bloque produce fallos
+> que parecen del cluster y son del método.
+>
+> **El único recorrido válido, en este orden y sin saltos:**
+>
+> ```bash
+> bash scripts/run-4b-rung.sh prepare    # none → prepared: app viva + testigo
+> bash scripts/run-4b-rung.sh gate       # prepared → initial: ¿arranco donde debo?
+> bash scripts/run-4b-rung.sh v1.3.0
+> bash scripts/run-4b-rung.sh v1.4.1
+> bash scripts/run-4b-rung.sh v1.5.1
+> bash scripts/run-4b-rung.sh v1.6.1
+> bash scripts/run-4b-rung.sh final      # SCHEMA READY FOR 4a + veredicto
+> ```
+>
+> `prepare` va **antes** que `gate`: el gate exige rutas vivas y testigo
+> midiendo, que es justo lo que `prepare` crea. `status` muestra dónde estás.
+> La máquina de estados rechaza cualquier otro orden **antes de tocar nada**.
+
+## FASE 0 — la app viva y el testigo midiendo, ANTES de tocar una sola CRD
+
+El pre-escalón de `spec.infrastructure` consulta el Gateway **vivo**, y el
+testigo **no puede sondear un cluster sin rutas**: abierto contra un cluster
+recién creado su `once` falla con 404 o —peor— parece medir algo.
+
+**Es un subcomando, no un bloque para pegar:**
 
 ```bash
-bash scripts/witness-traffic.sh start "4b-gwapi-crds"
-bash scripts/witness-traffic.sh status   # enviadas subiendo, latido reciente
-# ↑ y SOLO ENTONCES el primer kubectl apply de la escalera
+bash scripts/run-4b-rung.sh prepare
 ```
+
+Despliega Repo 2 esperándolo de forma síncrona (correlacionando el run por
+hora de despacho, exigiendo exactamente uno), verifica sus rutas por
+identidad, exige el `traffic-generator` Ready, crea un `CORONATION` por el
+Gateway comprobando **los dos eventos** del pipeline, y abre el testigo **una
+sola vez** esperando de forma ejecutable a que crezca y lata.
+
+
+## GATE DE ESTADO DE PARTIDA — ¿arranco donde debo?
+
+Un operador que sigue este runbook necesita saber que el cluster está donde
+el runbook supone. **Sin esto, ejecutarlo sobre un estado equivocado produce
+fallos que parecen del runbook y no lo son.**
+
+```text
+# 1. Los AGENTES realmente Ready en 1.19.6 — la imagen de la plantilla no
+#    dice que nadie esté corriendo. Doce pods, todos en versión y listos.
+AG=$(kubectl -n kube-system get pods -l k8s-app=cilium \
+     -o jsonpath='{range .items[*]}{.spec.containers[0].image}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}' \
+     | grep -c 'v1\.19\.6.*true')
+OPR=$(kubectl -n kube-system get deploy cilium-operator -o jsonpath='{.status.readyReplicas}')
+echo "  control: esperaba 6 agentes 1.19.6 Ready y operador con réplicas; encontré $AG y ${OPR:-0}"
+[ "$AG" -eq 6 ] && [ "${OPR:-0}" -ge 1 ] || { echo "✗ Cilium 1.19.6 no está sano → PARAR"; exit 1; }
+
+# 2. CONJUNTO EXACTO de las 5 CRDs de v1.2.1, todas con bundle v1.2.1. Mirar
+#    solo `gateways` dejaría pasar un cluster a medio escalar.
+kubectl get crd -o json | jq -e '
+  [ .items[] | select(.spec.group=="gateway.networking.k8s.io")
+    | {n: .metadata.name, b: .metadata.annotations["gateway.networking.k8s.io/bundle-version"]} ] as $c
+  | ([$c[].n] | sort) == ["gatewayclasses.gateway.networking.k8s.io","gateways.gateway.networking.k8s.io","grpcroutes.gateway.networking.k8s.io","httproutes.gateway.networking.k8s.io","referencegrants.gateway.networking.k8s.io"]
+    and all($c[]; .b == "v1.2.1")
+' >/dev/null || { echo "✗ el punto de partida NO es exactamente v1.2.1 → PARAR"; exit 1; }
+
+# 3. El operador sin el error conocido, Y reconciliando de verdad
+E=$(kubectl -n kube-system logs deploy/cilium-operator --tail=-1 \
+    | grep -c "Required GatewayAPI resources are not found" || true)
+echo "  control: esperaba 0 errores de CRD requeridas, encontré $E"
+[ "$E" -eq 0 ] || { echo "✗ PARAR"; exit 1; }
+bash "$REPO_ROOT/scripts/verify-gateway-controller.sh" estado-inicial \
+  || { echo "✗ el controlador no reconcilia ANTES de empezar → PARAR"; exit 1; }
+
+# 4. Rutas por IDENTIDAD exacta y vigentes (no un recuento de 2)
+kubectl get httproute,grpcroute -A -o json | jq -e '
+  def bad: .metadata.generation as $g
+    | ((.status.parents // [])|length)==0
+      or (any(.status.parents[]; any(.conditions[]?; (.observedGeneration // -1) != $g)
+            or ((any(.conditions[]?; .type=="Accepted" and .status=="True"))|not)
+            or ((any(.conditions[]?; .type=="ResolvedRefs" and .status=="True"))|not)));
+  ([ .items[] | "\(.kind)/\(.metadata.namespace)/\(.metadata.name)" ]|sort)
+    == ["GRPCRoute/logistics/routing","HTTPRoute/logistics/shipments-api"]
+  and ([ .items[]|select(bad) ]|length)==0
+' >/dev/null || { echo "✗ rutas ausentes o no vigentes → hacer FASE 0"; exit 1; }
+
+# 5. Testigo con serie CRECIENDO y CERO fallos (no basta con que exista)
+S="${WITNESS_STATE_DIR}/series"
+N1=$(awk '$3!="event"{n++} END{print n+0}' "$S"); sleep 6
+N2=$(awk '$3!="event"{n++} END{print n+0}' "$S")
+F=$(awk '$3!="event" && $4!="ok"{n++} END{print n+0}' "$S")
+echo "  control: sondas $N1 → $N2 (debe crecer), fallos=$F (debe ser 0)"
+[ "$N2" -gt "$N1" ] && [ "$F" -eq 0 ] || { echo "✗ el testigo no mide limpio → PARAR"; exit 1; }
+```
+
+> **NOTA DE ESTADO (25-ago)**: `bootstrap/control-plane.yaml` pinea v1.2.1, así
+> que **cada encarnación nueva del cluster necesita esta escalera otra vez**.
+> 4b es un ESTADO del cluster, no un hito alcanzado una vez. El bootstrap pinea v1.2.1: ver la nota de DEUDA más abajo.
+
+## ORDEN DE LA VENTANA (referencia — NO ejecutar aquí)
+
+El testigo se abre **una sola vez**, en la Fase 0, y sigue abierto durante
+toda la escalera: no se cierra entre escalones, porque el hueco puede caer
+justo en la transición. El `stop` va en `run-4b-rung.sh final`.
+
+> Una versión anterior repetía aquí un `witness-traffic.sh start`. Con
+> `set -e` eso **aborta la ceremonia** por ventana ya abierta, antes del
+> primer escalón. La apertura vive solo en la Fase 0.
+
 
 ## PRE-ESCALÓN v1.2 → v1.3: `spec.infrastructure` contra el Gateway VIVO
 
@@ -37,7 +139,7 @@ la auditoría dijo que no lo usamos — **pero eso se comprobó en el
 manifiesto**. El controlador puede haberlo materializado en runtime con
 defaults. Antes de subir la CRD, preguntarle al objeto vivo:
 
-```bash
+```text
 kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
 #   → vacío  = confirmado, el salto no nos afecta por ese motivo
 #   → algo   = PARAR. El campo existe en runtime y cambia de forma: revisar
@@ -46,13 +148,15 @@ kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
 
 Verificar el manifiesto y verificar el objeto vivo no son la misma pregunta.
 
-## EL GATE DURO 6a/6b (obligatorio desde el escalón v1.5.1)
+## EL GATE DURO 6a/6b (obligatorio en CADA escalón)
 
 Desde v1.5.1 el bundle estándar sirve TLSRoute **solo en `v1`**, tirando el
 `v1alpha2` que vigila Cilium 1.19.6. El overlay lo preserva — y estas dos
-comprobaciones, deliberadamente redundantes, verifican que lo hizo:
+comprobaciones, deliberadamente redundantes, verifican que lo hizo. **Corren
+en los CUATRO escalones**, dentro de `close_rung`: tenerlas solo desde v1.5.1
+dejaba a v1.3.0 y v1.4.1 cerrar sin demostrarlo (falso pase corregido).
 
-```bash
+```text
 # 6a — el ESQUEMA: v1alpha2 realmente SERVIDA.
 #   NO usar jsonpath '[?(@.served)]': ese predicado filtra por que el CAMPO
 #   EXISTA, no por su valor, y devuelve versiones con served=false (probado
@@ -88,7 +192,7 @@ dos son la 8ª cara de INCIDENTS #17 aplicada a su propia verificación:
 
 La prueba es **positiva y activa**: hacerle reconciliar algo que no existía.
 
-```bash
+```text
 bash scripts/verify-gateway-controller.sh v1.3     # el escalón que acabas de dar
 ```
 
@@ -102,7 +206,7 @@ es **fallo**, no pase.
 
 Y por encima de todo, tras cada escalón:
 
-```bash
+```text
 bash scripts/witness-traffic.sh status   # enviadas == exitosas, latido vivo
 ```
 
@@ -135,7 +239,7 @@ por el cambio de forma de `Gateway.spec.infrastructure`. **Nosotros no
 usamos ese campo** (verificado en el manifiesto; reverificar en vivo). El
 escalonado se mantiene por prudencia general, no por ese riesgo concreto.
 
-## Qué cambia en lo que SÍ usamos (v1.6.0)
+## Qué cambia en lo que SÍ usamos (v1.6.1)
 
 - **HTTPRoute**: `retry.codes` debe ser único y `retry.attempts >= 1`;
   prohibidos filtros CORS repetidos del mismo tipo. Son **validaciones más
@@ -153,14 +257,14 @@ sostiene la puerta de entrada eso es una transferencia de propiedad a ciegas.
 
 **Siempre `diff` primero:**
 
-```bash
+```text
 kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiesto>
 ```
 
 - **Sin conflicto** → `apply` con las mismas banderas. Para CRDs nuevas no
   debe haber conflicto en absoluto.
 - **Con conflicto** → **PARAR**. Identificar campo y gestor:
-  ```bash
+  ```text
   kubectl get crd <nombre> -o json | jq '.metadata.managedFields[] | {manager, operation, fields: .fieldsV1 | keys}'
   ```
   Decidir la transferencia **deliberadamente** y solo entonces usar
@@ -170,38 +274,41 @@ kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiest
   de v1.3.0: el mismo conflicto de anotaciones y el mismo manager se verificó
   en sus cinco CRDs antes de autorizar el conjunto completo (evidencia abajo).
 
-## Ejecución, por escalón
+## Ejecución
 
-El testigo se abrió **una vez, antes del primer escalón** (§ORDEN DE LA
-VENTANA) y sigue abierto durante toda la escalera: no se cierra entre
-escalones, porque el hueco puede caer justo en la transición.
+**El recorrido está arriba, en el aviso de cabecera, y es el único.** Aquí
+solo el porqué de la forma.
 
-```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.X.Y/standard-install.yaml
-```
+**Por qué un script y no bloques**: los gates son funciones, así que pegar
+bloques exigiría que todo cayera en **una sola sesión de shell** — y "usa una
+sola sesión" es prosa, que no ejecuta. Un pegado en terminal nueva perdería
+todos los gates **en silencio**.
 
-## Verificación tras CADA escalón (no solo al final)
+**Por qué un subcomando por escalón y no un script que corra la escalera
+entera**: la parada humana entre escalones —mirar el testigo, decidir— es el
+corazón del diseño.
 
-La prueba de que el controlador trabaja está en §LA VERIFICACIÓN TRAS CADA
-ESCALÓN y es la que manda. Estas son complementarias, y **ninguna la
-sustituye**:
+**Qué hace cada invocación, y por qué no se puede saltar ninguna:**
 
-1. **`bash scripts/verify-gateway-controller.sh v1.X`** — el canary activo.
-   Si falla, se para aquí; lo demás de esta lista es ruido si el controlador
-   no está reconciliando.
-2. Rutas de Repo 2: HTTPRoute y GRPCRoute con `Accepted` y `ResolvedRefs`
-   — **y con `observedGeneration` al día**, no solo la condición.
-3. `kubectl get crd gateways.gateway.networking.k8s.io -o jsonpath='{.spec.versions[*].name}'`
-   — versión servida, para confirmar que el escalón entró de verdad.
-4. Si el Gateway materializara `spec.infrastructure`, comprobar la migración
-   al esquema nuevo (ver §PRE-ESCALÓN v1.2 → v1.3).
-5. `bash scripts/witness-traffic.sh status` → **`enviadas == exitosas`** y
-   latido vivo. El `stop` va **al terminar la escalera**, no por escalón.
+- **Exige el stage anterior EXACTO** y, además, **contrasta el esquema VIVO**:
+  el conjunto completo de CRDs y su `bundle-version`. El fichero de stage dice
+  lo que creemos; las CRDs dicen lo que hay. Si alguien tocó el esquema fuera
+  del script, se detecta antes de aplicar nada.
+- Hace su **backup con marca de tiempo** (nunca sobrescribe evidencia), sus
+  diffs, sus applies y el reinicio del operador.
+- **Cierra con los cinco gates**: `gate_6ab` (v1alpha2 servida + el operador
+  confirmándolo), el **canary** de dos generaciones, las **rutas por identidad
+  exacta**, y el **testigo**.
+- **Avanza el stage atómicamente solo si todo pasó.**
 
-> `shared-gw` con `Accepted/Programmed=True` **NO está en esta lista a
-> propósito**. Es el campo que mintió en 4a; leerlo aquí reintroduciría el
-> fallo que este runbook existe para evitar. Si quieres mirarlo, míralo
-> **después** del canary y como información, nunca como criterio.
+**El testigo se exige vivo, no solo limpio**: la serie debe **haber crecido**
+desde el cierre anterior, el latido ser fresco, y `sent == successful`. Sin lo
+primero, un testigo muerto dejaría la serie congelada y **pasaría todos los
+cierres** — el mismo fallo que cazamos dentro del propio testigo, ahora
+propagado a quien lo consulta. Y la ventana debe ser **la misma** que abrió
+`prepare`: si alguien la cerró y abrió otra, el intervalo entre ambas no lo
+vio nadie.
+
 
 ## Rollback
 
