@@ -133,7 +133,7 @@ check "repetir un escalón ya cerrado"       RECHAZA v1.4.1 v1.3.0 v1.4.1 "$FIVE
 check "gate con esquema ya escalado"        RECHAZA v1.4.1 gate   v1.4.1 "$FIVE tlsroutes"
 
 echo ""
-echo "=== CADA escalón ejecuta UN cierre completo (5 gates, 1 rollout) ==="
+echo "=== cada escalón atraviesa applies + esquema post + 6a/6b y alcanza el canary (1 rollout) ==="
 # Ejecución REAL de los subcomandos. El bucle anterior declaraba `for R` y no
 # usaba R: era inspección estática disfrazada de recorrido.
 for R in v1.3.0 v1.4.1 v1.5.1 v1.6.1; do
@@ -172,7 +172,7 @@ for R in v1.3.0 v1.4.1 v1.5.1 v1.6.1; do
 done
 
 echo ""
-echo "=== un fallo en cualquier gate NO avanza el stage ==="
+echo "=== fallo en gate_6ab: rc!=0 y stage sin avanzar ==="
 # SOLO gate_6ab. La inyección de gate_routes se RETIRA, no se parchea: su
 # patrón "get httproute" coincidía antes con backup_state y con el canary, así
 # que disparaba temprano y REACHED>=1 solo probaba que el substring apareció,
@@ -237,10 +237,12 @@ cat <<'NOTA'
   canary exige un controlador reconciliando y fingirlo sería fingir semántica.
 
   ESTO PRUEBA: orquestación. Que cada escalón exige su predecesor exacto,
-  contrasta el esquema VIVO antes y después, hace UN solo rollout del
-  operador, cierra con los CINCO gates en orden, y NO avanza el stage cuando
-  cualquiera de ellos falla — demostrando además que el escalón ALCANZÓ el
-  gate inyectado, no que abortase antes.
+  atraviesa applies + esquema post + gate_6ab, hace UN solo rollout y alcanza
+  el canary. La inyección demuestra rc!=0 y stage intacto cuando gate_6ab
+  falla, y que el escalón ALCANZÓ ese gate en vez de abortar antes.
+
+  EL CÓDIGO —no el stub— coloca los CINCO gates en orden antes de stage_set.
+  Canary, rutas y testigo se validan en el CLUSTER REAL.
 
   ESTO NO PRUEBA: la semántica de los gates. Que gate_6ab sepa leer v1alpha2,
   que el canary detecte un controlador muerto, que gate_routes distinga una
