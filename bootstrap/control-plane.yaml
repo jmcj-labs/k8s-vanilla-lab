@@ -158,24 +158,41 @@ INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $(curl -s -X PUT \
   http://169.254.169.254/latest/meta-data/instance-id)
 [ -n "$${INSTANCE_ID}" ] || { log "✗ ERROR: could not read own instance-id from IMDSv2"; exit 1; }
 
-TG_ELAPSED=0
-until aws elbv2 describe-target-health \
+# DEADLINE DE RELOJ REAL, no una suma de sleeps. Acumular `sleep 15` mide
+# lo que dormimos, NO lo que tardó la iteración: si la CLI de AWS se cuelga
+# (timeout de conexión, de lectura, reintentos), cada vuelta puede durar
+# mucho más de 15s y el "límite de 600s" no existiría. Contar sleeps no es
+# medir tiempo, igual que registrado no es enrutado.
+TG_START=$(date +%s)
+TG_LAST_LOG=0
+until timeout 15 aws elbv2 describe-target-health \
         --target-group-arn "${api_target_group_arn}" \
         --region ${aws_region} \
+        --cli-connect-timeout 5 --cli-read-timeout 10 \
         --query 'TargetHealthDescriptions[].Target.Id' \
         --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$${INSTANCE_ID}"; do
-  if [ $${TG_ELAPSED} -ge 600 ]; then
-    log "✗ ERROR: $${INSTANCE_ID} not registered in the API target group after 600s"
+  TG_NOW=$(( $(date +%s) - TG_START ))
+  if [ $${TG_NOW} -ge 600 ]; then
+    log "✗ ERROR: $${INSTANCE_ID} not registered in the API target group after $${TG_NOW}s"
+    log "  diagnóstico (tolerado, solo informativo):"
+    timeout 15 aws elbv2 describe-target-health \
+      --target-group-arn "${api_target_group_arn}" --region ${aws_region} \
+      --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason]' \
+      --output text 2>&1 | sed 's/^/    /' | tee -a /var/log/k8s-cp-bootstrap.log || true
     log "  the API endpoint would black-hole this node — refusing to run kubeadm init"
     exit 1
   fi
-  if [ $((TG_ELAPSED % 120)) -eq 0 ] && [ $${TG_ELAPSED} -gt 0 ]; then
-    log "Waiting for target-group registration... ($${TG_ELAPSED}s)"
+  if [ $(( TG_NOW - TG_LAST_LOG )) -ge 120 ]; then
+    log "Waiting for target-group registration... ($${TG_NOW}s)"
+    TG_LAST_LOG=$${TG_NOW}
   fi
   sleep 15
-  TG_ELAPSED=$((TG_ELAPSED + 15))
 done
-log "✓ Registered in the API target group ($${INSTANCE_ID}) — the endpoint routes here"
+# LO QUE EL REGISTRO GARANTIZA, Y NADA MÁS. Este gate NO prueba que el NLB
+# enrute: para eso hace falta HEALTHY, y healthy es imposible antes de que
+# exista el API. Decir "the endpoint routes here" aquí era precisamente la
+# afirmación falsa que costó el Apply del 26-ago.
+log "✓ Registered in the API target group ($${INSTANCE_ID}) — kubeadm init is authorised"
 
 cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
 apiVersion: kubeadm.k8s.io/v1beta4
@@ -306,23 +323,34 @@ fi
 # v1.6.1 (el canal híbrido de 4b) en vez de en v1.2.1. Este fallo demostró
 # que el paso es frágil, así que esa deuda subió de prioridad — pero va en su
 # propio PR: una variable por vez.
-TGH_ELAPSED=0
-until aws elbv2 describe-target-health \
+# Mismo reloj real que el gate de registro: el deadline se mide con date, no
+# sumando sleeps, y cada llamada a la CLI lleva su propio timeout para que
+# una AWS colgada no cuelgue el gate que promete no colgarse.
+TGH_START=$(date +%s)
+TGH_LAST_LOG=0
+until timeout 15 aws elbv2 describe-target-health \
         --target-group-arn "${api_target_group_arn}" \
         --region ${aws_region} \
+        --cli-connect-timeout 5 --cli-read-timeout 10 \
         --query "TargetHealthDescriptions[?Target.Id=='$${INSTANCE_ID}'].TargetHealth.State" \
         --output text 2>/dev/null | grep -qx "healthy"; do
-  if [ $${TGH_ELAPSED} -ge 300 ]; then
-    log "✗ ERROR: $${INSTANCE_ID} never became healthy in the API target group after 300s"
+  TGH_NOW=$(( $(date +%s) - TGH_START ))
+  if [ $${TGH_NOW} -ge 300 ]; then
+    log "✗ ERROR: $${INSTANCE_ID} never became healthy in the API target group after $${TGH_NOW}s"
+    log "  diagnóstico (tolerado, solo informativo):"
+    timeout 15 aws elbv2 describe-target-health \
+      --target-group-arn "${api_target_group_arn}" --region ${aws_region} \
+      --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason]' \
+      --output text 2>&1 | sed 's/^/    /' | tee -a /var/log/k8s-cp-bootstrap.log || true
     log "  the NLB does not route to this node, so applying CRDs through the endpoint"
     log "  would fail — refusing to continue with a half-built control plane"
     exit 1
   fi
-  if [ $((TGH_ELAPSED % 60)) -eq 0 ] && [ $${TGH_ELAPSED} -gt 0 ]; then
-    log "Waiting for the API target to become healthy... ($${TGH_ELAPSED}s)"
+  if [ $(( TGH_NOW - TGH_LAST_LOG )) -ge 60 ]; then
+    log "Waiting for the API target to become healthy... ($${TGH_NOW}s)"
+    TGH_LAST_LOG=$${TGH_NOW}
   fi
   sleep 10
-  TGH_ELAPSED=$((TGH_ELAPSED + 10))
 done
 log "✓ API target healthy ($${INSTANCE_ID}) — the NLB routes here, the endpoint is usable"
 
