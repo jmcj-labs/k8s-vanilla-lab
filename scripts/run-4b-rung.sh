@@ -27,6 +27,7 @@ AWS_REGION="${AWS_REGION:-eu-west-1}"
 # distinto a mitad de ceremonia. La ceremonia decide contra qué habla.
 export AWS_PROFILE="${AWS_PROFILE_OVERRIDE:-k8s-vanilla-lab}"
 export KUBECONFIG="${KUBECONFIG_OVERRIDE:-$HOME/.kube/${CLUSTER_NAME}.conf}"
+export CLUSTER_NAME AWS_REGION
 [ -r "$KUBECONFIG" ] || { echo "✗ no puedo leer KUBECONFIG=$KUBECONFIG (make kubeconfig)" >&2; exit 1; }
 
 WITNESS_STATE_DIR="${WITNESS_STATE_DIR:-/tmp/witness-${CLUSTER_NAME}}"
@@ -125,14 +126,16 @@ gate_witness() {
   [ -s "$S" ] || FAIL "[$tag] serie del testigo ausente o vacía"
   # LA MISMA ventana que abrió prepare, no otra: si alguien la cerró y abrió
   # otra, la serie empieza de cero y el intervalo entre ambas no lo vio nadie.
-  if [ -f "$STATE_DIR/witness-id" ]; then
-    local NOW_ID SAVED_ID
-    NOW_ID="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/started" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)"
-    SAVED_ID="$(cat "$STATE_DIR/witness-id")"
-    [ "$NOW_ID" = "$SAVED_ID" ] || FAIL "[$tag] la ventana del testigo NO es la de esta ceremonia
+  # OBLIGATORIO, no opcional: sin el fichero la comprobación se saltaba en
+  # silencio durante toda la escalera, que es la forma exacta del falso pase.
+  local NOW_ID SAVED_ID
+  [ -s "$STATE_DIR/witness-id" ] \
+    || FAIL "[$tag] no hay witness-id: esta ceremonia no pasó por 'prepare'"
+  NOW_ID="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/started" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)"
+  SAVED_ID="$(cat "$STATE_DIR/witness-id")"
+  [ "$NOW_ID" = "$SAVED_ID" ] || FAIL "[$tag] la ventana del testigo NO es la de esta ceremonia
   registrada: $SAVED_ID
   actual:     $NOW_ID"
-  fi
   [ -f "$STATE_DIR/last_sent" ] && LAST=$(cat "$STATE_DIR/last_sent")
   SENT=$(awk '$3!="event"{n++} END{print n+0}' "$S")
   OK_N=$(awk '$3!="event" && $4=="ok"{n++} END{print n+0}' "$S")
@@ -186,8 +189,15 @@ gate_6ab() {
   # A FICHERO ANTES DE GREP: `kubectl logs | grep -q` cierra la tubería al
   # primer match, kubectl muere de SIGPIPE y bajo `pipefail` eso sería un
   # falso fallo por haber encontrado justo lo que se buscaba.
-  local LOGF; LOGF="$(mktemp)"
-  kubectl -n kube-system logs -l io.cilium/app=operator --tail=-1 --prefix > "$LOGF" 2>/dev/null || true
+  # rc=0 EXIGIDO: una salida parcial o un error de API leídos como "sin
+  # errores" harían pasar el gate por no haber podido mirar. stderr se
+  # conserva y se enseña antes de fallar.
+  local LOGF ERRF; LOGF="$(mktemp)"; ERRF="$(mktemp)"
+  if ! kubectl -n kube-system logs -l io.cilium/app=operator --tail=-1 --prefix > "$LOGF" 2>"$ERRF"; then
+    echo "  [$1] stderr de kubectl logs:" >&2; sed 's/^/    /' "$ERRF" >&2
+    rm -f "$LOGF" "$ERRF"; FAIL "[$1] no pude LEER los logs del operador"
+  fi
+  rm -f "$ERRF"
   grep -q "TLSRoute support is enabled" "$LOGF" \
     || { rm -f "$LOGF"; FAIL "[$1] el operador NO habilita TLSRoute → ROLLBACK"; }
   E=$(grep -c "Required GatewayAPI resources are not found" "$LOGF" || true)
@@ -222,8 +232,16 @@ backup_state() {
 # gate_6ab va DENTRO del cierre: el gate aprobado es de CADA escalón, y
 # tenerlo solo en v1.5.1/v1.6.1 dejaba a v1.3.0 y v1.4.1 cerrar sin demostrar
 # que TLSRoute sirve v1alpha2 ni que Cilium lo habilitó. Falso pase.
-close_rung() {
-  gate_6ab "$1"; gate_controller "$1"; gate_routes "$1"; gate_witness "$1"
+# UN cierre por escalón, con los CINCO gates en orden. gate_6ab reinicia el
+# operador por dentro, así que ese ES el único rollout del escalón: llamar
+# también a restart_operator antes, o gate_6ab suelto además del de aquí,
+# reiniciaba dos veces y ensuciaba los logs que el propio gate lee después.
+close_rung() {   # $1 = etiqueta/esquema esperado tras aplicar
+  assert_live_schema "$1" "$1-post"
+  gate_6ab "$1"
+  gate_controller "$1"
+  gate_routes "$1"
+  gate_witness "$1"
   echo "══ escalón $1 CERRADO ══"
 }
 
@@ -351,62 +369,50 @@ apply_individual() {   # $1 = versión (v1.5.1 | v1.6.1)
   kubectl apply --server-side --field-manager=$FM -f "$(overlay "$V")"   # el overlay, EL ÚLTIMO
 }
 
-restart_operator() {
-  kubectl -n kube-system rollout restart deploy/cilium-operator >/dev/null
-  kubectl -n kube-system rollout status deploy/cilium-operator --timeout=120s >/dev/null
-}
-
 case "$MODE" in
   prepare)
-          # stage=none OBLIGATORIO: re-ejecutar prepare con la escalera en
-          # marcha haría `witness start` sobre una ventana viva, truncando la
-          # serie — y el intervalo ciego desaparecería sin dejar rastro.
-          [ "$(stage_get)" = "none" ] \
-            || FAIL "prepare exige stage='none' y el actual es '$(stage_get)'.
-  Si el testigo murió, NO relances prepare: la serie se truncaría y el hueco
-  se perdería. Cierra la ceremonia y empieza de nuevo a conciencia."
+          # none → prepared. Un segundo prepare se rechaza POR ESTADO, no por
+          # suerte: antes exigía none y no lo cambiaba, así que dos ejecuciones
+          # veían none las dos y la segunda truncaba la serie del testigo.
+          require_stage none prepare
           log "=== FASE 0 — la app viva y el testigo midiendo ==="
-          # Los overrides del script principal MANDAN: sin esto, prepare
-          # podría hablar con el cluster B mientras los applies van al A.
-          AWS_PROFILE_OVERRIDE="$AWS_PROFILE" KUBECONFIG_OVERRIDE="$KUBECONFIG" \
-          AWS_PROFILE="$AWS_PROFILE" KUBECONFIG="$KUBECONFIG" \
-          WITNESS_STATE_DIR="$WITNESS_STATE_DIR" \
-            bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
-          # La ventana queda ATADA a la ceremonia: etiqueta, inicio y endpoint.
+          bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
+          # witness-id PRIMERO, validado, y solo entonces el stage avanza.
           printf '%s %s %s\n' \
-            "$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null)" \
-            "$(cat "$WITNESS_STATE_DIR/started" 2>/dev/null)" \
-            "$(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)" > "$STATE_DIR/witness-id"
-          OK "ventana del testigo registrada en la identidad de la ceremonia"
-          ;;
-  gate)   cmd_gate; stage_set initial ;;
+            "$(cat "$WITNESS_STATE_DIR/label")" \
+            "$(cat "$WITNESS_STATE_DIR/started")" \
+            "$(cat "$WITNESS_STATE_DIR/endpoint")" > "$STATE_DIR/witness-id"
+          [ -s "$STATE_DIR/witness-id" ] || FAIL "no pude registrar la ventana del testigo"
+          grep -q '[^[:space:]]' "$STATE_DIR/witness-id" \
+            || FAIL "witness-id vacío: la ventana no dejó label/started/endpoint"
+          OK "ventana registrada: $(cat "$STATE_DIR/witness-id")"
+          stage_set prepared ;;
+
+  gate)   require_stage prepared gate
+          cmd_gate; stage_set initial ;;
 
   v1.3.0) require_stage initial v1.3.0
           assert_live_schema initial v1.3.0-pre
           log "=== escalón v1.2.1 → v1.3.0 ==="
-          backup_state v1.3.0; apply_bundle_v130; restart_operator
-          assert_live_schema v1.3.0 v1.3.0-post
+          backup_state v1.3.0; apply_bundle_v130
           close_rung v1.3.0; stage_set v1.3.0 ;;
 
   v1.4.1) require_stage v1.3.0 v1.4.1
           assert_live_schema v1.3.0 v1.4.1-pre
           log "=== escalón v1.3.0 → v1.4.1 ==="
-          backup_state v1.4.1; apply_bundle_v141; restart_operator
-          assert_live_schema v1.4.1 v1.4.1-post
+          backup_state v1.4.1; apply_bundle_v141
           close_rung v1.4.1; stage_set v1.4.1 ;;
 
   v1.5.1) require_stage v1.4.1 v1.5.1
           assert_live_schema v1.4.1 v1.5.1-pre
           log "=== escalón v1.4.1 → v1.5.1 (6 individuales, TLSRoute excluido) ==="
           backup_state v1.5.1; apply_individual v1.5.1
-          gate_6ab v1.5.1; assert_live_schema v1.5.1 v1.5.1-post
           close_rung v1.5.1; stage_set v1.5.1 ;;
 
   v1.6.1) require_stage v1.5.1 v1.6.1
           assert_live_schema v1.5.1 v1.6.1-pre
           log "=== escalón v1.5.1 → v1.6.1 (6 individuales, TLSRoute excluido) ==="
           backup_state v1.6.1; apply_individual v1.6.1
-          gate_6ab v1.6.1; assert_live_schema v1.6.1 v1.6.1-post
           close_rung v1.6.1; stage_set v1.6.1 ;;
 
   final)  require_stage v1.6.1 final

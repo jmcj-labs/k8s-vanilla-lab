@@ -31,8 +31,8 @@
 > **El único recorrido válido, en este orden y sin saltos:**
 >
 > ```bash
-> bash scripts/run-4b-rung.sh prepare    # Fase 0: app viva + testigo midiendo
-> bash scripts/run-4b-rung.sh gate       # ¿arranco donde debo?
+> bash scripts/run-4b-rung.sh prepare    # none → prepared: app viva + testigo
+> bash scripts/run-4b-rung.sh gate       # prepared → initial: ¿arranco donde debo?
 > bash scripts/run-4b-rung.sh v1.3.0
 > bash scripts/run-4b-rung.sh v1.4.1
 > bash scripts/run-4b-rung.sh v1.5.1
@@ -69,7 +69,7 @@ Un operador que sigue este runbook necesita saber que el cluster está donde
 el runbook supone. **Sin esto, ejecutarlo sobre un estado equivocado produce
 fallos que parecen del runbook y no lo son.**
 
-```bash
+```text
 # 1. Los AGENTES realmente Ready en 1.19.6 — la imagen de la plantilla no
 #    dice que nadie esté corriendo. Doce pods, todos en versión y listos.
 AG=$(kubectl -n kube-system get pods -l k8s-app=cilium \
@@ -148,11 +148,13 @@ kubectl get gateway shared-gw -n infra -o jsonpath='{.spec.infrastructure}'
 
 Verificar el manifiesto y verificar el objeto vivo no son la misma pregunta.
 
-## EL GATE DURO 6a/6b (obligatorio desde el escalón v1.5.1)
+## EL GATE DURO 6a/6b (obligatorio en CADA escalón)
 
 Desde v1.5.1 el bundle estándar sirve TLSRoute **solo en `v1`**, tirando el
 `v1alpha2` que vigila Cilium 1.19.6. El overlay lo preserva — y estas dos
-comprobaciones, deliberadamente redundantes, verifican que lo hizo:
+comprobaciones, deliberadamente redundantes, verifican que lo hizo. **Corren
+en los CUATRO escalones**, dentro de `close_rung`: tenerlas solo desde v1.5.1
+dejaba a v1.3.0 y v1.4.1 cerrar sin demostrarlo (falso pase corregido).
 
 ```text
 # 6a — el ESQUEMA: v1alpha2 realmente SERVIDA.

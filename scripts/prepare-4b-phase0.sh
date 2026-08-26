@@ -6,10 +6,18 @@
 # o heredaría un AWS_PROFILE de otro cluster. Se invoca desde
 # `run-4b-rung.sh prepare`.
 set -euo pipefail
-export AWS_PROFILE=k8s-vanilla-lab
-export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
-export CLUSTER_NAME="${CLUSTER_NAME:-k8s-vanilla-lab}"
-export WITNESS_STATE_DIR="/tmp/witness-${CLUSTER_NAME}"
+
+# ── ESTE SCRIPT NO FIJA NADA: HEREDA Y EXIGE ────────────────────────────────
+# Antes hacía `export AWS_PROFILE=k8s-vanilla-lab` en su segunda línea, así
+# que MACHACABA lo que el padre le pasaba. El resultado posible era el peor:
+# los applies de la escalera hablando con un cluster y el CORONATION y el
+# testigo con otro, sin que nada lo dijera. Ahora falla si falta algo.
+for V in AWS_PROFILE KUBECONFIG CLUSTER_NAME AWS_REGION WITNESS_STATE_DIR; do
+  eval "val=\${$V:-}"
+  [ -n "$val" ] || { echo "✗ $V no viene del padre — invoca 'run-4b-rung.sh prepare'" >&2; exit 1; }
+done
+echo "  heredado: profile=$AWS_PROFILE region=$AWS_REGION cluster=$CLUSTER_NAME"
+echo "  heredado: kubeconfig=$KUBECONFIG testigo=$WITNESS_STATE_DIR"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 
 # 0.1 grpcurl es prerrequisito DURO: sin él `once` devuelve "skip" en gRPC y
@@ -45,7 +53,7 @@ kubectl -n logistics wait --for=condition=Ready pod \
   || { echo "✗ traffic-generator no está Ready"; exit 1; }
 
 # 0.5 CADENA VIVA — CORONATION por el Gateway, literal, sin remitir a otro doc
-NLB=$(aws elbv2 describe-load-balancers --region eu-west-1 \
+NLB=$(aws elbv2 describe-load-balancers --region "$AWS_REGION" \
       --names "${CLUSTER_NAME}-gw-nlb" --query 'LoadBalancers[0].DNSName' --output text)
 PIN=$(kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' \
       | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
