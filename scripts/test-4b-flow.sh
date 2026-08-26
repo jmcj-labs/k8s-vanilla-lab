@@ -173,7 +173,14 @@ done
 
 echo ""
 echo "=== un fallo en cualquier gate NO avanza el stage ==="
-for INJ in "get crd tlsroutes:gate_6ab" "get httproute:gate_routes"; do
+# SOLO gate_6ab. La inyección de gate_routes se RETIRA, no se parchea: su
+# patrón "get httproute" coincidía antes con backup_state y con el canary, así
+# que disparaba temprano y REACHED>=1 solo probaba que el substring apareció,
+# no que se alcanzara gate_routes. Y el patrón inequívoco tampoco sirve: para
+# llegar a gate_routes hay que atravesar el canary, y hacerlo pasar
+# "mecánicamente" es exactamente fingir su semántica — el canary ES "el
+# controlador reconcilia". El arnés llega hasta el canary y ahí se detiene.
+for INJ in "get crd tlsroutes:gate_6ab"; do
   PAT="${INJ%%:*}"; NAME="${INJ##*:}"
   d=$(mktemp -d); mkdir -p "$d/state"
   printf 'uid-de-prueba https://api.prueba:6443\n' > "$d/state/identity"
@@ -186,15 +193,18 @@ for INJ in "get crd tlsroutes:gate_6ab" "get httproute:gate_routes"; do
   PATH="$d/bin:$PATH" LADDER_STATE_DIR="$d/state" FAIL_ON="$PAT" \
     KUBECONFIG_OVERRIDE="$d/kubeconfig" AWS_PROFILE_OVERRIDE=stub AWS_REGION=eu-west-1 \
     bash "$SRC" v1.3.0 >/dev/null 2>&1
+  IRC=$?
   set -e
   ST=$(cat "$d/state/stage")
   # No basta con que NO avance: hay que demostrar que el escalón LLEGÓ al gate
   # inyectado. Si abortase antes, el test pasaría sin haber probado ese gate.
   REACHED=$(grep -c "$PAT" "$d/kubectl.calls" 2>/dev/null || true)
-  if [ "$ST" = "initial" ] && [ "$REACHED" -ge 1 ]; then
-    echo "  ✓ fallo en $NAME: se alcanzó el gate y el stage sigue 'initial'"; PASS=$((PASS+1))
+  # rc≠0 EXIGIDO además: un escalón que fallara y aun así saliera 0 dejaría al
+  # operador creyendo que cerró.
+  if [ "$ST" = "initial" ] && [ "$REACHED" -ge 1 ] && [ "$IRC" -ne 0 ]; then
+    echo "  ✓ fallo en $NAME: rc=$IRC, gate alcanzado, stage sigue 'initial'"; PASS=$((PASS+1))
   else
-    echo "  ✗ fallo en $NAME: stage='$ST' alcanzado=$REACHED"; FAILED=$((FAILED+1))
+    echo "  ✗ fallo en $NAME: rc=$IRC stage='$ST' alcanzado=$REACHED"; FAILED=$((FAILED+1))
   fi
   rm -rf "$d"
 done
@@ -216,6 +226,12 @@ rm -rf "$d"
 echo ""
 echo "=== LÍMITE DECLARADO de este arnés ==="
 cat <<'NOTA'
+  ALCANCE: el arnés llega hasta el CANARY y se detiene ahí, en el camino
+  positivo y en las inyecciones. Por eso solo se inyecta en gate_6ab: los
+  gates posteriores (canary, rutas, testigo) quedan detrás de una puerta que
+  únicamente un controlador real abre. Su no-avance-al-fallar se prueba en el
+  cluster, no aquí.
+
   ALCANCE DEL CAMINO POSITIVO: llega hasta el canary y para ahí a propósito.
   Applies, esquema post y gate_6ab son mecánicos y se recorren de verdad; el
   canary exige un controlador reconciliando y fingirlo sería fingir semántica.
