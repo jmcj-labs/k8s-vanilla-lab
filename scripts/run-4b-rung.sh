@@ -82,13 +82,37 @@ require_stage() {   # $1 = stage exigido, $2 = etiqueta del escalón
   [ "$cur" = "$1" ] || FAIL "[$2] este escalón exige stage='$1' y el actual es '$cur'.
   La escalera NO se salta: ejecuta los escalones en orden."
 }
-# El bundle que DEBE quedar tras cada escalón, comprobado antes de avanzar.
-expect_bundle() {   # $1 = versión esperada, $2 = etiqueta
-  local B
-  B=$(kubectl get crd gateways.gateway.networking.k8s.io -o json \
-      | jq -r '.metadata.annotations["gateway.networking.k8s.io/bundle-version"] // ""')
-  echo "  [$2] bundle tras aplicar: $B (esperado $1)"
-  [ "$B" = "$1" ] || FAIL "[$2] el esquema resultante NO es $1"
+# EL ESQUEMA VIVO, no solo `gateways`. El stage en disco dice lo que creemos;
+# esto dice lo que HAY. Si alguien tocó las CRDs fuera del script con el UID y
+# el endpoint intactos, un stage v1.5.1 dejaría empezar v1.6.1 sobre un
+# esquema vivo v1.2.1 — el fichero mentiría y nadie lo contrastaría.
+crds_for() {   # conjunto esperado por stage
+  case "$1" in
+    initial|v1.2.1) echo "gatewayclasses gateways grpcroutes httproutes referencegrants" ;;
+    v1.3.0)         echo "gatewayclasses gateways grpcroutes httproutes referencegrants tlsroutes" ;;
+    v1.4.1|v1.5.1|v1.6.1)
+                    echo "backendtlspolicies gatewayclasses gateways grpcroutes httproutes referencegrants tlsroutes" ;;
+    *) echo "" ;;
+  esac
+}
+bundle_for() { case "$1" in initial) echo v1.2.1 ;; *) echo "$1" ;; esac; }
+
+assert_live_schema() {   # $1 = stage cuyo esquema se espera, $2 = etiqueta
+  local want_kinds want_bundle have_kinds bad
+  want_kinds="$(crds_for "$1")"; want_bundle="$(bundle_for "$1")"
+  [ -n "$want_kinds" ] || FAIL "[$2] no sé qué esquema esperar para '$1'"
+  have_kinds=$(kubectl get crd -o json \
+    | jq -r '[.items[] | select(.spec.group=="gateway.networking.k8s.io") | (.metadata.name|split(".")[0])] | sort | join(" ")')
+  echo "  [$2] CRDs vivas: ${have_kinds:-<ninguna>}"
+  echo "  [$2] esperadas : $want_kinds"
+  [ "$have_kinds" = "$want_kinds" ] \
+    || FAIL "[$2] el CONJUNTO de CRDs vivo no es el de '$1' — alguien tocó el esquema fuera del script"
+  bad=$(kubectl get crd -o json | jq -r --arg b "$want_bundle" \
+    '[.items[] | select(.spec.group=="gateway.networking.k8s.io")
+      | select((.metadata.annotations["gateway.networking.k8s.io/bundle-version"] // "") != $b)
+      | (.metadata.name|split(".")[0])] | join(" ")')
+  [ -z "$bad" ] || FAIL "[$2] estas CRDs no están en $want_bundle: $bad"
+  OK "[$2] esquema vivo = $1 ($want_bundle, $(echo $want_kinds | wc -w | tr -d ' ') CRDs)"
 }
 
 # ── EL TESTIGO NO PUEDE ESTAR MUERTO ────────────────────────────────────────
@@ -99,6 +123,16 @@ expect_bundle() {   # $1 = versión esperada, $2 = etiqueta
 gate_witness() {
   local tag="$1" S="${WITNESS_STATE_DIR}/series" LAST=0 SENT OK_N HB AGE TOL=32
   [ -s "$S" ] || FAIL "[$tag] serie del testigo ausente o vacía"
+  # LA MISMA ventana que abrió prepare, no otra: si alguien la cerró y abrió
+  # otra, la serie empieza de cero y el intervalo entre ambas no lo vio nadie.
+  if [ -f "$STATE_DIR/witness-id" ]; then
+    local NOW_ID SAVED_ID
+    NOW_ID="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/started" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)"
+    SAVED_ID="$(cat "$STATE_DIR/witness-id")"
+    [ "$NOW_ID" = "$SAVED_ID" ] || FAIL "[$tag] la ventana del testigo NO es la de esta ceremonia
+  registrada: $SAVED_ID
+  actual:     $NOW_ID"
+  fi
   [ -f "$STATE_DIR/last_sent" ] && LAST=$(cat "$STATE_DIR/last_sent")
   SENT=$(awk '$3!="event"{n++} END{print n+0}' "$S")
   OK_N=$(awk '$3!="event" && $4=="ok"{n++} END{print n+0}' "$S")
@@ -149,11 +183,15 @@ gate_6ab() {
   echo "$SERVED" | grep -qw v1alpha2 || FAIL "[$1] v1alpha2 PERDIDA → ROLLBACK"
   # El grep mira TODOS los pods del operador, no `deploy/` (que elige uno):
   # solo el líder emite el módulo gateway-api, y kubectl podría leer al otro.
-  kubectl -n kube-system logs -l io.cilium/app=operator --tail=-1 --prefix 2>/dev/null \
-    | grep -q "TLSRoute support is enabled" \
-    || FAIL "[$1] el operador NO habilita TLSRoute → ROLLBACK"
-  E=$(kubectl -n kube-system logs -l io.cilium/app=operator --tail=-1 2>/dev/null \
-      | grep -c "Required GatewayAPI resources are not found" || true)
+  # A FICHERO ANTES DE GREP: `kubectl logs | grep -q` cierra la tubería al
+  # primer match, kubectl muere de SIGPIPE y bajo `pipefail` eso sería un
+  # falso fallo por haber encontrado justo lo que se buscaba.
+  local LOGF; LOGF="$(mktemp)"
+  kubectl -n kube-system logs -l io.cilium/app=operator --tail=-1 --prefix > "$LOGF" 2>/dev/null || true
+  grep -q "TLSRoute support is enabled" "$LOGF" \
+    || { rm -f "$LOGF"; FAIL "[$1] el operador NO habilita TLSRoute → ROLLBACK"; }
+  E=$(grep -c "Required GatewayAPI resources are not found" "$LOGF" || true)
+  rm -f "$LOGF"
   echo "  [$1] errores de CRD requeridas: $E (esperado 0)"
   [ "$E" -eq 0 ] || FAIL "[$1] PARAR"
   OK "[$1] gate 6a/6b"
@@ -181,7 +219,13 @@ backup_state() {
   OK "backup en $D"
 }
 
-close_rung() { gate_controller "$1"; gate_routes "$1"; gate_witness "$1"; echo "══ escalón $1 CERRADO ══"; }
+# gate_6ab va DENTRO del cierre: el gate aprobado es de CADA escalón, y
+# tenerlo solo en v1.5.1/v1.6.1 dejaba a v1.3.0 y v1.4.1 cerrar sin demostrar
+# que TLSRoute sirve v1alpha2 ni que Cilium lo habilitó. Falso pase.
+close_rung() {
+  gate_6ab "$1"; gate_controller "$1"; gate_routes "$1"; gate_witness "$1"
+  echo "══ escalón $1 CERRADO ══"
+}
 
 # ── GATE DE ESTADO DE PARTIDA ───────────────────────────────────────────────
 cmd_gate() {
@@ -314,36 +358,59 @@ restart_operator() {
 
 case "$MODE" in
   prepare)
+          # stage=none OBLIGATORIO: re-ejecutar prepare con la escalera en
+          # marcha haría `witness start` sobre una ventana viva, truncando la
+          # serie — y el intervalo ciego desaparecería sin dejar rastro.
+          [ "$(stage_get)" = "none" ] \
+            || FAIL "prepare exige stage='none' y el actual es '$(stage_get)'.
+  Si el testigo murió, NO relances prepare: la serie se truncaría y el hueco
+  se perdería. Cierra la ceremonia y empieza de nuevo a conciencia."
           log "=== FASE 0 — la app viva y el testigo midiendo ==="
-          bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
+          # Los overrides del script principal MANDAN: sin esto, prepare
+          # podría hablar con el cluster B mientras los applies van al A.
+          AWS_PROFILE_OVERRIDE="$AWS_PROFILE" KUBECONFIG_OVERRIDE="$KUBECONFIG" \
+          AWS_PROFILE="$AWS_PROFILE" KUBECONFIG="$KUBECONFIG" \
+          WITNESS_STATE_DIR="$WITNESS_STATE_DIR" \
+            bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
+          # La ventana queda ATADA a la ceremonia: etiqueta, inicio y endpoint.
+          printf '%s %s %s\n' \
+            "$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null)" \
+            "$(cat "$WITNESS_STATE_DIR/started" 2>/dev/null)" \
+            "$(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)" > "$STATE_DIR/witness-id"
+          OK "ventana del testigo registrada en la identidad de la ceremonia"
           ;;
   gate)   cmd_gate; stage_set initial ;;
 
   v1.3.0) require_stage initial v1.3.0
+          assert_live_schema initial v1.3.0-pre
           log "=== escalón v1.2.1 → v1.3.0 ==="
           backup_state v1.3.0; apply_bundle_v130; restart_operator
-          expect_bundle v1.3.0 v1.3.0
+          assert_live_schema v1.3.0 v1.3.0-post
           close_rung v1.3.0; stage_set v1.3.0 ;;
 
   v1.4.1) require_stage v1.3.0 v1.4.1
+          assert_live_schema v1.3.0 v1.4.1-pre
           log "=== escalón v1.3.0 → v1.4.1 ==="
           backup_state v1.4.1; apply_bundle_v141; restart_operator
-          expect_bundle v1.4.1 v1.4.1
+          assert_live_schema v1.4.1 v1.4.1-post
           close_rung v1.4.1; stage_set v1.4.1 ;;
 
   v1.5.1) require_stage v1.4.1 v1.5.1
+          assert_live_schema v1.4.1 v1.5.1-pre
           log "=== escalón v1.4.1 → v1.5.1 (6 individuales, TLSRoute excluido) ==="
           backup_state v1.5.1; apply_individual v1.5.1
-          expect_bundle v1.5.1 v1.5.1
-          gate_6ab v1.5.1; close_rung v1.5.1; stage_set v1.5.1 ;;
+          gate_6ab v1.5.1; assert_live_schema v1.5.1 v1.5.1-post
+          close_rung v1.5.1; stage_set v1.5.1 ;;
 
   v1.6.1) require_stage v1.5.1 v1.6.1
+          assert_live_schema v1.5.1 v1.6.1-pre
           log "=== escalón v1.5.1 → v1.6.1 (6 individuales, TLSRoute excluido) ==="
           backup_state v1.6.1; apply_individual v1.6.1
-          expect_bundle v1.6.1 v1.6.1
-          gate_6ab v1.6.1; close_rung v1.6.1; stage_set v1.6.1 ;;
+          gate_6ab v1.6.1; assert_live_schema v1.6.1 v1.6.1-post
+          close_rung v1.6.1; stage_set v1.6.1 ;;
 
   final)  require_stage v1.6.1 final
+          assert_live_schema v1.6.1 final
           log "=== cierre de la escalera ==="
           bash "$REPO_ROOT/scripts/verify-cilium-120-schema.sh" || FAIL "el esquema NO está listo para 4a"
           bash "$REPO_ROOT/scripts/witness-traffic.sh" stop

@@ -19,6 +19,31 @@
 > estándar sirve TLSRoute solo en `v1` y hay que aplicar los CRDs
 > individuales excluyendo TLSRoute. Comandos literales en §Ejecución.
 
+
+> ## ⚠ NO SE PEGA NADA DE ESTE DOCUMENTO EN UNA TERMINAL
+>
+> La ceremonia es `scripts/run-4b-rung.sh`. Todo lo que aparece abajo en
+> bloques es **referencia**: variables como `$REPO_ROOT` o
+> `$WITNESS_STATE_DIR` se definen **dentro del script**, en un proceso hijo,
+> y **no existen en el shell del operador**. Pegar un bloque produce fallos
+> que parecen del cluster y son del método.
+>
+> **El único recorrido válido, en este orden y sin saltos:**
+>
+> ```bash
+> bash scripts/run-4b-rung.sh prepare    # Fase 0: app viva + testigo midiendo
+> bash scripts/run-4b-rung.sh gate       # ¿arranco donde debo?
+> bash scripts/run-4b-rung.sh v1.3.0
+> bash scripts/run-4b-rung.sh v1.4.1
+> bash scripts/run-4b-rung.sh v1.5.1
+> bash scripts/run-4b-rung.sh v1.6.1
+> bash scripts/run-4b-rung.sh final      # SCHEMA READY FOR 4a + veredicto
+> ```
+>
+> `prepare` va **antes** que `gate`: el gate exige rutas vivas y testigo
+> midiendo, que es justo lo que `prepare` crea. `status` muestra dónde estás.
+> La máquina de estados rechaza cualquier otro orden **antes de tocar nada**.
+
 ## FASE 0 — la app viva y el testigo midiendo, ANTES de tocar una sola CRD
 
 El pre-escalón de `spec.infrastructure` consulta el Gateway **vivo**, y el
@@ -247,43 +272,40 @@ kubectl diff --server-side --field-manager=gateway-api-crd-upgrade -f <manifiest
   de v1.3.0: el mismo conflicto de anotaciones y el mismo manager se verificó
   en sus cinco CRDs antes de autorizar el conjunto completo (evidencia abajo).
 
-## Ejecución — UN COMANDO POR ESCALÓN
+## Ejecución
 
-`scripts/run-4b-rung.sh` es la ceremonia. **No se pega nada de este documento
-en una terminal**: las secciones de arriba son referencia, y algunas usan
-marcadores que en shell son redirecciones.
+**El recorrido está arriba, en el aviso de cabecera, y es el único.** Aquí
+solo el porqué de la forma.
 
-**Por qué un script y no bloques**: los gates son funciones, así que los
-bloques exigirían que todo se pegara en **una sola sesión de shell** — y "usa
-una sola sesión" es prosa, que no ejecuta. Un pegado en una terminal nueva
-perdería todos los gates en silencio. **Por qué un subcomando por escalón y no
-un script que corra la escalera entera**: la parada humana entre escalones
-—mirar el testigo, decidir— es el corazón del diseño.
+**Por qué un script y no bloques**: los gates son funciones, así que pegar
+bloques exigiría que todo cayera en **una sola sesión de shell** — y "usa una
+sola sesión" es prosa, que no ejecuta. Un pegado en terminal nueva perdería
+todos los gates **en silencio**.
 
-```bash
-export AWS_PROFILE=k8s-vanilla-lab
-export KUBECONFIG=~/.kube/k8s-vanilla-lab.conf
+**Por qué un subcomando por escalón y no un script que corra la escalera
+entera**: la parada humana entre escalones —mirar el testigo, decidir— es el
+corazón del diseño.
 
-bash scripts/run-4b-rung.sh gate      # ¿arranco donde debo? (tras la Fase 0)
-bash scripts/run-4b-rung.sh v1.3.0    # bundle + overlay, con el force acotado
-bash scripts/run-4b-rung.sh v1.4.1    # bundle + overlay, sin force
-bash scripts/run-4b-rung.sh v1.5.1    # 6 individuales + overlay, con gate 6a/6b
-bash scripts/run-4b-rung.sh v1.6.1    # idem — destino final
-bash scripts/run-4b-rung.sh final     # SCHEMA READY FOR 4a + veredicto del testigo
-```
+**Qué hace cada invocación, y por qué no se puede saltar ninguna:**
 
-**Cada invocación es autocontenida y fail-closed**: hace su backup con
-marca de tiempo (nunca sobrescribe evidencia), sus diffs, sus applies, el
-reinicio del operador, el gate 6a/6b donde toca, el canary, las rutas por
-identidad y el testigo. **Si algo no pasa, sale ≠0 y no hay escalón siguiente.**
+- **Exige el stage anterior EXACTO** y, además, **contrasta el esquema VIVO**:
+  el conjunto completo de CRDs y su `bundle-version`. El fichero de stage dice
+  lo que creemos; las CRDs dicen lo que hay. Si alguien tocó el esquema fuera
+  del script, se detecta antes de aplicar nada.
+- Hace su **backup con marca de tiempo** (nunca sobrescribe evidencia), sus
+  diffs, sus applies y el reinicio del operador.
+- **Cierra con los cuatro gates**: `gate_6ab` (v1alpha2 servida + el operador
+  confirmándolo), el **canary** de dos generaciones, las **rutas por identidad
+  exacta**, y el **testigo**.
+- **Avanza el stage atómicamente solo si todo pasó.**
 
-**El testigo se vigila entre escalones.** `gate_witness` exige tres cosas, no
-una: que la serie **haya crecido** desde el cierre anterior, que el **latido
-sea fresco**, y que `sent == successful`. Sin lo primero, un testigo que
-muriera tras el gate inicial dejaría la serie congelada con `sent ==
-successful` y **pasaría todos los cierres** — el mismo fallo de testigo-muerto
-que cazamos dentro del propio testigo (INCIDENTS #17, 6ª cara), ahora
-propagado a quien lo consulta.
+**El testigo se exige vivo, no solo limpio**: la serie debe **haber crecido**
+desde el cierre anterior, el latido ser fresco, y `sent == successful`. Sin lo
+primero, un testigo muerto dejaría la serie congelada y **pasaría todos los
+cierres** — el mismo fallo que cazamos dentro del propio testigo, ahora
+propagado a quien lo consulta. Y la ventana debe ser **la misma** que abrió
+`prepare`: si alguien la cerró y abrió otra, el intervalo entre ambas no lo
+vio nadie.
 
 
 ## Rollback
