@@ -285,6 +285,37 @@ fi
 # Gateway API standard CRDs must exist BEFORE Cilium starts, so the operator
 # enables its Gateway API controller. Applied here (fresh bootstrap); if
 # Cilium were already installed, restart its operator to pick them up.
+# SEGUNDO GATE DEL NLB, y deliberadamente NO es el mismo que el de kubeadm
+# init. Aquél esperaba REGISTRO (cualquier estado) porque "healthy" era
+# imposible antes de que el API existiera. Aquí el API YA existe, y lo que
+# este `kubectl apply` necesita es que el NLB ENRUTE: valida el manifiesto
+# descargando el openapi DESDE el endpoint, que es el DNS del NLB. Con el
+# target todavía unhealthy la conexión se rechaza, `pipefail` mata el
+# bootstrap, y CP-0 nunca llega a publicar el kubeconfig en SSM — que es
+# exactamente cómo murió el apply del 2026-08-26.
+#
+# Registrado no es enrutado. Aquí se espera HEALTHY, que ahora sí es
+# alcanzable, y el timeout FALLA con diagnóstico en vez de colgarse.
+TGH_ELAPSED=0
+until aws elbv2 describe-target-health \
+        --target-group-arn "${api_target_group_arn}" \
+        --region ${aws_region} \
+        --query "TargetHealthDescriptions[?Target.Id=='$${INSTANCE_ID}'].TargetHealth.State" \
+        --output text 2>/dev/null | grep -qx "healthy"; do
+  if [ $${TGH_ELAPSED} -ge 300 ]; then
+    log "✗ ERROR: $${INSTANCE_ID} never became healthy in the API target group after 300s"
+    log "  the NLB does not route to this node, so applying CRDs through the endpoint"
+    log "  would fail — refusing to continue with a half-built control plane"
+    exit 1
+  fi
+  if [ $((TGH_ELAPSED % 60)) -eq 0 ] && [ $${TGH_ELAPSED} -gt 0 ]; then
+    log "Waiting for the API target to become healthy... ($${TGH_ELAPSED}s)"
+  fi
+  sleep 10
+  TGH_ELAPSED=$((TGH_ELAPSED + 10))
+done
+log "✓ API target healthy ($${INSTANCE_ID}) — the NLB routes here, the endpoint is usable"
+
 log "Installing Gateway API standard CRDs (v1.2.1)"
 kubectl apply -f \
   https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
