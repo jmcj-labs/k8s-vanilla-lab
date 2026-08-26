@@ -130,6 +130,23 @@ Retomar el path donde manda el mapa: Fase 1.5 (Cilium a fondo: L7, Hubble avanza
   auto-sync) vuelve en Sprint 3. Deuda consciente documentada en CLUSTER.md §5.
 
 ## Deuda consciente que sobrevive a ambos sprints
+
+### ⬆ SUBE DE PRIORIDAD (26-ago): pinear Gateway API v1.6.1 en el bootstrap
+
+`bootstrap/control-plane.yaml` instala las CRDs en **v1.2.1**, así que **cada
+encarnación del cluster necesita reejecutar la escalera de 4b antes de 4a** —
+4b es un ESTADO del cluster, no un hito alcanzado una vez.
+
+**Por qué sube de prioridad hoy y no antes**: el Apply del 26-ago murió
+*exactamente en esa línea* (`kubectl apply` de las CRDs corriendo antes de que
+el NLB enrutara al CP recién iniciado; arreglado en #77 con un gate de
+`healthy`). El paso demostró ser frágil, y es **el mismo** que habría que
+tocar para nacer en v1.6.1. Ya no es solo comodidad: es reducir superficie
+donde hoy nos ha costado un Apply entero.
+
+**Sigue siendo su propio PR, post-hoy**: cambia el camino probado — 4b se
+validó *subiendo escalón a escalón* desde v1.2.1, no naciendo en v1.6.1 — y
+mete una variable más en un día que ya tiene la suya.
 - Subred pública sin NAT (tradeoff lab documentado)
 - Workers spot (fallback on-demand vía variable)
 - Sin OTel/tracing hasta Fase 2
