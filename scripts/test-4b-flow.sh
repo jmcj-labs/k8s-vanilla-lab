@@ -57,6 +57,13 @@ case "\$ARGS" in
        exit 1
      fi
      exit 1 ;;
+  *"get crd tlsroutes"*)
+     # Dato mecánico que gate_6ab lee. Fidelidad de fixture, no semántica:
+     # el stub NO decide si v1alpha2 "está bien", solo entrega el JSON que un
+     # cluster entregaría. Quien juzga el contenido sigue siendo el gate.
+     printf '{"spec":{"versions":[{"name":"v1","served":true},{"name":"v1alpha2","served":true},{"name":"v1alpha3","served":true}]}}' ;;
+  *"logs -l io.cilium/app=operator"*)
+     echo "level=info msg=\"TLSRoute CRD is installed, TLSRoute support is enabled\"" ;;
   *--show-managed-fields*)
      printf '{"metadata":{"managedFields":[{"manager":"kubectl-client-side-apply","fieldsV1":{"f:metadata":{"f:annotations":{"f:gateway.networking.k8s.io/bundle-version":{}}}}}]}}' ;;
   *apply*--server-side*)
@@ -68,7 +75,20 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod +x "$d/bin/kubectl" "$d/bin/aws"
+  # curl STUBEADO: sin esto el test sale a la red a por los manifiestos de
+  # gateway-api y deja de ser hermético (y falla sin conectividad).
+  cat > "$d/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+# Devuelve un manifiesto mínimo SIN "kind: TLSRoute", que es lo único que la
+# guarda anti-URL del script mira. -o <fichero> respetado.
+OUT=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && OUT="$a"; prev="$a"; done
+BODY='apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: stub.gateway.networking.k8s.io}'
+if [ -n "$OUT" ]; then printf '%s\n' "$BODY" > "$OUT"; else printf '%s\n' "$BODY"; fi
+EOF
+  chmod +x "$d/bin/kubectl" "$d/bin/aws" "$d/bin/curl"
   : > "$d/kubeconfig"
 }
 
@@ -135,18 +155,32 @@ for R in v1.3.0 v1.4.1 v1.5.1 v1.6.1; do
   make_stubs "$d" "$PB" "$PK" "$CF" "$TB" "$TK"
   set +e; run_sub "$d" "$PREV" "$R"; set -e
   RST=$(grep -c 'rollout restart' "$d/kubectl.calls" 2>/dev/null || true)
-  if [ "$RST" -eq 1 ]; then echo "  ✓ $R: exactamente 1 rollout del operador"; PASS=$((PASS+1))
-  else echo "  ✗ $R: $RST rollouts (esperaba 1)"; FAILED=$((FAILED+1)); fi
+  ST=$(cat "$d/state/stage")
+  # HASTA DÓNDE LLEGA ESTA AFIRMACIÓN, y por qué no más lejos: el escalón
+  # atraviesa applies, assert_live_schema post y gate_6ab —todo mecánico— y
+  # se detiene en el canary, que exige un controlador RECONCILIANDO. Fingir
+  # eso sería fingir semántica, que es lo que este arnés no hace. Así que se
+  # exige: un solo rollout, haber ALCANZADO el canary (prueba de que 6a/6b
+  # pasó y el orden se respetó) y stage SIN avanzar.
+  CANARY=$(grep -c 'witness-canary' "$d/kubectl.calls" 2>/dev/null || true)
+  if [ "$RST" -eq 1 ] && [ "$CANARY" -ge 1 ] && [ "$ST" = "$PREV" ]; then
+    echo "  ✓ $R: 1 rollout, 6a/6b superado, canary alcanzado, stage sin avanzar"; PASS=$((PASS+1))
+  else
+    echo "  ✗ $R: rollouts=$RST canary=$CANARY stage='$ST'"; echo "     └ $(tail -1 "$d/out.txt")"; FAILED=$((FAILED+1))
+  fi
   rm -rf "$d"
 done
 
 echo ""
 echo "=== un fallo en cualquier gate NO avanza el stage ==="
-for INJ in "rollout restart:gate_6ab" "get httproute:gate_routes"; do
+for INJ in "get crd tlsroutes:gate_6ab" "get httproute:gate_routes"; do
   PAT="${INJ%%:*}"; NAME="${INJ##*:}"
   d=$(mktemp -d); mkdir -p "$d/state"
   printf 'uid-de-prueba https://api.prueba:6443\n' > "$d/state/identity"
-  make_stubs "$d" "v1.2.1" "$FIVE"
+  # con destino y conflicto, como el escalón real: sin esto el escalón
+  # abortaba en assert_live_schema post y nunca llegaba al gate inyectado —
+  # el test habría "pasado" sin probar nada.
+  make_stubs "$d" "v1.2.1" "$FIVE" yes "v1.3.0" "$FIVE tlsroutes"
   echo initial > "$d/state/stage"
   set +e
   PATH="$d/bin:$PATH" LADDER_STATE_DIR="$d/state" FAIL_ON="$PAT" \
@@ -154,8 +188,14 @@ for INJ in "rollout restart:gate_6ab" "get httproute:gate_routes"; do
     bash "$SRC" v1.3.0 >/dev/null 2>&1
   set -e
   ST=$(cat "$d/state/stage")
-  if [ "$ST" = "initial" ]; then echo "  ✓ fallo en $NAME: stage sigue en 'initial'"; PASS=$((PASS+1))
-  else echo "  ✗ fallo en $NAME: stage avanzó a '$ST'"; FAILED=$((FAILED+1)); fi
+  # No basta con que NO avance: hay que demostrar que el escalón LLEGÓ al gate
+  # inyectado. Si abortase antes, el test pasaría sin haber probado ese gate.
+  REACHED=$(grep -c "$PAT" "$d/kubectl.calls" 2>/dev/null || true)
+  if [ "$ST" = "initial" ] && [ "$REACHED" -ge 1 ]; then
+    echo "  ✓ fallo en $NAME: se alcanzó el gate y el stage sigue 'initial'"; PASS=$((PASS+1))
+  else
+    echo "  ✗ fallo en $NAME: stage='$ST' alcanzado=$REACHED"; FAILED=$((FAILED+1))
+  fi
   rm -rf "$d"
 done
 
@@ -176,12 +216,24 @@ rm -rf "$d"
 echo ""
 echo "=== LÍMITE DECLARADO de este arnés ==="
 cat <<'NOTA'
-  Esto prueba ORQUESTACIÓN, no la semántica interna de los gates: que cada
-  escalón exige su predecesor, contrasta el esquema vivo, hace UN rollout,
-  cierra con los cinco gates, y NO avanza el stage si alguno falla. Lo que un
-  stub no puede probar es que gate_6ab sepa leer v1alpha2 o que el canary
-  detecte un controlador muerto — eso solo lo dice un cluster real, y el gate
-  inicial ya se validó así el 25-ago.
+  ALCANCE DEL CAMINO POSITIVO: llega hasta el canary y para ahí a propósito.
+  Applies, esquema post y gate_6ab son mecánicos y se recorren de verdad; el
+  canary exige un controlador reconciliando y fingirlo sería fingir semántica.
+
+  ESTO PRUEBA: orquestación. Que cada escalón exige su predecesor exacto,
+  contrasta el esquema VIVO antes y después, hace UN solo rollout del
+  operador, cierra con los CINCO gates en orden, y NO avanza el stage cuando
+  cualquiera de ellos falla — demostrando además que el escalón ALCANZÓ el
+  gate inyectado, no que abortase antes.
+
+  ESTO NO PRUEBA: la semántica de los gates. Que gate_6ab sepa leer v1alpha2,
+  que el canary detecte un controlador muerto, que gate_routes distinga una
+  ruta rancia. Un stub que lo fingiera daría confianza falsa, que es
+  justamente lo que este arnés existe para no dar.
+
+  QUIÉN LO PRUEBA: un cluster real. El gate inicial ya se validó así el
+  25-ago (6/6 agentes, 6/6 envoy, 5 CRDs v1.2.1, canary reconciliando), y la
+  escalera entera se ejecuta como el operador virgen definitivo.
 NOTA
 
 echo ""

@@ -30,7 +30,9 @@ export KUBECONFIG="${KUBECONFIG_OVERRIDE:-$HOME/.kube/${CLUSTER_NAME}.conf}"
 export CLUSTER_NAME AWS_REGION
 [ -r "$KUBECONFIG" ] || { echo "✗ no puedo leer KUBECONFIG=$KUBECONFIG (make kubeconfig)" >&2; exit 1; }
 
-WITNESS_STATE_DIR="${WITNESS_STATE_DIR:-/tmp/witness-${CLUSTER_NAME}}"
+# EXPORT, no solo asignación: el hijo exige esta variable y sin exportarla la
+# ve vacía y aborta. Reproducido antes de arreglarlo.
+export WITNESS_STATE_DIR="${WITNESS_STATE_DIR:-/tmp/witness-${CLUSTER_NAME}}"
 FM=gateway-api-crd-upgrade
 STD=https://github.com/kubernetes-sigs/gateway-api/releases/download
 EXP=https://raw.githubusercontent.com/kubernetes-sigs/gateway-api
@@ -131,7 +133,16 @@ gate_witness() {
   local NOW_ID SAVED_ID
   [ -s "$STATE_DIR/witness-id" ] \
     || FAIL "[$tag] no hay witness-id: esta ceremonia no pasó por 'prepare'"
-  NOW_ID="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/started" 2>/dev/null) $(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null)"
+  # También AL LEER: los tres campos presentes, aquí y en lo guardado.
+  local L S2 E
+  L="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null || true)"
+  S2="$(cat "$WITNESS_STATE_DIR/started" 2>/dev/null || true)"
+  E="$(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null || true)"
+  [ -n "$L" ] && [ -n "$S2" ] && [ -n "$E" ] \
+    || FAIL "[$tag] la ventana viva no tiene label/started/endpoint completos"
+  [ "$(awk 'NF==3{print "ok"}' "$STATE_DIR/witness-id")" = "ok" ] \
+    || FAIL "[$tag] witness-id guardado está incompleto: $(cat "$STATE_DIR/witness-id")"
+  NOW_ID="$L $S2 $E"
   SAVED_ID="$(cat "$STATE_DIR/witness-id")"
   [ "$NOW_ID" = "$SAVED_ID" ] || FAIL "[$tag] la ventana del testigo NO es la de esta ceremonia
   registrada: $SAVED_ID
@@ -378,13 +389,16 @@ case "$MODE" in
           log "=== FASE 0 — la app viva y el testigo midiendo ==="
           bash "$REPO_ROOT/scripts/prepare-4b-phase0.sh"
           # witness-id PRIMERO, validado, y solo entonces el stage avanza.
-          printf '%s %s %s\n' \
-            "$(cat "$WITNESS_STATE_DIR/label")" \
-            "$(cat "$WITNESS_STATE_DIR/started")" \
-            "$(cat "$WITNESS_STATE_DIR/endpoint")" > "$STATE_DIR/witness-id"
-          [ -s "$STATE_DIR/witness-id" ] || FAIL "no pude registrar la ventana del testigo"
-          grep -q '[^[:space:]]' "$STATE_DIR/witness-id" \
-            || FAIL "witness-id vacío: la ventana no dejó label/started/endpoint"
+          # LOS TRES campos, cada uno no vacío. "Algún contenido no blanco"
+          # daba por buena una identidad con dos huecos: dos ventanas
+          # distintas podrían compartirla y nadie lo notaría.
+          W_LABEL="$(cat "$WITNESS_STATE_DIR/label" 2>/dev/null || true)"
+          W_START="$(cat "$WITNESS_STATE_DIR/started" 2>/dev/null || true)"
+          W_ENDP="$(cat "$WITNESS_STATE_DIR/endpoint" 2>/dev/null || true)"
+          for F in label:"$W_LABEL" started:"$W_START" endpoint:"$W_ENDP"; do
+            [ -n "${F#*:}" ] || FAIL "la ventana del testigo no dejó '${F%%:*}': identidad incompleta"
+          done
+          printf '%s %s %s\n' "$W_LABEL" "$W_START" "$W_ENDP" > "$STATE_DIR/witness-id"
           OK "ventana registrada: $(cat "$STATE_DIR/witness-id")"
           stage_set prepared ;;
 

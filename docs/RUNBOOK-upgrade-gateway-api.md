@@ -296,7 +296,7 @@ corazón del diseño.
   del script, se detecta antes de aplicar nada.
 - Hace su **backup con marca de tiempo** (nunca sobrescribe evidencia), sus
   diffs, sus applies y el reinicio del operador.
-- **Cierra con los cuatro gates**: `gate_6ab` (v1alpha2 servida + el operador
+- **Cierra con los cinco gates**: `gate_6ab` (v1alpha2 servida + el operador
   confirmándolo), el **canary** de dos generaciones, las **rutas por identidad
   exacta**, y el **testigo**.
 - **Avanza el stage atómicamente solo si todo pasó.**
