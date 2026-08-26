@@ -296,6 +296,16 @@ fi
 #
 # Registrado no es enrutado. Aquí se espera HEALTHY, que ahora sí es
 # alcanzable, y el timeout FALLA con diagnóstico en vez de colgarse.
+#
+# Coste en el caso feliz: CERO espera. `until` evalúa la condición antes del
+# primer sleep, así que un target ya healthy pasa con una sola llamada a la
+# API. La espera solo existe cuando de verdad hace falta.
+#
+# DEUDA RELACIONADA: esta misma línea del `kubectl apply` es la que habría
+# que tocar para que el cluster naciera ya con las CRDs de Gateway API en
+# v1.6.1 (el canal híbrido de 4b) en vez de en v1.2.1. Este fallo demostró
+# que el paso es frágil, así que esa deuda subió de prioridad — pero va en su
+# propio PR: una variable por vez.
 TGH_ELAPSED=0
 until aws elbv2 describe-target-health \
         --target-group-arn "${api_target_group_arn}" \
