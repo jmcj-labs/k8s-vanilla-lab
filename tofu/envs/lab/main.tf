@@ -98,6 +98,8 @@ locals {
   bootstrap_common     = file("${path.module}/../../../bootstrap/common.yaml")
   joined_count_library = file("${path.module}/../../../bootstrap/joined-count.sh")
   kpr_gate_library     = file("${path.module}/../../../bootstrap/kpr-gate.sh")
+  fetch_exec_library   = file("${path.module}/../../../bootstrap/fetch-exec.sh")
+  bootstrap_prefix     = "bootstrap/${var.cluster_name}"
   bootstrap_cp_founder = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
     cluster_name         = var.cluster_name
     aws_region           = var.aws_region
@@ -117,12 +119,61 @@ locals {
     cp_count             = var.control_plane_count
     joined_count_library = local.joined_count_library
   })]
+  # INCIDENTS #25: the founder render had reached 16289 of the 16384 bytes EC2
+  # allows in user_data, and 60 added lines broke RunInstances on index 0.
+  # The renders now travel through S3 and user_data carries only a stub that
+  # fetches, verifies the SHA-256 and executes. Changing the transport instead
+  # of shaving bytes: shaving buys one apply and leaves the ceiling in place.
+  stub_cp_founder = templatefile("${path.module}/../../../bootstrap/stub.yaml", {
+    log_file           = "/var/log/k8s-cp-bootstrap.log"
+    aws_region         = var.aws_region
+    s3_uri             = "s3://${local.backup_bucket_name}/${local.bootstrap_prefix}/02-control-plane-init.sh"
+    sha256             = sha256(local.bootstrap_cp_founder)
+    dest               = "/opt/k8s-bootstrap/02-control-plane-init.sh"
+    fetch_exec_library = local.fetch_exec_library
+  })
+  stub_cp_join = [for index in range(var.control_plane_count) : templatefile("${path.module}/../../../bootstrap/stub.yaml", {
+    log_file           = "/var/log/k8s-cp-bootstrap.log"
+    aws_region         = var.aws_region
+    s3_uri             = "s3://${local.backup_bucket_name}/${local.bootstrap_prefix}/03-control-plane-join-${index}.sh"
+    sha256             = sha256(local.bootstrap_cp_join[index])
+    dest               = "/opt/k8s-bootstrap/03-control-plane-join.sh"
+    fetch_exec_library = local.fetch_exec_library
+  })]
+  # The worker payload is 4901 B gzipped -- nowhere near the ceiling, so it
+  # stays inline. Migrating what is not under pressure only adds surface.
   bootstrap_worker = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
     cluster_name          = var.cluster_name
     aws_region            = var.aws_region
     ssm_join_token_path   = "${local.ssm_parameter_base}/join-command"
     ssm_ca_cert_hash_path = "${local.ssm_parameter_base}/ca-cert-hash"
   })
+}
+
+# INCIDENTS #25: the bootstrap renders travel through S3 instead of riding in
+# user_data. The bucket belongs to tofu/envs/persistent and survives, but
+# THESE OBJECTS are owned by this stack, so `tofu destroy` removes them and
+# leaves no stale founder behind for the next incarnation to fetch.
+resource "aws_s3_object" "bootstrap_cp_founder" {
+  bucket                 = local.backup_bucket_name
+  key                    = "${local.bootstrap_prefix}/02-control-plane-init.sh"
+  content                = local.bootstrap_cp_founder
+  content_type           = "text/x-shellscript"
+  server_side_encryption = "AES256"
+  # etag tracks the content, so a re-rendered script replaces the object.
+  etag = md5(local.bootstrap_cp_founder)
+}
+
+resource "aws_s3_object" "bootstrap_cp_join" {
+  # STATIC count (INCIDENTS #11): never a value known only after apply.
+  count = var.control_plane_count
+
+  bucket                 = local.backup_bucket_name
+  key                    = "${local.bootstrap_prefix}/03-control-plane-join-${count.index}.sh"
+  content                = local.bootstrap_cp_join[count.index]
+  content_type           = "text/x-shellscript"
+  server_side_encryption = "AES256"
+  etag                   = md5(local.bootstrap_cp_join[count.index])
 }
 
 # Multi-part cloud-init for control planes.
@@ -148,8 +199,11 @@ data "cloudinit_config" "control_plane" {
         length(regexall("[^\\x00-\\x7F]", local.bootstrap_common)) == 0,
         length(regexall("[^\\x00-\\x7F]", local.joined_count_library)) == 0,
         length(regexall("[^\\x00-\\x7F]", local.kpr_gate_library)) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.fetch_exec_library)) == 0,
         length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_join[count.index])) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.stub_cp_join[count.index])) == 0,
         count.index != 0 || length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_founder)) == 0,
+        count.index != 0 || length(regexall("[^\\x00-\\x7F]", local.stub_cp_founder)) == 0,
       ])
       error_message = "bootstrap source/render contains non-ASCII bytes; cloud-init would corrupt or reject this MIME part"
     }
@@ -170,7 +224,7 @@ data "cloudinit_config" "control_plane" {
     for_each = count.index == 0 ? [1] : []
     content {
       content_type = "text/x-shellscript"
-      content      = local.bootstrap_cp_founder
+      content      = local.stub_cp_founder
       filename     = "02-control-plane-init.sh"
     }
   }
@@ -180,7 +234,7 @@ data "cloudinit_config" "control_plane" {
   # genesis it costs one check and exits.
   part {
     content_type = "text/x-shellscript"
-    content      = local.bootstrap_cp_join[count.index]
+    content      = local.stub_cp_join[count.index]
     filename     = "03-control-plane-join.sh"
   }
 }
@@ -225,6 +279,8 @@ module "control_plane" {
   key_name              = var.ssh_key_name
   control_plane_count   = var.control_plane_count
   user_data_base64      = data.cloudinit_config.control_plane[*].rendered
+  bootstrap_bucket_name = local.backup_bucket_name
+  bootstrap_prefix      = local.bootstrap_prefix
   nlb_security_group_id = module.nlb.security_group_id
   cluster_name          = var.cluster_name
   backup_bucket_name    = local.backup_bucket_name
@@ -235,7 +291,15 @@ module "control_plane" {
   # associations so the IGW can detach from the VPC cleanly. The EBS cleanup
   # dependency makes "ALL instances dead before deleting volumes" strict —
   # workers alone would leave the CP racing the cleanup.
-  depends_on = [aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
+  # aws_s3_object.*: the stub in user_data fetches them at first boot, and
+  # nothing in the arguments references them, so the edge must be explicit or
+  # an instance could come up before its script exists (INCIDENTS #25).
+  depends_on = [
+    aws_internet_gateway.main,
+    terraform_data.cleanup_dynamic_ebs,
+    aws_s3_object.bootstrap_cp_founder,
+    aws_s3_object.bootstrap_cp_join,
+  ]
 }
 
 # Stable Kubernetes-access IAM roles (aws-iam-authenticator identities).

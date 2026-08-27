@@ -32,6 +32,11 @@ render "templatefile(\"$ROOT/bootstrap/control-plane.yaml\",{$COMMON,pod_cidr=\"
 render "templatefile(\"$ROOT/bootstrap/control-plane-join.yaml\",{$COMMON,cp_index=1,cp_count=3,joined_count_library=file(\"$ROOT/bootstrap/joined-count.sh\")})" "$TMP/join.sh"
 render "templatefile(\"$ROOT/bootstrap/worker.yaml\",{cluster_name=\"k8s-vanilla-lab\",aws_region=\"eu-west-1\",ssm_join_token_path=\"/k8s/k8s-vanilla-lab/join-command\",ssm_ca_cert_hash_path=\"/k8s/k8s-vanilla-lab/ca-cert-hash\"})" "$TMP/worker.sh"
 
+# The stub is what actually travels as a cloud-init MIME part now (the founder
+# and join renders go through S3 -- INCIDENTS #25), so it is gated too.
+STUB_VARS='log_file="/var/log/k8s-cp-bootstrap.log",aws_region="eu-west-1",s3_uri="s3://bucket/bootstrap/k8s-vanilla-lab/02-control-plane-init.sh",sha256="0000000000000000000000000000000000000000000000000000000000000000",dest="/opt/k8s-bootstrap/02-control-plane-init.sh"'
+render "templatefile(\"$ROOT/bootstrap/stub.yaml\",{$STUB_VARS,fetch_exec_library=file(\"$ROOT/bootstrap/fetch-exec.sh\")})" "$TMP/stub.sh"
+
 printf '\303\263' > "$TMP/non-ascii"
 if assert_ascii "$TMP/non-ascii" 2>/dev/null; then
   echo "ERROR ASCII gate accepted a non-ASCII fixture" >&2

@@ -78,6 +78,16 @@ variable "enable_etcd_backup_policy" {
   default     = true
 }
 
+variable "bootstrap_bucket_name" {
+  description = "Bucket holding the bootstrap script objects the first-boot stub fetches (INCIDENTS #25). Same persistent bucket; the objects are owned by the lab stack."
+  type        = string
+}
+
+variable "bootstrap_prefix" {
+  description = "Key prefix of this cluster's bootstrap objects. The GetObject grant is scoped to it, never to the whole bucket."
+  type        = string
+}
+
 variable "backup_bucket_name" {
   description = "Name of the persistent backups bucket (tofu/envs/persistent). Only used to build the etcd/ policy Resource strings."
   type        = string
