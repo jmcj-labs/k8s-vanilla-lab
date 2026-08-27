@@ -1563,15 +1563,18 @@ escrito bastara. **Verificacion circular** -- la misma forma que el cruce
 externo confirmando el alcance que se le fijo, repetida dentro del mismo
 incidente y dos horas despues.
 
-El rol es OIDC-only y no se puede asumir en local, asi que el conjunto
-necesario **no se puede enumerar ejercitandolo**. Enumerarlo de memoria ya
+El rol es OIDC-only -- su trust admite solo `sts:AssumeRoleWithWebIdentity`
+desde el proveedor OIDC de GitHub -- y **no se puede asumir en local**, que era
+la unica forma de enumerar el conjunto ejercitando el ciclo real. Comprobado,
+no supuesto. Enumerarlo de memoria ya
 costo dos applies. Se concede por tanto el **ciclo de vida de objeto completo**
 (incluidas etiquetas y variantes de version, porque el bucket tiene versionado
 y cada objeto lleva `default_tags`). Lo que mantiene el permiso estrecho es el
 **recurso**, no la lista de acciones: un prefijo, solo a nivel de objeto, nada
 sobre el bucket ni sobre `etcd/` o `cnpg/`.
 
-**Una verificacion que solo confirma la lista propia no es una verificacion.**
+**Verifique mi lista, no la llamada.** Una verificacion que solo confirma la
+lista propia no es una verificacion.
 Cuando no se puede ejercitar el permiso de verdad, se concede el ciclo completo
 del recurso y se acota por Resource -- no se adivina el minimo accion por
 accion, pagando un arranque por cada acierto parcial.
