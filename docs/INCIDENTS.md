@@ -1471,3 +1471,86 @@ en `/opt/k8s-bootstrap/`. El listado de esa carpeta era el **primer paso** del
 procedimiento forense de #23 y #24; a partir de ahora hay que mirar en los dos
 sitios: cloud-init sigue escribiendo ahí el stub, y el script real está en
 `/opt`.
+
+---
+
+## 26. El canal nuevo tenía dos extremos y solo se revisó uno
+
+**Cuándo**: 2026-08-27, sexto Apply del día, el primero con el transporte por
+S3 de #25 (run `33075639808`, `main` en `0e231df4`).
+**Severidad**: el apply murió subiendo los objetos; **ninguna instancia llegó a
+crearse**. 29 recursos quedaron creados (VPC, el bloque NLB completo, ECR,
+roles) y hubo que destruirlos. Sin cluster, sin fundador, sin nodo que
+interrogar.
+
+### Qué pasó
+
+```
+Error: uploading S3 Object (bootstrap/k8s-vanilla-lab/02-control-plane-init.sh)
+  api error AccessDenied: User: arn:aws:sts::487985088962:assumed-role/
+  k8s-vanilla-lab-github-actions/GitHubActions is not authorized to perform:
+  s3:PutObject ... because no identity-based policy allows the s3:PutObject action
+```
+
+Los cuatro objetos -- el fundador y los tres joins -- fallaron igual.
+
+### Causa
+
+#25 movió los renders del bootstrap a S3 y concedió `s3:GetObject` al **rol de
+instancia del control plane**, que es quien descarga. **Nadie concedió
+`s3:PutObject` al rol OIDC de CI**, que es quien los crea durante el apply. Su
+statement sobre ese bucket se llama, literalmente, `BackupsBucketReadOnly`.
+
+Se revisó el permiso del **lector** y nadie preguntó por el del **escritor**.
+El fallo de revisión es compartido: el ejecutor escribió el transporte
+completo y solo pensó en un extremo; el director aprobó el diff y tampoco
+preguntó por el otro. Además, el alcance de la confirmación cruzada lo fijó el
+ejecutor en dos puntos concretos -- el bucle de descarga y la arista IAM del
+consumidor -- en vez de "el transporte de punta a punta", de modo que el
+revisor externo confirmó exactamente lo que se le pidió y nada más.
+
+### Por qué ningún gate lo vio
+
+El rol de CI **no lo gestiona tofu**: vive en `scripts/bootstrap-aws.sh`, el
+setup de una sola vez. Ni `make validate`, ni `make plan-empty`, ni el gate de
+tamaño de #25 tienen forma de mirarlo. Y `tofu plan` no ejerce permisos de
+escritura: el plan de CI corre con ese mismo rol y pasa en verde porque nunca
+llega a `PutObject`.
+
+Es el mismo patrón de #25 en otra capa: **el fallo solo se ejerce en el apply
+real**, así que la única defensa posible es que alguien lo compruebe antes, a
+propósito.
+
+### Lo que sí funcionó
+
+El `depends_on` de #25 hizo su trabajo: los objetos van **antes** que las
+instancias, así que el apply murió con cero nodos arrancados. Ninguna máquina
+llegó a bootear contra un script que no existía. Si la arista no hubiera
+estado, habrían arrancado tres CPs a descargar un objeto ausente y el
+diagnóstico habría costado un forense entero en vez de una línea de log.
+
+### Decisión de diseño
+
+Se descartó darle al stack `lab` un bucket propio para bootstrap. Sería más
+limpio conceptualmente -- nace y muere con el stack -- pero exigiría conceder
+al rol de CI el **ciclo de vida completo de buckets** (`CreateBucket`,
+`DeleteBucket`, políticas, versionado), bastante más superficie que tres
+acciones sobre un prefijo. El fix es tres acciones sobre
+`bootstrap/k8s-vanilla-lab/*`, y nada sobre `etcd/` ni `cnpg/`. El diseño del
+bucket propio queda anotado en `docs/PLAN-SPRINTS.md` como nota de fase 2.
+
+### Fix y regla
+
+`scripts/bootstrap-aws.sh` concede al rol de CI `s3:GetObject`, `s3:PutObject`
+y `s3:DeleteObject` **solo** sobre `bootstrap/k8s-vanilla-lab/*`. El
+`DeleteObject` no es opcional: sin él, `tofu destroy` no puede retirar los
+objetos y el destroy falla. Como el rol no está en tofu, aplicar el fix exige
+re-ejecutar `make bootstrap-aws` contra la cuenta, y la política **viva** se
+verifica con `aws iam simulate-principal-policy` antes de lanzar nada: las tres
+acciones permitidas sobre el prefijo, y `PutObject` sobre `etcd/` denegado.
+
+**Todo canal nuevo tiene dos extremos, y el lector y el escritor se revisan
+juntos.** Mover un dato de sitio no es un cambio de un lado: es un permiso de
+escritura, un permiso de lectura, un orden de creación y un borrado. Revisar
+uno y dar por supuestos los otros tres deja tres formas de fallar en el
+hierro, que es donde salen más caras.

@@ -169,6 +169,15 @@ mete una variable más en un día que ya tiene la suya.
   `VAR=$(... 2>/dev/null)` bajo `set -e` sin guarda en línea. Ahí el descarte
   del stderr convierte un fallo diagnosticable en una muerte muda, y `pipefail`
   la propaga sin que la guarda de la línea siguiente llegue a ejecutarse.
+- **Bucket propio para los objetos de bootstrap** (27-ago, nota de fase 2, con
+  INCIDENTS #26 de contexto): hoy los renders viven bajo `bootstrap/` en el
+  bucket persistente de backups, junto a `etcd/` y `cnpg/`. Un bucket del
+  stack `lab`, que naciera y muriera con él, separaría datos de conservación
+  de artefactos efímeros. **Se descartó ahora a propósito**: exigiría conceder
+  al rol de CI el ciclo de vida completo de buckets (crear, borrar, políticas,
+  versionado), mucha más superficie que las tres acciones sobre un prefijo que
+  resolvieron #26. Revisar en fase 2, cuando el reparto de permisos de CI se
+  toque por otras razones.
 - **El CI sondeó 18m29s a un fundador muerto al minuto 2** (27-ago): el
   timeout de 1210s mide la paciencia del workflow, no el bootstrap. Considerar
   que el fundador publique un marcador de fallo temprano en SSM y que la

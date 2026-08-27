@@ -193,6 +193,12 @@ TRUST_POLICY=$(cat <<JSON
 JSON
 )
 
+# BootstrapScriptObjects (INCIDENTS #26): since #25 the bootstrap renders
+# travel through S3, so CI WRITES them during apply and destroy REMOVES them.
+# The grant that existed covered only the reader (the CP instance role) --
+# the sixth apply died on AccessDenied for PutObject. Scoped to this
+# cluster's bootstrap prefix: nothing here may touch etcd/ or cnpg/, which
+# hold the only data in this account worth conserving.
 PERMISSIONS_POLICY=$(cat <<JSON
 {
   "Version": "2012-10-17",
@@ -446,6 +452,16 @@ PERMISSIONS_POLICY=$(cat <<JSON
         "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}",
         "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}/*"
       ]
+    },
+    {
+      "Sid": "BootstrapScriptObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}/bootstrap/${CLUSTER_NAME}/*"
     },
     {
       "Sid": "TofuStateDynamoDB",
