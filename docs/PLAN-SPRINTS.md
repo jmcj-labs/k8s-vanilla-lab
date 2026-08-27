@@ -150,3 +150,13 @@ mete una variable más en un día que ya tiene la suya.
 - Subred pública sin NAT (tradeoff lab documentado)
 - Workers spot (fallback on-demand vía variable)
 - Sin OTel/tracing hasta Fase 2
+- **Ceremonia muerta tras guardar `certificate-key`**: en
+  `bootstrap/control-plane.yaml`, el `if [ $? -eq 0 ]` posterior no comprueba
+  la serie de escrituras SSM; el último `put-parameter` ya falla con su propio
+  `|| exit` y después se ejecuta un `log`, así que ese `$?` siempre es cero.
+  Eliminar la falsa rama en una limpieza posterior; no bloquea el arranque.
+- **Gate de join sin tolerancia a errores SSM transitorios**: distingue
+  correctamente `present`/`ParameterNotFound`/error y nunca abre sin leer,
+  pero hoy cualquier error distinto de ausencia aborta de inmediato. Añadir
+  retry acotado por deadline real, conservando fail-closed y el diagnóstico,
+  después de coronar el bootstrap directo.

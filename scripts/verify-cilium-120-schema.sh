@@ -105,11 +105,17 @@ echo "  ✓ bundle-version is exactly v1.6.1 on all seven CRDs"
 # the API resource is not yet established/discoverable; that state is not a
 # usable bootstrap result.
 EXPECTED_V1=$(printf '%s\n' ${REQUIRED_KINDS} | sed "s|$|.${G}|" | sort)
-SERVED_V1=$(kubectl api-resources --cached=false --api-version="${G}/v1" -o name | sort) \
+SERVED_V1=$(kubectl get --raw "/apis/${G}/v1" \
+  | jq -r --arg g "${G}" \
+      '.resources[] | select(.name | contains("/") | not) | (.name + "." + $g)' \
+  | sort) \
   || FAIL "API discovery failed for ${G}/v1"
 [ "${SERVED_V1}" = "${EXPECTED_V1}" ] \
   || FAIL "API discovery does not expose the exact seven ${G}/v1 resources"
-SERVED_ALPHA2=$(kubectl api-resources --cached=false --api-version="${G}/v1alpha2" -o name | sort) \
+SERVED_ALPHA2=$(kubectl get --raw "/apis/${G}/v1alpha2" \
+  | jq -r --arg g "${G}" \
+      '.resources[] | select(.name | contains("/") | not) | (.name + "." + $g)' \
+  | sort) \
   || FAIL "API discovery failed for ${G}/v1alpha2"
 [ "${SERVED_ALPHA2}" = "tlsroutes.${G}" ] \
   || FAIL "API discovery v1alpha2 is '${SERVED_ALPHA2}', expected only tlsroutes.${G}"

@@ -378,11 +378,17 @@ assert_gateway_schema() {
     "gateways.$${GW_GROUP}" "grpcroutes.$${GW_GROUP}" \
     "httproutes.$${GW_GROUP}" "referencegrants.$${GW_GROUP}" \
     "tlsroutes.$${GW_GROUP}" | sort)
-  served_v1=$(kubectl api-resources --cached=false --api-version="$${GW_GROUP}/v1" -o name | sort) \
+  served_v1=$(kubectl get --raw "/apis/$${GW_GROUP}/v1" \
+    | jq -r --arg g "$${GW_GROUP}" \
+        '.resources[] | select(.name | contains("/") | not) | (.name + "." + $g)' \
+    | sort) \
     || { log "ERROR: [$${state}] API discovery for $${GW_GROUP}/v1 failed"; exit 1; }
   [ "$${served_v1}" = "$${expected_v1}" ] \
     || { log "ERROR: [$${state}] API discovery does not serve the exact seven v1 resources"; exit 1; }
-  served_alpha2=$(kubectl api-resources --cached=false --api-version="$${GW_GROUP}/v1alpha2" -o name | sort) \
+  served_alpha2=$(kubectl get --raw "/apis/$${GW_GROUP}/v1alpha2" \
+    | jq -r --arg g "$${GW_GROUP}" \
+        '.resources[] | select(.name | contains("/") | not) | (.name + "." + $g)' \
+    | sort) \
     || { log "ERROR: [$${state}] API discovery for TLSRoute v1alpha2 failed"; exit 1; }
   [ "$${served_alpha2}" = "tlsroutes.$${GW_GROUP}" ] \
     || { log "ERROR: [$${state}] API discovery v1alpha2 is '$${served_alpha2}', expected only TLSRoute"; exit 1; }

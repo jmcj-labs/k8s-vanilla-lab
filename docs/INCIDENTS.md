@@ -1049,3 +1049,93 @@ descripción del árbol. Por tanto:
 
 Este es INCIDENTS #19 aplicado a la evidencia misma: «no vi trabajo ausente»
 no equivale a «el trabajo está presente». La aserción positiva es el diff.
+
+---
+
+## 22. Un stub fail-open validó una llamada imposible de kubectl
+
+**Cuándo**: 2026-08-27, primer Apply del bootstrap directo a Cilium 1.20.1 +
+Gateway API v1.6.1 (run `33051536412`, `main` en `d2d940d`).
+**Severidad**: el bootstrap quedó parcial y el Apply agotó sus 1209s esperando
+un kubeconfig que el fundador, correctamente, nunca publicó. Sin pérdida de
+datos; laboratorio efímero. Ventana de infraestructura: 42m41s (cada CP
+41m40s; cada worker 40m33s), **0,163 USD de coste base** (EC2 + NLB; no
+incluye EBS, IPv4, NLCU ni transferencia).
+
+### Cronología UTC
+
+```
+07:55:53  02-control-plane-init.sh materializado en CP-0
+07:57:32  Step 3/9: kubeadm init
+07:57:58  OK kubeadm init completed successfully
+07:58:12  OK API target healthy -- el NLB ya enruta a CP-0
+07:58:12  aplica Gateway API v1.6.1: seis CRDs standard + TLSRoute overlay
+07:58:19  los siete CRDs están Established
+07:58:19  error: unknown flag: --api-version
+07:58:19  ERROR: [after CRD apply] API discovery .../v1 failed
+08:16:27  CI: kubeconfig ausente tras 1209s; Apply rojo
+08:27:14  CP-2 aborta cerrado: joined-count=absent tras 1827s
+08:27:16  CP-1 aborta cerrado: joined-count=absent tras 1828s
+```
+
+Los extractos están deliberadamente redactados. El log íntegro de `kubeadm
+init` contiene material de join y queda solo en el archivo forense local; no
+entra en Git.
+
+### Causa técnica
+
+El assert de serving real ejecutaba:
+
+```bash
+kubectl api-resources --cached=false \
+  --api-version=gateway.networking.k8s.io/v1 -o name
+```
+
+`kubectl api-resources` no ofrece `--api-version`. El `kubectl v1.35.8` del
+nodo lo rechazó antes de que el bootstrap llegara a Helm, por lo que Cilium
+nunca se instaló. CP-0 quedó con API y etcd locales vivos pero `NotReady`, y
+CoreDNS quedó `Pending`.
+
+Una consulta read-only posterior contra los endpoints de discovery reales
+(`/apis/gateway.networking.k8s.io/v1` y `/v1alpha2`) demostró que el estado
+que el comando pretendía comprobar **sí era correcto**: conjunto exacto de
+siete recursos base en v1, solo TLSRoute en v1alpha2, los siete CRDs con
+`bundle-version=v1.6.1`. Falló el verificador, no el apply de CRDs.
+
+### Cómo pasó dos revisiones
+
+El stub de `test-cilium-schema-gate.sh` decidía por substrings de `"$*"`:
+cualquier invocación que contuviera `v1` recibía una respuesta válida. No
+modelaba la interfaz de kubectl y, por tanto, convirtió una llamada imposible
+en verde. Era un **stub fail-open**.
+
+Además, la misma línea pasó la revisión cruzada del director: fue citada y
+firmada sin contrastarla con `kubectl api-resources --help`. El revisor leyó
+lo que esperaba leer —«filtrar por versión»—, no lo que la CLI realmente
+aceptaba. CI y revisión humana fallaron por el mismo sesgo, no por dos causas
+independientes.
+
+### Lo que este arranque sí coronó
+
+- El transporte cloud-init ASCII-only: el fundador se materializó, dejó log
+  desde su primer Step y fue el script que cloud-init identificó al fallar.
+- El segundo gate del NLB: no confundió registrado con enrutado; esperó hasta
+  `healthy` antes de aplicar CRDs.
+- La ruta híbrida v1.6.1: los siete CRDs llegaron a `Established`, con el
+  overlay TLSRoute último y el esquema vivo exacto.
+- El gate de join: `ParameterNotFound` significó esperar, nunca `0`; CP-1 y
+  CP-2 agotaron 1800s y abortaron cerrados sin tocar el cluster.
+
+### Fix y regla
+
+El discovery se consulta por su contrato real:
+`kubectl get --raw /apis/<grupo>/<versión>`. Del `APIResourceList` se comparan
+conjuntos exactos de `.resources[].name`, excluyendo subrecursos (nombres con
+`/`). El stub solo responde a esas llamadas exactas y devuelve error ante
+cualquier otra forma.
+
+**Un stub de una herramienta externa es fail-closed sobre su interfaz, no
+solo sobre sus datos.** Si acepta combinaciones que la herramienta real
+rechaza, el test demuestra una API imaginaria. Y una línea familiar tampoco
+queda revisada por haber sido leída: cuando su contrato decide el arranque,
+se contrasta con la CLI real o su ayuda.
