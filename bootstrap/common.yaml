@@ -1,7 +1,7 @@
 #!/bin/bash
 # Common bootstrap for Kubernetes nodes (control-plane + workers)
 # Purpose: Install containerd, kubeadm, kubelet, kubectl (K8s 1.35.x series)
-# NO variables in this file — loaded with file() not templatefile()
+# NO variables in this file -- loaded with file() not templatefile()
 
 set -euo pipefail
 exec >> /var/log/k8s-bootstrap.log 2>&1
@@ -26,12 +26,12 @@ net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
 EOF
 
-log "✓ Config files created"
+log "OK Config files created"
 
 # Step 1: Install required packages
 log "Step 1/8: Installing base dependencies"
 apt-get update
-apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release
+apt-get install -y apt-transport-https ca-certificates curl gnupg jq lsb-release
 
 # Step 2: Install containerd from Docker repository (not Ubuntu default)
 log "Step 2/8: Installing containerd from Docker repository"
@@ -69,32 +69,32 @@ fi
 
 # Verify the change was applied
 if grep -q "SystemdCgroup = true" /etc/containerd/config.toml; then
-  log "✓ containerd SystemdCgroup correctly set to true"
+  log "OK containerd SystemdCgroup correctly set to true"
 else
-  log "✗ ERROR: Failed to set containerd SystemdCgroup = true"
+  log "ERROR: Failed to set containerd SystemdCgroup = true"
   exit 1
 fi
 
 systemctl enable containerd
 systemctl restart containerd
-log "✓ containerd installed and configured"
+log "OK containerd installed and configured"
 
 # Step 3: Disable swap permanently
 log "Step 3/8: Disabling swap"
 swapoff -a
 sed -i '/ swap / s/^/#/' /etc/fstab
-log "✓ Swap disabled"
+log "OK Swap disabled"
 
 # Step 4: Load kernel modules
 log "Step 4/8: Loading kernel modules (overlay, br_netfilter)"
 modprobe overlay
 modprobe br_netfilter
-log "✓ Kernel modules loaded"
+log "OK Kernel modules loaded"
 
 # Step 5: Apply sysctl parameters
 log "Step 5/8: Applying sysctl parameters for Kubernetes networking"
 sysctl --system
-log "✓ sysctl parameters applied"
+log "OK sysctl parameters applied"
 
 # Step 6: Add Kubernetes repository
 log "Step 6/8: Adding Kubernetes v1.35 repository"
@@ -107,7 +107,7 @@ deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io
 EOF
 
 apt-get update
-log "✓ Kubernetes repository added"
+log "OK Kubernetes repository added"
 
 # Step 7: Install kubeadm, kubelet, kubectl (latest of the 1.35 series)
 # The apt repo added in Step 6 is series-scoped (stable:/v1.35), so an
@@ -115,7 +115,7 @@ log "✓ Kubernetes repository added"
 log "Step 7/8: Installing kubelet, kubeadm, kubectl (v1.35 series)"
 apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
-log "✓ Kubernetes packages installed and held"
+log "OK Kubernetes packages installed and held"
 
 # Step 7a: Install AWS CLI v2 (required for SSM Parameter Store operations)
 log "Step 7a/8: Installing AWS CLI v2"
@@ -125,12 +125,12 @@ unzip -q /tmp/awscliv2.zip -d /tmp
 /tmp/aws/install
 rm -rf /tmp/aws /tmp/awscliv2.zip
 aws --version
-log "✓ AWS CLI v2 installed"
+log "OK AWS CLI v2 installed"
 
 # Step 7b: Set kubelet providerID from IMDSv2 (required by the EBS CSI driver)
 # kubeadm without a cloud provider leaves node spec.providerID empty; passing
 # --provider-id to the kubelet BEFORE kubeadm init/join makes it publish the
-# value at node registration. Same mechanism on control plane and workers —
+# value at node registration. Same mechanism on control plane and workers --
 # no post-init patch, no RBAC involved. /etc/default/kubelet is sourced by
 # kubeadm's kubelet systemd drop-in.
 log "Step 7b/8: Setting kubelet providerID from IMDSv2"
@@ -141,12 +141,12 @@ AZ=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
 INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
   http://169.254.169.254/latest/meta-data/instance-id)
 echo "KUBELET_EXTRA_ARGS=--provider-id=aws:///${AZ}/${INSTANCE_ID}" > /etc/default/kubelet
-log "✓ kubelet providerID set to aws:///${AZ}/${INSTANCE_ID}"
+log "OK kubelet providerID set to aws:///${AZ}/${INSTANCE_ID}"
 
-# Step 8: Enable kubelet (don't start — kubeadm will handle that)
+# Step 8: Enable kubelet (don't start -- kubeadm will handle that)
 log "Step 8/8: Enabling kubelet service"
 systemctl enable kubelet
-log "✓ kubelet enabled (will be started by kubeadm)"
+log "OK kubelet enabled (will be started by kubeadm)"
 
 # Verification
 log "=== Bootstrap verification ==="

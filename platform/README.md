@@ -21,7 +21,8 @@ Prerequisites provided by the bootstrap layer (cloud-init):
 
 - Cilium in kube-proxy replacement mode with `gatewayAPI.enabled=true`
   (creates the `cilium` GatewayClass).
-- Gateway API standard CRDs v1.2.1.
+- Gateway API v1.6.1: six standard CRDs plus the experimental TLSRoute overlay
+  (serves `v1alpha2` for the validated Cilium compatibility contract).
 - Node `spec.providerID` set on every node (EBS CSI requirement).
 - IMDSv2 hop limit 3 + `AmazonEBSCSIDriverPolicy` on node roles (OpenTofu).
 

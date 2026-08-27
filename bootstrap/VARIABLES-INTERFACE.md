@@ -40,14 +40,16 @@ aws_region                # string, e.g., "eu-west-1"
 pod_cidr                  # string, e.g., "10.244.0.0/16"
 service_cidr              # string, e.g., "10.96.0.0/12"
 api_endpoint_dns          # string, module.nlb.dns_name (NLB-first pattern)
+api_target_group_arn      # string, API target group; registration/healthy gates
 ssm_parameter_path        # string, e.g., "/k8s/k8s-vanilla-lab"
 ```
 
 **Key Operations**:
 1. Wait for common.yaml to complete (dependency)
 2. aws-iam-authenticator install + `init` (webhook material BEFORE kubeadm)
-3. `kubeadm init --upload-certs` with `controlPlaneEndpoint` = `${api_endpoint_dns}:6443`
-4. Install Cilium (`k8sServiceHost` = `${api_endpoint_dns}`)
+3. `kubeadm init` with `controlPlaneEndpoint` = `${api_endpoint_dns}:6443`
+4. Install Gateway API v1.6.1 hybrid CRDs, then Cilium 1.20.1
+   (`k8sServiceHost` = `${api_endpoint_dns}`), asserting the live schema and KPR
 5. Capture certificate-key (`upload-certs` phase, validated hex64)
 6. Store in SSM:
    - `${ssm_parameter_path}/join-command` = full worker/CP join command (NLB endpoint)
@@ -71,11 +73,14 @@ aws_region                # string
 api_endpoint_dns          # string, module.nlb.dns_name
 ssm_parameter_path        # string
 cp_index                  # number, this node's index (1..N)
+cp_count                  # number, exact control-plane count
+joined_count_library      # string, bootstrap/joined-count.sh injected verbatim
 ```
 
 **Key Operations**:
 1. Wait for common.yaml; authenticator install + `init` (per-node material)
-2. Wait for the gate: `cp/joined-count` >= `${cp_index}`
+2. Read the gate fail-closed. Missing means wait; unreadable/invalid means fail;
+   valid opens only at `max(1, cp_index)`
 3. Fetch `join-command` + `cp/certificate-key`
 4. `kubeadm join --control-plane --certificate-key ...` with retry +
    key re-fetch (2h TTL → renewal ceremony republishes)
@@ -91,33 +96,26 @@ cp_index                  # number, this node's index (1..N)
 ```yaml
 cluster_name              # string, e.g., "k8s-vanilla-lab"
 aws_region                # string, e.g., "eu-west-1"
-kubernetes_version        # string, e.g., "1.35"
 ssm_join_token_path       # string, e.g., "/k8s/k8s-vanilla-lab/join-token"
 ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 ```
 
 **Key Operations**:
 1. Wait for common.yaml to complete (dependency)
-2. Poll SSM for parameters (with retries, max 10 minutes):
-   - `JOIN_TOKEN=$(aws ssm get-parameter --name ${ssm_join_token_path} --region ${aws_region} --query 'Parameter.Value' --output text)`
-   - `CA_CERT_HASH=$(aws ssm get-parameter --name ${ssm_ca_cert_hash_path} --region ${aws_region} --query 'Parameter.Value' --output text)`
-   - `CONTROL_PLANE_ENDPOINT=$(aws ssm get-parameter --name /k8s/${cluster_name}/control-plane-endpoint --region ${aws_region} --query 'Parameter.Value' --output text)`
-3. Run `kubeadm join`:
-   - `kubeadm join ${CONTROL_PLANE_ENDPOINT} --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash sha256:${CA_CERT_HASH}`
+2. Poll SSM for `join-command` with a wall-clock deadline. Only
+   `ParameterNotFound` means wait; any unreadable response fails.
+3. Run the retrieved `kubeadm join` command with the explicit CRI socket.
 4. Mark as ready
 
 ---
 
 ## Critical Implementation Notes
 
-### Control Plane Circular Dependency Solution
-**Problem**: Control plane needs its EIP in cloud-init, but EIP is created after instance.
+### NLB-first endpoint
 
-**Solution** (already implemented in `tofu/modules/control-plane/main.tf`):
-1. Create `aws_eip` resource FIRST (no `instance` argument)
-2. Pass `aws_eip.control_plane.public_ip` to `templatefile` for `control-plane.yaml`
-3. Create `aws_instance` with user_data from templatefile
-4. Create `aws_eip_association` AFTER instance
+The NLB DNS is the stable API endpoint. The founder first proves its target
+is registered (authorises `kubeadm init`), then proves it is healthy/routed
+before the first CRD apply through that endpoint.
 
 ### Token Expiry
 - Bootstrap tokens expire in 24h (TTL set in kubeadm token create)
@@ -125,7 +123,8 @@ ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 - For persistent clusters, implement token rotation or certificate-based join
 
 ### SSM Parameter Store
-- Control plane writes: `/k8s/${cluster_name}/join-token`, `ca-cert-hash`, `control-plane-endpoint`
+- Control plane writes: `/k8s/${cluster_name}/join-command`, `ca-cert-hash`,
+  `api-endpoint`, `kubeconfig`, and the protected `cp/*` join state
 - Workers read: same paths
 - IAM permissions already configured in modules (control-plane: write, workers: read-only)
 
@@ -133,7 +132,7 @@ ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 - All scripts MUST use `set -euo pipefail`
 - Cloud-init logs: `/var/log/cloud-init-output.log`
 - Kubeadm logs: `journalctl -u kubelet`
-- SSM polling with exponential backoff (10 attempts, 60s wait between)
+- Bounded SSM polling uses wall-clock deadlines and per-call CLI timeouts
 
 ---
 
@@ -143,7 +142,9 @@ ssm_ca_cert_hash_path     # string, e.g., "/k8s/k8s-vanilla-lab/ca-cert-hash"
 
 **Control Plane Module**: `tofu/modules/control-plane/main.tf` (NLB-first pattern — the EIP-first pattern was removed in S2 piece 3, ADR-007)
 
-**Bootstrap Files** (to be created):
+**Bootstrap Files**:
 - `bootstrap/common.yaml`
 - `bootstrap/control-plane.yaml`
+- `bootstrap/control-plane-join.yaml`
+- `bootstrap/joined-count.sh`
 - `bootstrap/worker.yaml`

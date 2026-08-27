@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Does the CLUSTER SCHEMA satisfy what Cilium 1.20.1 REQUIRES?
 #
-# This is 4a's entry gate, run at the end of 4b so the answer is known before
-# the upgrade rather than eighteen seconds after helm says `deployed`.
+# This is both the direct-bootstrap smoke gate and the archived 4a entry gate.
 #
 # The list is not from documentation. It is what our own Cilium 1.20.1
 # operator printed on 2026-08-23 before refusing to start its Gateway API
@@ -81,7 +80,7 @@ for V in ${EXPECTED_TLS_VERSIONS}; do
   echo "${TLS_SERVED}" | grep -qw "${V}" \
     || FAIL "tlsroutes serves ${TLS_SERVED} but NOT ${V}"
 done
-echo "  ✓ tlsroutes serves exactly v1 + v1alpha2 + v1alpha3; 1.19 remains covered until 1.20 lands"
+echo "  ✓ tlsroutes serves exactly v1 + v1alpha2 + v1alpha3"
 
 # The dots in an annotation KEY must be escaped in jsonpath, or it reads them
 # as nested fields and returns empty — which then looks like "wrong version"
@@ -102,5 +101,19 @@ echo "  CONTROL ASSERTION: expected ${EXPECTED_COUNT} CRDs at bundle v1.6.1, fou
   || FAIL "bundle-version control count failed: expected ${EXPECTED_COUNT}, found ${BUNDLE_FOUND}"
 echo "  ✓ bundle-version is exactly v1.6.1 on all seven CRDs"
 
+# API discovery is the serving fact. A CRD spec can claim served=true while
+# the API resource is not yet established/discoverable; that state is not a
+# usable bootstrap result.
+EXPECTED_V1=$(printf '%s\n' ${REQUIRED_KINDS} | sed "s|$|.${G}|" | sort)
+SERVED_V1=$(kubectl api-resources --cached=false --api-version="${G}/v1" -o name | sort) \
+  || FAIL "API discovery failed for ${G}/v1"
+[ "${SERVED_V1}" = "${EXPECTED_V1}" ] \
+  || FAIL "API discovery does not expose the exact seven ${G}/v1 resources"
+SERVED_ALPHA2=$(kubectl api-resources --cached=false --api-version="${G}/v1alpha2" -o name | sort) \
+  || FAIL "API discovery failed for ${G}/v1alpha2"
+[ "${SERVED_ALPHA2}" = "tlsroutes.${G}" ] \
+  || FAIL "API discovery v1alpha2 is '${SERVED_ALPHA2}', expected only tlsroutes.${G}"
+echo "  ✓ API discovery serves exact v1 set + TLSRoute v1alpha2"
+
 echo ""
-log "=== SCHEMA READY FOR 4a ==="
+log "=== SCHEMA READY FOR CILIUM 1.20.1 ==="
