@@ -488,10 +488,16 @@ done
 # whole Deployment here would deadlock before CP-1 can enter. One live
 # operator proves the controller started; the final smoke requires the full
 # desired=updated=ready Deployment after all nodes have joined.
+# cilium-dbg prints the field followed by the device list it programmed:
+#   KubeProxyReplacement:    True   [ens5   10.0.1.227 fe80::... (Direct Routing)]
+# Splitting on ':' truncated the value at the first colon inside that IPv6
+# address, so the check aborted the founder on a HEALTHY datapath
+# (INCIDENTS #23). The device suffix alone was already fatal; the IPv6 only
+# decided where it cut. The value is field 2 of the whitespace-split line.
 KPR=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status 2>/dev/null \
-  | awk -F: 'tolower($1) ~ /kubeproxyreplacement/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+  | awk '$1 == "KubeProxyReplacement:" {print $2; exit}')
 [ "$${KPR}" = "True" ] \
-  || { log "ERROR: live Cilium datapath reports KubeProxyReplacement='$${KPR}'"; exit 1; }
+  || { log "ERROR: live Cilium datapath reports KubeProxyReplacement='$${KPR}' (expected exactly True)"; exit 1; }
 [ "$(kubectl -n kube-system get pods -l k8s-app=kube-proxy -o name 2>/dev/null | wc -l)" -eq 0 ] \
   || { log "ERROR: kube-proxy exists in a strict KPR cluster"; exit 1; }
 assert_gateway_schema "after Cilium start"
