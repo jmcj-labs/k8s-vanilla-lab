@@ -1351,7 +1351,11 @@ momento de producirse, y la instancia no lo conserva en ningun otro sitio. La
 adjudicacion se apoya en la convergencia de tres hechos independientes --
 unica sentencia con stderr descartado, muerte a un segundo del Ready, y agente
 demostrablemente a medio inicializar-- no en el error en si. Es inferencia
-fuerte, no lectura directa, y asi debe constar.
+fuerte, no lectura directa, y asi debe constar. Lo que si queda probado es
+que **fallo el primer tramo de la tuberia**; con el stderr destruido no se
+puede distinguir si `kubectl exec` no llego a alcanzar el contenedor o si
+llego y fue `cilium-dbg` quien devolvio rc!=0 contra un daemon a medio
+inicializar. Bajo `pipefail` ambos mueren identico, y el fix cubre los dos.
 
 El propio descarte es parte del defecto: una guarda cuya entrada se construye
 tirando el stderr **no puede informar de su propio fallo**. Convirtio un error
