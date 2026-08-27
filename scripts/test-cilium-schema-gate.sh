@@ -13,16 +13,21 @@ FAILED=0
 cat > "${TMP}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = api-resources ]; then
-  case "$*" in
-    *v1alpha2*) echo tlsroutes.gateway.networking.k8s.io ;;
-    *v1*) printf '%s\n' backendtlspolicies gatewayclasses gateways grpcroutes httproutes referencegrants tlsroutes \
-      | sed 's/$/.gateway.networking.k8s.io/' ;;
-    *) exit 2 ;;
+if [ "$#" -eq 3 ] && [ "$1" = get ] && [ "$2" = --raw ]; then
+  case "$3" in
+    /apis/gateway.networking.k8s.io/v1alpha2)
+      printf '%s\n' '{"resources":[{"name":"tlsroutes"},{"name":"tlsroutes/status"}]}' ;;
+    /apis/gateway.networking.k8s.io/v1)
+      printf '%s\n' '{"resources":[{"name":"backendtlspolicies"},{"name":"backendtlspolicies/status"},{"name":"gatewayclasses"},{"name":"gatewayclasses/status"},{"name":"gateways"},{"name":"gateways/status"},{"name":"grpcroutes"},{"name":"grpcroutes/status"},{"name":"httproutes"},{"name":"httproutes/status"},{"name":"referencegrants"},{"name":"tlsroutes"},{"name":"tlsroutes/status"}]}' ;;
+    *) exit 1 ;;
   esac
   exit 0
 fi
-[ "${1:-}" = get ] && [ "${2:-}" = crd ] || exit 2
+[ "$#" -eq 5 ] && [ "$1" = get ] && [ "$2" = crd ] && [ "$4" = -o ] && [ "$5" = json ] || exit 1
+case "$3" in
+  gatewayclasses.gateway.networking.k8s.io|gateways.gateway.networking.k8s.io|httproutes.gateway.networking.k8s.io|grpcroutes.gateway.networking.k8s.io|tlsroutes.gateway.networking.k8s.io|referencegrants.gateway.networking.k8s.io|backendtlspolicies.gateway.networking.k8s.io) ;;
+  *) exit 1 ;;
+esac
 KIND=${3%%.*}
 VERSIONS='[{"name":"v1","served":true}]'
 if [ "${KIND}" = tlsroutes ]; then
@@ -38,6 +43,18 @@ printf '{"metadata":{"annotations":{"gateway.networking.k8s.io/bundle-version":"
   "${BUNDLE}" "${VERSIONS}"
 MOCK
 chmod +x "${TMP}/kubectl"
+
+# The command that caused INCIDENTS #22 must be impossible in the stub just
+# as it is in real kubectl. A permissive mock would recreate the false green.
+set +e
+"${TMP}/kubectl" api-resources --cached=false \
+  --api-version=gateway.networking.k8s.io/v1 -o name >/dev/null 2>&1
+STUB_REJECT_RC=$?
+set -e
+[ "${STUB_REJECT_RC}" -eq 1 ] || {
+  echo "stub accepted the impossible api-resources --api-version call (rc=${STUB_REJECT_RC})" >&2
+  exit 1
+}
 
 run() {
   local name=$1 scenario=$2 expected=$3 rc
