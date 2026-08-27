@@ -1265,3 +1265,123 @@ inventadas.** `scripts/test-kpr-parser.sh` usa la línea literal del cluster
 vivo, e incluye el parser roto como control: si el defecto volviera, el test
 falla. Un test escrito contra la salida que uno *imagina* solo demuestra que
 el parser coincide con esa imaginación.
+
+---
+
+## 24. `Ready` no es `sabe responder`: el fundador murió en silencio un segundo después del rollout
+
+**Cuándo**: 2026-08-27, cuarto Apply del día, el primero con el parser de #23
+corregido (run `33059962416`, `main` en `6964b2c2`).
+**Severidad**: el fundador abortó a los 92,8s; el Apply agotó sus 1210s sin
+kubeconfig. Sin pérdida de datos. Cluster dejado vivo para el forense.
+
+### Lo primero: el fix de #23 funcionó
+
+Conviene decirlo antes que nada porque condiciona la lectura. El arranque
+**cruzó** el punto donde murió #23 y el assert del KPR ya no es el que mata:
+consultado despues contra el CP-0 vivo, el comando corregido devuelve
+exactamente `True`. El parser esta probado. Lo que fallo es otra cosa, en la
+misma linea.
+
+### Cronología UTC
+
+```
+09:48:11  arrancan CP-0, CP-1, CP-2
+09:49:48  el fundador empieza
+09:49:52  OK registrado en el TG -- kubeadm init autorizado
+09:50:16  OK kubeadm init completado
+09:50:19  OK API target healthy -- el NLB enruta a CP-0
+09:50:26  OK [after CRD apply] siete CRDs en v1, TLSRoute en v1alpha2, bundle v1.6.1
+09:50:27  helm despliega Cilium 1.20.1
+09:50:31  el pod cilium-x6ftr arranca
+09:51:17  el agente empieza a servir su monitor API
+09:51:18  el agente sigue "Initializing daemon" / "Initializing IPAM"
+09:51:19  el pod pasa a Ready -- el rollout de helm retorna
+09:51:20  el fundador MUERE. Sin una sola linea de error
+10:08:46  CI se rinde: kubeconfig ausente tras 1210s
+```
+
+### El silencio es el dato
+
+A diferencia de #23, el log del fundador **no contiene ninguna linea de
+ERROR**: termina en la salida de helm y salta al script de join. Y el silencio
+no es un log perdido: la linea 10 del script es
+
+```bash
+exec >> /var/log/k8s-cp-bootstrap.log 2>&1
+```
+
+de modo que **todo** su stderr aterriza en ese fichero. Si hubiera fallado
+cualquier `kubectl` sin redirigir, su error estaria escrito ahi.
+
+Eso deja una sola sentencia candidata en todo el tramo entre el rollout y el
+siguiente `log`: la unica cuyo stderr se descarta antes de llegar a esa
+redireccion.
+
+```bash
+KPR=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status 2>/dev/null \
+  | awk '$1 == "KubeProxyReplacement:" {print $2; exit}')
+[ "${KPR}" = "True" ] || { log "ERROR: ..."; exit 1; }
+```
+
+Bajo `set -euo pipefail`, si `kubectl exec` falla: `2>/dev/null` se traga el
+mensaje, `pipefail` propaga el fallo del primer tramo a la tuberia, la
+asignacion hereda ese estado y `set -e` mata el script **antes** de que la
+comparacion de la linea siguiente pueda registrar nada. La guarda existia y
+nunca llego a ejecutarse.
+
+### La carrera
+
+El pod paso a `Ready` a las **09:51:19** y el script hizo `exec` contra el
+**09:51:20**, un segundo despues. En ese instante el agente aun estaba
+inicializandose: sus propias trazas dicen `Initializing daemon` e
+`Initializing IPAM` a las 09:51:18,2. `cilium-dbg status` interroga al agente;
+un agente que acaba de pasar su readiness probe todavia no responde ese
+status.
+
+**`Ready` no es `sabe responder`.** Es la tercera encarnacion de la misma
+familia que ya nos costo dos arranques: *registrado* no era *enrutado* (#77),
+*aplicado* no era *servido* (#22), y ahora *rolled out* no es *contestable*.
+En los tres casos el gate leyo una senal adyacente a la que le importaba.
+
+### Limite de esta evidencia
+
+**No hay mensaje de error capturado.** El `2>/dev/null` lo destruyo en el
+momento de producirse, y la instancia no lo conserva en ningun otro sitio. La
+adjudicacion se apoya en la convergencia de tres hechos independientes --
+unica sentencia con stderr descartado, muerte a un segundo del Ready, y agente
+demostrablemente a medio inicializar-- no en el error en si. Es inferencia
+fuerte, no lectura directa, y asi debe constar. Lo que si queda probado es
+que **fallo el primer tramo de la tuberia**; con el stderr destruido no se
+puede distinguir si `kubectl exec` no llego a alcanzar el contenedor o si
+llego y fue `cilium-dbg` quien devolvio rc!=0 contra un daemon a medio
+inicializar. Bajo `pipefail` ambos mueren identico, y el fix cubre los dos.
+
+El propio descarte es parte del defecto: una guarda cuya entrada se construye
+tirando el stderr **no puede informar de su propio fallo**. Convirtio un error
+diagnosticable en una muerte muda, y costo un arranque entero averiguar donde
+habia ocurrido.
+
+### Lo que este arranque coronó
+
+Cuarta prueba consecutiva de que lo fail-closed aguanta:
+
+- **El parser de #23**: superado el punto exacto donde abortaba, y verificado
+  vivo devolviendo `True`.
+- **El fix de #22**: el primer `assert_gateway_schema` volvio a pasar a las
+  09:50:26 con los siete CRDs, TLSRoute en `v1alpha2` y bundle v1.6.1.
+- **El gate de join**: CP-1 y CP-2 leyeron `absent` y **esperaron**, anotando
+  su espera cada ~310s, sin abrir. Siguen cerrados al escribir esto.
+- **Cero estado publicado**: los cinco parametros SSM ausentes. Un fundador que
+  no termina no deja material de join a medias.
+
+Sigue sin probarse el tramo posterior: segundo `assert_gateway_schema`,
+publicacion en SSM, joins reales, quorum etcd 3/3, workers y datapath.
+
+### Hallazgo menor, del mismo forense
+
+La salida de helm aparece **duplicada** en el log. La causa es que el script ya
+redirige su stdout al fichero con `exec >>` y ademas hace
+`... | tee -a /var/log/k8s-cp-bootstrap.log` en varios puntos: `tee` escribe en
+el fichero y en su stdout, que es el mismo fichero. Cosmetico, pero indujo a
+error dos veces al leer los logs. Anotado, no corregido.
