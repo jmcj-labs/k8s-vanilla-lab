@@ -1549,6 +1549,52 @@ re-ejecutar `make bootstrap-aws` contra la cuenta, y la política **viva** se
 verifica con `aws iam simulate-principal-policy` antes de lanzar nada: las tres
 acciones permitidas sobre el prefijo, y `PutObject` sobre `etcd/` denegado.
 
+### Segunda manifestacion: la verificacion circular
+
+El septimo Apply murio **una llamada mas adelante**: `s3:PutObject` ya pasaba
+y fallo `s3:PutObjectTagging`, que los `default_tags` del provider hacen
+inevitable en cada objeto.
+
+La causa de fondo no fue olvidar una accion, sino el metodo. Se concedieron
+tres acciones y se verificaron **esas mismas tres** con
+`simulate-principal-policy`: los cuatro veredictos eran correctos y no probaban
+nada util, porque comprobaban que la politica decia lo escrito, no que lo
+escrito bastara. **Verificacion circular** -- la misma forma que el cruce
+externo confirmando el alcance que se le fijo, repetida dentro del mismo
+incidente y dos horas despues.
+
+El rol es OIDC-only -- su trust admite solo `sts:AssumeRoleWithWebIdentity`
+desde el proveedor OIDC de GitHub -- y **no se puede asumir en local**, que era
+la unica forma de enumerar el conjunto ejercitando el ciclo real. Comprobado,
+no supuesto.
+
+La primera reaccion fue conceder un superconjunto de diez acciones: **el mismo
+error apuntando hacia arriba**. La lista correcta no la dicta ni la memoria ni
+el ultimo 403, sino el **call graph del provider fijado**
+(`hashicorp/aws 6.46.0`). Con `default_tags` y bucket versionado,
+`aws_s3_object` llama: `PutObject` + `PutObjectTagging` al crear, `GetObject` +
+`GetObjectTagging` al leer, y al destruir **`ListObjectVersions`** seguido de
+`DeleteObject`/`DeleteObjectVersion` por cada version y delete marker.
+
+Ese `ListObjectVersions` es el hallazgo que ninguna de las dos listas anteriores
+tenia: corresponde a **`s3:ListBucketVersions`, que es accion de BUCKET**, asi
+que el statement de objeto no puede cubrirla por mucho que se amplie. El apply
+habria pasado y **el destroy habria fallado** -- un tercer arranque perdido, y
+ademas el mas caro de diagnosticar, porque el sintoma habria aparecido al final.
+Se acota con condicion `s3:prefix` para que no pueda enumerar `etcd/` ni `cnpg/`.
+
+Quedan **fuera** a proposito, porque este call graph no las alcanza:
+`AbortMultipartUpload` (payloads de ~30 KiB, bajo el umbral multipart),
+`DeleteObjectTagging` (el destroy borra la version, no sus etiquetas),
+`GetObjectVersion` y `GetObjectVersionTagging`.
+
+**Verifique mi lista, no la llamada.** Una verificacion que solo confirma la
+lista propia no es una verificacion, y da igual si la lista peca por defecto o
+por exceso: ninguna de las dos versiones miraba lo unico que decide, que es
+**que llama el codigo**. Cuando el permiso no se puede ejercitar, la fuente es
+el call graph de la version exacta del provider que esta fijada -- se lee, no
+se recuerda -- y se acota por Resource.
+
 **Todo canal nuevo tiene dos extremos, y el lector y el escritor se revisan
 juntos.** Mover un dato de sitio no es un cambio de un lado: es un permiso de
 escritura, un permiso de lectura, un orden de creación y un borrado. Revisar

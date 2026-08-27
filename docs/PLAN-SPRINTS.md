@@ -169,6 +169,18 @@ mete una variable más en un día que ya tiene la suya.
   `VAR=$(... 2>/dev/null)` bajo `set -e` sin guarda en línea. Ahí el descarte
   del stderr convierte un fallo diagnosticable en una muerte muda, y `pipefail`
   la propaga sin que la guarda de la línea siguiente llegue a ejecutarse.
+- **Estandar de verificacion de permisos nuevos** (27-ago, INCIDENTS #26): un
+  permiso nuevo se verifica **ejercitando el ciclo real con el rol asumido**
+  (put + get + delete sobre una key canario), no simulando el contrato. Dos
+  manifestaciones del mismo incidente en el mismo canal S3 -- primero sin
+  `PutObject`, luego sin `PutObjectTagging` -- salieron ambas de simular en vez
+  de ejercitar. Cuando el rol no sea asumible (OIDC-only, como el de CI),
+  `simulate-principal-policy` es el sustituto -- pero la lista **no** sale del
+  403 (eso solo nombra el siguiente fallo, no el conjunto) ni de la memoria:
+  sale del **call graph de la version del provider fijada en el lock**. En #26
+  eso revelo `s3:ListBucketVersions`, accion de bucket que ninguna lista de
+  acciones de objeto podia contener y que habria roto el destroy, no el apply.
+  Con negativa de control sobre un prefijo vecino. Al checklist de revision.
 - **Bucket propio para los objetos de bootstrap** (27-ago, nota de fase 2, con
   INCIDENTS #26 de contexto): hoy los renders viven bajo `bootstrap/` en el
   bucket persistente de backups, junto a `etcd/` y `cnpg/`. Un bucket del
