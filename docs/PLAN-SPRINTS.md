@@ -160,3 +160,13 @@ mete una variable más en un día que ya tiene la suya.
   pero hoy cualquier error distinto de ausencia aborta de inmediato. Añadir
   retry acotado por deadline real, conservando fail-closed y el diagnóstico,
   después de coronar el bootstrap directo.
+- **Auditar los gates que parsean salida humana de herramientas** (27-ago,
+  INCIDENTS #23): barrer `cilium-dbg`, `kubeadm` y `helm` en busca de checks
+  que asuman un separador (`-F:`, `cut -d`, `grep` por subcadena) sobre una
+  salida sin contrato. El caso de #23 era determinista y costó un Apply
+  entero. Auditoría, no reescritura preventiva.
+- **El CI sondeó 18m29s a un fundador muerto al minuto 2** (27-ago): el
+  timeout de 1210s mide la paciencia del workflow, no el bootstrap. Considerar
+  que el fundador publique un marcador de fallo temprano en SSM y que la
+  espera lo lea para cortar. Reduce el ciclo de diagnóstico y el coste de cada
+  arranque roto.

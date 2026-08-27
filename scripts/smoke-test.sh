@@ -53,8 +53,13 @@ for CILIUM_POD in "${CILIUM_PODS[@]}"; do
     cilium-dbg status 2>/dev/null | grep -i "KubeProxyReplacement" | head -1) \
     || FAIL "could not read KPR status from live pod ${CILIUM_POD}"
   echo "  ${CILIUM_POD}: ${KPR_LINE}"
-  echo "${KPR_LINE}" | grep -q "True" \
-    || FAIL "${CILIUM_POD} does not report KubeProxyReplacement: True"
+  # grep -q "True" accepted the substring ANYWHERE on the line -- a device
+  # name or a future field carrying it would have passed a False datapath.
+  # That is the fail-open mirror of the fail-closed parser in INCIDENTS #23.
+  # Same fix on both sides: take the token, compare it exactly.
+  KPR=$(printf '%s\n' "${KPR_LINE}" | awk '$1 == "KubeProxyReplacement:" {print $2; exit}')
+  [ "${KPR}" = "True" ] \
+    || FAIL "${CILIUM_POD} reports KubeProxyReplacement='${KPR}' (expected exactly True)"
 done
 
 CILIUM_DS=$(kubectl -n kube-system get ds cilium -o json)

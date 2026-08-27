@@ -1139,3 +1139,129 @@ solo sobre sus datos.** Si acepta combinaciones que la herramienta real
 rechaza, el test demuestra una API imaginaria. Y una línea familiar tampoco
 queda revisada por haber sido leída: cuando su contrato decide el arranque,
 se contrasta con la CLI real o su ayuda.
+
+---
+
+## 23. El parser que suspendió a un datapath sano
+
+**Cuándo**: 2026-08-27, segundo Apply del bootstrap directo a Cilium 1.20.1 +
+Gateway API v1.6.1 (run `33055713509`, `main` en `5534bf9`).
+**Severidad**: el fundador abortó a los 2m04s de empezar; el Apply agotó sus
+1210s esperando un kubeconfig que nunca se publicaría. Sin pérdida de datos;
+laboratorio efímero. Ventana de infraestructura: 41m27s (6 instancias),
+**0,1533 USD de coste base** (EC2 + los dos NLB; no incluye EBS, IPv4, NLCU
+ni transferencia).
+
+### Cronología UTC
+
+```
+08:49:07  CI lanza el Apply
+08:52:49  arrancan CP-0, CP-1, CP-2
+08:53:30  tofu apply termina -- infra creada limpia
+08:53:36  CI empieza a sondear SSM por el kubeconfig
+08:54:08  OK registrado en el target group -- kubeadm init autorizado
+08:54:27  OK kubeadm init completado
+08:54:31  OK API target healthy -- el NLB ya enruta a CP-0
+08:54:36  OK [after CRD apply] siete CRDs en v1, TLSRoute en v1alpha2, bundle v1.6.1
+08:54:37  helm despliega Cilium 1.20.1; el DaemonSet rueda
+08:55:16  ERROR: KubeProxyReplacement='True   [ens5   10.0.1.227 fe80'   <-- abort
+08:55:17  cloud-init cierra en error (Up 141.63s)
+09:13:46  CI se rinde: kubeconfig ausente tras 1210s
+09:24:29  CP-1 aborta cerrado: joined-count=absent tras 1826s
+09:24:34  CP-2 aborta cerrado: joined-count=absent tras 1830s
+```
+
+Los extractos están deliberadamente redactados. El log íntegro de `kubeadm
+init` contiene material de join y queda solo en el archivo forense local; no
+entra en Git.
+
+### Causa técnica
+
+El assert del datapath vivo leía la salida de `cilium-dbg status` así:
+
+```bash
+KPR=$(... | awk -F: 'tolower($1) ~ /kubeproxyreplacement/ {gsub(...); print $2; exit}')
+[ "${KPR}" = "True" ] || { log "ERROR: ..."; exit 1; }
+```
+
+La línea real que imprime el agente, capturada del CP-0 vivo:
+
+```
+KubeProxyReplacement:    True   [ens5   10.0.1.227 fe80::4a6:16ff:fea6:6065 (Direct Routing)]
+```
+
+`-F:` parte por **todos** los dos puntos. `$2` termina en el primero que
+aparece dentro de la IPv6 link-local del dispositivo, y el token extraído
+fue `True   [ens5   10.0.1.227 fe80`, que no es `True`.
+
+**El sufijo de dispositivos es lo fatal, no la IPv6.** Cilium añade siempre
+`[<iface> <ip> ... (Direct Routing)]` cuando KPR está activo. Sin IPv6 el
+token habría sido `True   [ens5   10.0.1.227 (Direct Routing)]`: tampoco es
+`True`. La IPv6 solo decide **dónde** trunca. El fallo es por tanto
+**determinista en todo arranque**, no una carrera ni un caso de borde.
+
+Lo verificado estaba bien. Cilium 1.20.1 se instaló, el DaemonSet rodó, y
+`KubeProxyReplacement` era `True` de verdad. Falló el verificador, no el
+datapath.
+
+### Procedencia
+
+Regresión introducida en `b9adbaa` (*feat(bootstrap): start on cilium 1.20 and
+gateway api 1.6*), la reescritura del bootstrap para nacer en el estado
+destino. **No era un latente que despertó**: la línea nació rota ese mismo día
+y habría abortado cualquier arranque.
+
+### Lo que este arranque sí coronó
+
+Es el primer arranque en el que **todo lo fail-closed se comportó de punta a
+punta**, y conviene registrarlo porque es la prueba en hierro de dos fixes:
+
+- **El fix de #22 (`kubectl get --raw` sobre discovery)**: el primer
+  `assert_gateway_schema` **pasó** a las 08:54:36 con el contrato real --
+  siete CRDs sirviendo `v1`, TLSRoute también en `v1alpha2`, `bundle-version`
+  v1.6.1. Los CRDs van antes de Cilium por diseño y llegaron enteros.
+- **El gate de join del 26-ago**: CP-1 y CP-2 leyeron `absent` y **esperaron**
+  ~1828s antes de abortar cerrados. Ninguno tradujo "no existe" a "puerta
+  abierta". Primera vez que se ejerce contra hierro.
+- **El fundador abortó limpio**: cloud-init lo identificó por nombre
+  (`Runparts: 1 failures (02-control-plane-init.sh)`), no quedó proceso vivo,
+  y **no se publicó ni un byte de estado**: los cinco parámetros SSM
+  (`kubeconfig`, `join-command`, `ca-cert-hash`, `cp/certificate-key`,
+  `cp/joined-count`) quedaron ausentes.
+
+Lo que este arranque **no** llegó a probar: el segundo
+`assert_gateway_schema` ("after Cilium start") y los Steps de publicación
+(kubeconfig a SSM, material de join, `joined-count=1`). De ese tramo no hay
+evidencia ni a favor ni en contra.
+
+### El defecto espejo
+
+`scripts/smoke-test.sh` comprobaba lo mismo con `grep -q "True"` sobre la
+línea entera. Es el mismo error por el otro lado: acepta la subcadena
+aparezca donde aparezca -- en un nombre de dispositivo, en un campo futuro --
+y habría dado por bueno un datapath en `False`. Uno suspendía a un sistema
+sano, el otro aprobaba a uno enfermo; ambos por no extraer el campo.
+
+### Fix y regla
+
+Ambos sitios extraen ahora el token por posición y comparan exacto:
+
+```bash
+awk '$1 == "KubeProxyReplacement:" {print $2; exit}'
+[ "${KPR}" = "True" ]
+```
+
+Validado contra el CP-0 vivo antes de escribir el fix: imprime `True`, sin
+espacios ni sufijo.
+
+**Se parsea el dato, no la prosa.** La salida de una herramienta pensada para
+humanos no tiene contrato de separadores: `cilium-dbg` intercala IPs, IPv6 y
+paréntesis en el mismo renglón que el valor. Cuando el arranque depende de
+ese valor, se toma el campo por su posición y se compara exacto -- nunca por
+subcadena, nunca troceando por un carácter que el propio valor contiene.
+
+**Y los tests de parsers se alimentan de salida real capturada, no de líneas
+inventadas.** `scripts/test-kpr-parser.sh` usa la línea literal del cluster
+vivo, e incluye el parser roto como control: si el defecto volviera, el test
+falla. Un test escrito contra la salida que uno *imagina* solo demuestra que
+el parser coincide con esa imaginación.
