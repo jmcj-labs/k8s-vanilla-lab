@@ -1549,6 +1549,33 @@ re-ejecutar `make bootstrap-aws` contra la cuenta, y la política **viva** se
 verifica con `aws iam simulate-principal-policy` antes de lanzar nada: las tres
 acciones permitidas sobre el prefijo, y `PutObject` sobre `etcd/` denegado.
 
+### Segunda manifestacion: la verificacion circular
+
+El septimo Apply murio **una llamada mas adelante**: `s3:PutObject` ya pasaba
+y fallo `s3:PutObjectTagging`, que los `default_tags` del provider hacen
+inevitable en cada objeto.
+
+La causa de fondo no fue olvidar una accion, sino el metodo. Se concedieron
+tres acciones y se verificaron **esas mismas tres** con
+`simulate-principal-policy`: los cuatro veredictos eran correctos y no probaban
+nada util, porque comprobaban que la politica decia lo escrito, no que lo
+escrito bastara. **Verificacion circular** -- la misma forma que el cruce
+externo confirmando el alcance que se le fijo, repetida dentro del mismo
+incidente y dos horas despues.
+
+El rol es OIDC-only y no se puede asumir en local, asi que el conjunto
+necesario **no se puede enumerar ejercitandolo**. Enumerarlo de memoria ya
+costo dos applies. Se concede por tanto el **ciclo de vida de objeto completo**
+(incluidas etiquetas y variantes de version, porque el bucket tiene versionado
+y cada objeto lleva `default_tags`). Lo que mantiene el permiso estrecho es el
+**recurso**, no la lista de acciones: un prefijo, solo a nivel de objeto, nada
+sobre el bucket ni sobre `etcd/` o `cnpg/`.
+
+**Una verificacion que solo confirma la lista propia no es una verificacion.**
+Cuando no se puede ejercitar el permiso de verdad, se concede el ciclo completo
+del recurso y se acota por Resource -- no se adivina el minimo accion por
+accion, pagando un arranque por cada acierto parcial.
+
 **Todo canal nuevo tiene dos extremos, y el lector y el escritor se revisan
 juntos.** Mover un dato de sitio no es un cambio de un lado: es un permiso de
 escritura, un permiso de lectura, un orden de creación y un borrado. Revisar
