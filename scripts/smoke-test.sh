@@ -14,13 +14,44 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+FAIL() { echo "✗ $*" >&2; exit 1; }
+OK() { echo "✓ $*"; }
+
+# PREFLIGHT, genuinely first: before sourcing anything and before any external
+# process at all. It used to sit below, after `dirname` had already run, which
+# contradicted the contract it states -- and made the case impossible to test
+# with a trimmed PATH, because the script died on the missing dirname instead
+# of reaching the decision.
+#
+# It is also before any temporary resource is created. Two polls below bound
+# their AWS call with GNU timeout, which macOS does not ship. Without it the `until` loop never satisfies its
+# condition and the run dies 300s later blaming the infrastructure -- "NLB
+# targets not ALL healthy" -- for a tool that was simply absent. A missing
+# tool must never be reported as a sick cluster.
+#
+# gtimeout is the fallback because `brew install coreutils` does not by itself
+# put an unprefixed `timeout` on PATH: Homebrew prefixes the GNU tools with g
+# so they do not shadow the system ones.
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN=gtimeout
+else
+  FAIL "GNU timeout is required; on macOS: brew install coreutils"
+fi
+
+# SCRIPT_DIR without spawning a process: `dirname` is external, and nothing
+# external may run before the preflight above. Parameter expansion + builtins.
+_SMOKE_SRC="${BASH_SOURCE[0]}"
+case "${_SMOKE_SRC}" in
+  */*) _SMOKE_DIR="${_SMOKE_SRC%/*}" ;;
+  *)   _SMOKE_DIR="." ;;
+esac
+SCRIPT_DIR=$(cd "${_SMOKE_DIR}" && pwd)
 # shellcheck source=scripts/lib/envoy-e2e-verdict.sh
 . "${SCRIPT_DIR}/lib/envoy-e2e-verdict.sh"
 
 EXPECTED_NODES="${EXPECTED_NODES:-6}"
-FAIL() { echo "✗ $*" >&2; exit 1; }
-OK() { echo "✓ $*"; }
 
 echo "Cluster nodes:"
 kubectl get nodes
@@ -47,7 +78,14 @@ echo "${CILIUM_JSON}" | jq -e --argjson expected "${EXPECTED_NODES}" '
       and any(.spec.containers[]; .name == "cilium-agent" and (.image | contains(":v1.20.1"))))' >/dev/null \
   || FAIL "actual cilium-agent pods are not ${EXPECTED_NODES}/${EXPECTED_NODES} Running+Ready on v1.20.1"
 
-mapfile -t CILIUM_PODS < <(echo "${CILIUM_JSON}" | jq -r '.items[].metadata.name' | sort)
+# Read into the array without mapfile: it is a bash 4 builtin and macOS ships
+# bash 3.2, so this line aborted the suite on the project's own primary dev
+# platform -- long before reaching 15d, the check that claims to be "run
+# locally". Portable form, same result.
+CILIUM_PODS=()
+while IFS= read -r CILIUM_POD_NAME; do
+  CILIUM_PODS+=("${CILIUM_POD_NAME}")
+done < <(echo "${CILIUM_JSON}" | jq -r '.items[].metadata.name' | sort)
 for CILIUM_POD in "${CILIUM_PODS[@]}"; do
   KPR_LINE=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
     cilium-dbg status 2>/dev/null | grep -i "KubeProxyReplacement" | head -1) \
@@ -914,7 +952,7 @@ WORKER_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
 HEALTH_START=$(date +%s)
 TARGETS_JSON='{"TargetHealthDescriptions":[]}'
-until TARGETS_JSON=$(timeout 15 aws elbv2 describe-target-health \
+until TARGETS_JSON=$("${TIMEOUT_BIN}" 15 aws elbv2 describe-target-health \
       --target-group-arn "${TG_ARN}" --region "${AWS_REGION}" \
       --cli-connect-timeout 5 --cli-read-timeout 10) \
   && [ "$(echo "${TARGETS_JSON}" | python3 -c '
@@ -978,7 +1016,13 @@ GW_PIN=$(kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}
   | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -binary | base64)
 E2E_HEADERS=$(mktemp)
-trap 'rm -f "${E2E_HEADERS}"; cleanup_pvc' EXIT
+# The whole chain, not just cleanup_pvc. Each stage above ADDS its cleanup to
+# the trap; this line used to REPLACE it, silently dropping cleanup_iam,
+# cleanup_netpol, cleanup_data, cleanup_contract and cleanup_backup_job. Every
+# run that reached this far -- a full pass, or a failure in section 15 -- left
+# those artefacts behind, and the next run died on AlreadyExists instead of
+# testing anything. Built carefully in six places and overwritten in one.
+trap 'rm -f "${E2E_HEADERS}"; cleanup_pvc; cleanup_iam; cleanup_netpol; cleanup_data; cleanup_contract; cleanup_backup_job' EXIT
 E2E_CODE=$(curl -sk --max-time 20 --pinnedpubkey "sha256//${GW_PIN}" \
   --connect-to "shipments.logistics.lab:443:${NLB_DNS}:443" \
   -D "${E2E_HEADERS}" -o /dev/null -w '%{http_code}' "https://shipments.logistics.lab/") \
@@ -1031,7 +1075,7 @@ CP_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
 API_HEALTH_START=$(date +%s)
 API_TARGETS_JSON='{"TargetHealthDescriptions":[]}'
-until API_TARGETS_JSON=$(timeout 15 aws elbv2 describe-target-health \
+until API_TARGETS_JSON=$("${TIMEOUT_BIN}" 15 aws elbv2 describe-target-health \
       --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}" \
       --cli-connect-timeout 5 --cli-read-timeout 10) \
   && [ "$(echo "${API_TARGETS_JSON}" | python3 -c '
@@ -1141,11 +1185,24 @@ for SG_NAME in "${CLUSTER_NAME}-cp-sg" "${CLUSTER_NAME}-worker-sg"; do
 done
 OK "negative proof: no inbound TCP/22 on either security group"
 
-# 15d. The HUMAN channel, when the operator's plugin is present. Skipped in
-# CI (runners have no session-manager-plugin) but exercised locally: closing
-# SSH without ever proving the interactive door opens would repeat the very
-# mistake this section exists to prevent, one level up.
-if command -v session-manager-plugin >/dev/null 2>&1; then
+# 15d. The HUMAN channel. Closing SSH without ever proving the interactive
+# door opens would repeat the very mistake this section exists to prevent, one
+# level up -- so this is exercised locally, by an operator, with the role that
+# is meant to open it.
+#
+# The boundary is CI-vs-local, declared from the environment. It used to be
+# "does the operator have session-manager-plugin", on the premise that CI
+# runners do not -- a premise that stopped being true. The runners now carry
+# the plugin, the guard stopped skipping, and the check failed on the
+# ssm:StartSession the CI role lacks BY DESIGN: 64 green checks and one red
+# that could not have been anything else.
+#
+# Not guarded on "does this principal have StartSession" either: asking that
+# needs another capability, and it would turn a REAL AccessDenied -- an actual
+# local regression -- into a silent skip.
+if [ "${GITHUB_ACTIONS:-false}" = "true" ]; then
+  echo "  . human channel not exercised in CI; the CI role intentionally lacks ssm:StartSession"
+elif command -v session-manager-plugin >/dev/null 2>&1; then
   FIRST_CP=$(aws ec2 describe-instances --region "${AWS_REGION}" \
     --filters "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
               "Name=tag:CPIndex,Values=0" "Name=instance-state-name,Values=running" \
@@ -1158,7 +1215,7 @@ if command -v session-manager-plugin >/dev/null 2>&1; then
     || FAIL "interactive shell opened but did not execute a command"
   OK "human channel: interactive shell opened on CP-0 and ran a command (make ssm-cp works)"
 else
-  echo "  · human channel not exercised here (no session-manager-plugin); it is an acceptance step run locally"
+  echo "  . human channel not exercised locally: session-manager-plugin unavailable"
 fi
 
 echo ""

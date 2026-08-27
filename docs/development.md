@@ -15,8 +15,33 @@ In addition to the tools listed in the [Bootstrap Guide](bootstrap.md), local de
 | trivy | `brew install trivy` | `curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.70.0/contrib/install.sh \| sh -s -- -b /usr/local/bin v0.70.0` |
 | Python 3.9+ | preinstalled | preinstalled |
 | graphviz | `brew install graphviz` | `apt-get install graphviz` |
+| GNU coreutils (for `timeout`) | `brew install coreutils` | preinstalled |
 
 gitleaks is installed automatically by pre-commit on first run (via `language: golang`).
+
+### GNU `timeout` on macOS
+
+`scripts/smoke-test.sh` bounds its two NLB target-health polls with GNU
+`timeout`, which macOS does not ship. **`brew install coreutils` does not by
+itself put a binary named `timeout` on your `PATH`** — Homebrew installs the
+GNU tools with a `g` prefix to avoid shadowing the system ones. The script
+therefore accepts either name and prefers `timeout`:
+
+```bash
+timeout   # if present
+gtimeout  # the Homebrew-prefixed name, used as the fallback
+```
+
+So `brew install coreutils` is enough. If you would rather have the unprefixed
+names for everything, add the gnubin directory to your `PATH`:
+
+```bash
+PATH="/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH"
+```
+
+The script fails fast at startup when neither name is found, before creating
+any temporary cluster resources — a missing tool must never be reported as a
+sick cluster (INCIDENTS #17's shape, pointing the other way).
 
 ---
 
