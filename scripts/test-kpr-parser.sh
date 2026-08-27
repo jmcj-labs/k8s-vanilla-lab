@@ -19,9 +19,13 @@ NO_V6='KubeProxyReplacement:    True   [ens5   10.0.1.227 (Direct Routing)]'
 # A datapath that is genuinely not replacing kube-proxy.
 FALSE_LINE='KubeProxyReplacement:  False'
 
-# The parser as it now appears in bootstrap/control-plane.yaml and
-# scripts/smoke-test.sh. Kept character-identical on purpose.
-kpr() { awk '$1 == "KubeProxyReplacement:" {print $2; exit}'; }
+# The parser under test is the SHIPPED one, sourced from where it lives --
+# not a copy. A copy drifts, and then the test proves only that the copy
+# agrees with itself.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=bootstrap/kpr-gate.sh
+. "$ROOT/bootstrap/kpr-gate.sh"
+kpr() { kpr_token; }
 # The parser that shipped in b9adbaa and aborted the founder.
 kpr_broken() {
   awk -F: 'tolower($1) ~ /kubeproxyreplacement/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}'

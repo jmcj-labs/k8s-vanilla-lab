@@ -97,6 +97,7 @@ locals {
   # Keep both the source fragments and the exact templatefile output ASCII.
   bootstrap_common     = file("${path.module}/../../../bootstrap/common.yaml")
   joined_count_library = file("${path.module}/../../../bootstrap/joined-count.sh")
+  kpr_gate_library     = file("${path.module}/../../../bootstrap/kpr-gate.sh")
   bootstrap_cp_founder = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
     cluster_name         = var.cluster_name
     aws_region           = var.aws_region
@@ -105,6 +106,7 @@ locals {
     api_endpoint_dns     = module.nlb.dns_name
     api_target_group_arn = module.nlb.api_target_group_arn
     ssm_parameter_path   = local.ssm_parameter_base
+    kpr_gate_library     = local.kpr_gate_library
   })
   bootstrap_cp_join = [for index in range(var.control_plane_count) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
     cluster_name         = var.cluster_name
@@ -145,6 +147,7 @@ data "cloudinit_config" "control_plane" {
       condition = alltrue([
         length(regexall("[^\\x00-\\x7F]", local.bootstrap_common)) == 0,
         length(regexall("[^\\x00-\\x7F]", local.joined_count_library)) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.kpr_gate_library)) == 0,
         length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_join[count.index])) == 0,
         count.index != 0 || length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_founder)) == 0,
       ])

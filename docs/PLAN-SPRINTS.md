@@ -165,6 +165,10 @@ mete una variable más en un día que ya tiene la suya.
   que asuman un separador (`-F:`, `cut -d`, `grep` por subcadena) sobre una
   salida sin contrato. El caso de #23 era determinista y costó un Apply
   entero. Auditoría, no reescritura preventiva.
+  **Ampliado (27-ago, INCIDENTS #24)**: buscar además asignaciones
+  `VAR=$(... 2>/dev/null)` bajo `set -e` sin guarda en línea. Ahí el descarte
+  del stderr convierte un fallo diagnosticable en una muerte muda, y `pipefail`
+  la propaga sin que la guarda de la línea siguiente llegue a ejecutarse.
 - **El CI sondeó 18m29s a un fundador muerto al minuto 2** (27-ago): el
   timeout de 1210s mide la paciencia del workflow, no el bootstrap. Considerar
   que el fundador publique un marcador de fallo temprano en SSM y que la
