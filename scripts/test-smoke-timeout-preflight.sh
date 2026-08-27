@@ -18,10 +18,14 @@ PASS=0; FAILED=0
 
 NEEDLE="GNU timeout is required"
 MARKER="REACHED-EXTERNAL-DEPENDENCY"
-# A base with the ordinary utilities the script needs to start (dirname, etc.)
-# but WITHOUT timeout or gtimeout -- verified: neither lives in /usr/bin or
-# /bin on macOS, and Homebrew is deliberately excluded.
-BASE_PATH="/usr/bin:/bin"
+# PATH is the temp dir and NOTHING else. An earlier version kept /usr/bin:/bin
+# as a base "verified clean" -- verified on macOS, where timeout does not
+# exist. Ubuntu ships /usr/bin/timeout, so on CI the "neither present" case
+# silently had one and the test reported green for the wrong reason. A base
+# checked on one platform is not a clean base; it is a local observation.
+#
+# Only the tested script runs under this PATH: it needs no external process
+# before the preflight, which is the contract under test.
 
 # Runs the REAL script with the given fake binaries prepended to that base.
 # The kubectl stub prints a marker: reaching it is POSITIVE proof the preflight
@@ -40,7 +44,7 @@ run_case() {
 
   local out
   set +e
-  out=$(PATH="${dir}:${BASE_PATH}" /bin/bash "${SMOKE}" 2>&1)
+  out=$(PATH="${dir}" /bin/bash "${SMOKE}" 2>&1)
   set -e
   rm -rf "${dir}"
 
@@ -75,7 +79,7 @@ echo "=== el diagnostico nombra el remedio ==="
 D=$(mktemp -d)
 printf '#!/bin/sh\necho "%s"\nexit 1\n' "${MARKER}" > "${D}/kubectl"; chmod +x "${D}/kubectl"
 set +e
-OUT=$(PATH="${D}:${BASE_PATH}" /bin/bash "${SMOKE}" 2>&1)
+OUT=$(PATH="${D}" /bin/bash "${SMOKE}" 2>&1)
 set -e
 rm -rf "${D}"
 if printf '%s\n' "${OUT}" | grep -qF "brew install coreutils"; then

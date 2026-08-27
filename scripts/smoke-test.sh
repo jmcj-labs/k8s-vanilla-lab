@@ -14,17 +14,17 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-# shellcheck source=scripts/lib/envoy-e2e-verdict.sh
-. "${SCRIPT_DIR}/lib/envoy-e2e-verdict.sh"
-
-EXPECTED_NODES="${EXPECTED_NODES:-6}"
 FAIL() { echo "✗ $*" >&2; exit 1; }
 OK() { echo "✓ $*"; }
 
-# PREFLIGHT, before any external dependency and before any temporary resource
-# is created. Two polls below bound their AWS call with GNU timeout, which
-# macOS does not ship. Without it the `until` loop never satisfies its
+# PREFLIGHT, genuinely first: before sourcing anything and before any external
+# process at all. It used to sit below, after `dirname` had already run, which
+# contradicted the contract it states -- and made the case impossible to test
+# with a trimmed PATH, because the script died on the missing dirname instead
+# of reaching the decision.
+#
+# It is also before any temporary resource is created. Two polls below bound
+# their AWS call with GNU timeout, which macOS does not ship. Without it the `until` loop never satisfies its
 # condition and the run dies 300s later blaming the infrastructure -- "NLB
 # targets not ALL healthy" -- for a tool that was simply absent. A missing
 # tool must never be reported as a sick cluster.
@@ -39,6 +39,19 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
   FAIL "GNU timeout is required; on macOS: brew install coreutils"
 fi
+
+# SCRIPT_DIR without spawning a process: `dirname` is external, and nothing
+# external may run before the preflight above. Parameter expansion + builtins.
+_SMOKE_SRC="${BASH_SOURCE[0]}"
+case "${_SMOKE_SRC}" in
+  */*) _SMOKE_DIR="${_SMOKE_SRC%/*}" ;;
+  *)   _SMOKE_DIR="." ;;
+esac
+SCRIPT_DIR=$(cd "${_SMOKE_DIR}" && pwd)
+# shellcheck source=scripts/lib/envoy-e2e-verdict.sh
+. "${SCRIPT_DIR}/lib/envoy-e2e-verdict.sh"
+
+EXPECTED_NODES="${EXPECTED_NODES:-6}"
 
 echo "Cluster nodes:"
 kubectl get nodes
