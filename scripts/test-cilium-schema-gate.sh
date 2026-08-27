@@ -13,6 +13,15 @@ FAILED=0
 cat > "${TMP}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = api-resources ]; then
+  case "$*" in
+    *v1alpha2*) echo tlsroutes.gateway.networking.k8s.io ;;
+    *v1*) printf '%s\n' backendtlspolicies gatewayclasses gateways grpcroutes httproutes referencegrants tlsroutes \
+      | sed 's/$/.gateway.networking.k8s.io/' ;;
+    *) exit 2 ;;
+  esac
+  exit 0
+fi
 [ "${1:-}" = get ] && [ "${2:-}" = crd ] || exit 2
 KIND=${3%%.*}
 VERSIONS='[{"name":"v1","served":true}]'

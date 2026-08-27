@@ -57,6 +57,12 @@ validate: ## Check formatting and validate all stacks (no backend required)
 	done
 
 test: ## Run the script test suites that need no cluster and no AWS
+	@bash scripts/test-bootstrap-ascii.sh
+	@echo ""
+	@bash scripts/test-bootstrap-join-gate.sh
+	@echo ""
+	@bash scripts/test-smoke-envoy-e2e.sh
+	@echo ""
 	@bash scripts/test-witness-verdict.sh
 	@echo ""
 	@bash scripts/test-witness-liveness.sh

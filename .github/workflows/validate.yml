@@ -76,6 +76,12 @@ jobs:
         run: make test
         working-directory: .
 
+      - name: Render official Cilium 1.20.1 bootstrap chart
+        run: |
+          bash scripts/test-cilium-bootstrap-chart.sh
+          bash scripts/test-gateway-bootstrap-manifests.sh
+        working-directory: .
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:

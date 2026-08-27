@@ -93,6 +93,34 @@ locals {
   # SSM parameter paths
   ssm_parameter_base = "/k8s/${var.cluster_name}"
 
+  # cloud-init's MIME decoder corrupts non-ASCII text in 7bit shell parts.
+  # Keep both the source fragments and the exact templatefile output ASCII.
+  bootstrap_common     = file("${path.module}/../../../bootstrap/common.yaml")
+  joined_count_library = file("${path.module}/../../../bootstrap/joined-count.sh")
+  bootstrap_cp_founder = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
+    cluster_name         = var.cluster_name
+    aws_region           = var.aws_region
+    pod_cidr             = local.pod_cidr
+    service_cidr         = local.service_cidr
+    api_endpoint_dns     = module.nlb.dns_name
+    api_target_group_arn = module.nlb.api_target_group_arn
+    ssm_parameter_path   = local.ssm_parameter_base
+  })
+  bootstrap_cp_join = [for index in range(var.control_plane_count) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
+    cluster_name         = var.cluster_name
+    aws_region           = var.aws_region
+    api_endpoint_dns     = module.nlb.dns_name
+    ssm_parameter_path   = local.ssm_parameter_base
+    cp_index             = index
+    cp_count             = var.control_plane_count
+    joined_count_library = local.joined_count_library
+  })]
+  bootstrap_worker = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
+    cluster_name          = var.cluster_name
+    aws_region            = var.aws_region
+    ssm_join_token_path   = "${local.ssm_parameter_base}/join-command"
+    ssm_ca_cert_hash_path = "${local.ssm_parameter_base}/ca-cert-hash"
+  })
 }
 
 # Multi-part cloud-init for control planes.
@@ -112,9 +140,21 @@ data "cloudinit_config" "control_plane" {
   gzip          = true
   base64_encode = true
 
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        length(regexall("[^\\x00-\\x7F]", local.bootstrap_common)) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.joined_count_library)) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_join[count.index])) == 0,
+        count.index != 0 || length(regexall("[^\\x00-\\x7F]", local.bootstrap_cp_founder)) == 0,
+      ])
+      error_message = "bootstrap source/render contains non-ASCII bytes; cloud-init would corrupt or reject this MIME part"
+    }
+  }
+
   part {
     content_type = "text/x-shellscript"
-    content      = file("${path.module}/../../../bootstrap/common.yaml")
+    content      = local.bootstrap_common
     filename     = "01-common.sh"
   }
 
@@ -127,18 +167,8 @@ data "cloudinit_config" "control_plane" {
     for_each = count.index == 0 ? [1] : []
     content {
       content_type = "text/x-shellscript"
-      content = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
-        cluster_name = var.cluster_name
-        aws_region   = var.aws_region
-        pod_cidr     = local.pod_cidr
-        service_cidr = local.service_cidr
-        # Both the name AND the target group: resolving proves the NLB
-        # exists, registration proves the endpoint can route back here.
-        api_endpoint_dns     = module.nlb.dns_name
-        api_target_group_arn = module.nlb.api_target_group_arn
-        ssm_parameter_path   = local.ssm_parameter_base
-      })
-      filename = "02-control-plane-init.sh"
+      content      = local.bootstrap_cp_founder
+      filename     = "02-control-plane-init.sh"
     }
   }
 
@@ -147,14 +177,8 @@ data "cloudinit_config" "control_plane" {
   # genesis it costs one check and exits.
   part {
     content_type = "text/x-shellscript"
-    content = templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
-      cluster_name       = var.cluster_name
-      aws_region         = var.aws_region
-      api_endpoint_dns   = module.nlb.dns_name
-      ssm_parameter_path = local.ssm_parameter_base
-      cp_index           = count.index
-    })
-    filename = "03-control-plane-join.sh"
+    content      = local.bootstrap_cp_join[count.index]
+    filename     = "03-control-plane-join.sh"
   }
 }
 
@@ -163,21 +187,26 @@ data "cloudinit_config" "worker" {
   gzip          = true
   base64_encode = true
 
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        length(regexall("[^\\x00-\\x7F]", local.bootstrap_common)) == 0,
+        length(regexall("[^\\x00-\\x7F]", local.bootstrap_worker)) == 0,
+      ])
+      error_message = "bootstrap source/render contains non-ASCII bytes; cloud-init would corrupt or reject this MIME part"
+    }
+  }
+
   part {
     content_type = "text/x-shellscript"
-    content      = file("${path.module}/../../../bootstrap/common.yaml")
+    content      = local.bootstrap_common
     filename     = "01-common.sh"
   }
 
   part {
     content_type = "text/x-shellscript"
-    content = templatefile("${path.module}/../../../bootstrap/worker.yaml", {
-      cluster_name          = var.cluster_name
-      aws_region            = var.aws_region
-      ssm_join_token_path   = "${local.ssm_parameter_base}/join-command"
-      ssm_ca_cert_hash_path = "${local.ssm_parameter_base}/ca-cert-hash"
-    })
-    filename = "02-worker.sh"
+    content      = local.bootstrap_worker
+    filename     = "02-worker.sh"
   }
 }
 

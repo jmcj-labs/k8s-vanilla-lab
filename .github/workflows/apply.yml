@@ -85,23 +85,35 @@ jobs:
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
           KUBECONFIG_FILE=$(mktemp)
-          trap 'rm -f "${KUBECONFIG_FILE}"' EXIT
-          if ! aws ssm get-parameter \
+          SSM_ERR=$(mktemp)
+          trap 'rm -f "${KUBECONFIG_FILE}" "${SSM_ERR}"' EXIT
+          set +e
+          timeout 15 aws ssm get-parameter \
               --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
               --with-decryption \
               --query Parameter.Value \
               --output text \
-              --region "${AWS_REGION}" > "${KUBECONFIG_FILE}" 2>/dev/null; then
-            echo "No kubeconfig in SSM — fresh cluster, preflight skipped"
-            exit 0
+              --region "${AWS_REGION}" \
+              --cli-connect-timeout 5 --cli-read-timeout 10 \
+              > "${KUBECONFIG_FILE}" 2>"${SSM_ERR}"
+          SSM_RC=$?
+          set -e
+          if [ "${SSM_RC}" -ne 0 ]; then
+            if grep -q 'ParameterNotFound' "${SSM_ERR}"; then
+              echo "No kubeconfig in SSM — fresh cluster, preflight skipped"
+              exit 0
+            fi
+            echo "Cannot determine whether this is a live cluster (SSM rc=${SSM_RC}); refusing to treat unreadable as absent" >&2
+            sed 's/^/  /' "${SSM_ERR}" >&2
+            exit 1
           fi
           chmod 600 "${KUBECONFIG_FILE}"
           export KUBECONFIG="${KUBECONFIG_FILE}"
 
-          JOIN_CMD=$(aws ssm get-parameter \
+          JOIN_CMD=$(timeout 15 aws ssm get-parameter \
             --name "/k8s/${CLUSTER_NAME}/join-command" \
             --with-decryption --query Parameter.Value --output text \
-            --region "${AWS_REGION}")
+            --region "${AWS_REGION}" --cli-connect-timeout 5 --cli-read-timeout 10)
           API_ENDPOINT=$(echo "${JOIN_CMD}" | awk '{print $3}')
           CA_HASH=$(echo "${JOIN_CMD}" | grep -o 'sha256:[a-f0-9]*')
 
@@ -125,11 +137,11 @@ jobs:
             auth-extra-groups: system:bootstrappers:kubeadm:default-node-token
           TOKEN_EOF
 
-          aws ssm put-parameter \
+          timeout 30 aws ssm put-parameter \
             --name "/k8s/${CLUSTER_NAME}/join-command" \
             --value "kubeadm join ${API_ENDPOINT} --token ${TOKEN_ID}.${TOKEN_SECRET} --discovery-token-ca-cert-hash ${CA_HASH}" \
             --type SecureString --overwrite \
-            --region "${AWS_REGION}" >/dev/null
+            --region "${AWS_REGION}" --cli-connect-timeout 5 --cli-read-timeout 20 >/dev/null
           echo "✓ Fresh 24h bootstrap token minted; join-command updated (endpoint ${API_ENDPOINT} preserved)"
 
       - name: OpenTofu Apply
@@ -162,18 +174,35 @@ jobs:
           # instead of a blind sleep: a fresh cluster takes 8-12 min, a re-run on
           # a live cluster proceeds immediately — the workflow is re-entrant.
           echo "Waiting for cluster bootstrap (SSM kubeconfig, max 20 min)..."
-          ELAPSED=0
-          until aws ssm get-parameter \
-              --name "/k8s/${CLUSTER_NAME}/kubeconfig" \
-              --region "${AWS_REGION}" >/dev/null 2>&1; do
-            if [ "${ELAPSED}" -ge 1200 ]; then
-              echo "✗ Kubeconfig not in SSM after 20 min — CP bootstrap failed"
+          STARTED=$(date +%s)
+          LAST_LOG=0
+          while true; do
+            set +e
+            SSM_OUT=$(timeout 15 aws ssm get-parameter \
+              --name "/k8s/${CLUSTER_NAME}/kubeconfig" --region "${AWS_REGION}" \
+              --cli-connect-timeout 5 --cli-read-timeout 10 2>&1)
+            SSM_RC=$?
+            set -e
+            if [ "${SSM_RC}" -eq 0 ]; then
+              break
+            fi
+            if ! echo "${SSM_OUT}" | grep -q 'ParameterNotFound'; then
+              echo "✗ Cannot read kubeconfig state from SSM (rc=${SSM_RC}); refusing to wait on an unreadable answer" >&2
+              echo "${SSM_OUT}" | sed 's/^/  /' >&2
               exit 1
             fi
+            ELAPSED=$(( $(date +%s) - STARTED ))
+            if [ "${ELAPSED}" -ge 1200 ]; then
+              echo "✗ Kubeconfig not in SSM after ${ELAPSED}s — CP bootstrap failed"
+              exit 1
+            fi
+            if [ $(( ELAPSED - LAST_LOG )) -ge 120 ]; then
+              echo "  ...still bootstrapping (${ELAPSED}s)"
+              LAST_LOG=${ELAPSED}
+            fi
             sleep 30
-            ELAPSED=$((ELAPSED + 30))
-            echo "  ...still bootstrapping (${ELAPSED}s)"
           done
+          ELAPSED=$(( $(date +%s) - STARTED ))
           echo "✓ Kubeconfig available after ${ELAPSED}s"
           make platform CLUSTER_NAME="${CLUSTER_NAME}" AWS_REGION="${AWS_REGION}"
         working-directory: .

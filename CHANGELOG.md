@@ -49,10 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Bootstrap is now kube-proxy-free**: `kubeadm init` skips `addon/kube-proxy`; Cilium
-  1.19.6 runs with `kubeProxyReplacement=true`, explicit `k8sServiceHost`/`k8sServicePort`,
-  `gatewayAPI.enabled=true` and Hubble (relay + UI); Gateway API standard CRDs v1.2.1 are
-  applied before the Cilium install
+- **Bootstrap now lands directly on the target network stack (ADR-009)**: `kubeadm init`
+  skips `addon/kube-proxy`; Cilium 1.20.1 runs with `kubeProxyReplacement=true`, explicit
+  `k8sServiceHost`/`k8sServicePort`, Gateway API and Hubble. Gateway API v1.6.1 is applied
+  first as six individual standard CRDs plus the experimental TLSRoute overlay, with the
+  exact live schema asserted before and after Cilium starts
 - kube packages unpinned to the latest 1.35.x patch (series-scoped apt repo);
   containerd.io unpinned to the latest from the Docker repo (2.3.x)
 - EC2 `metadata_options`: IMDSv2 `http_put_response_hop_limit` raised 1 → 2 so

@@ -14,6 +14,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/lib/envoy-e2e-verdict.sh
+. "${SCRIPT_DIR}/lib/envoy-e2e-verdict.sh"
+
 EXPECTED_NODES="${EXPECTED_NODES:-6}"
 FAIL() { echo "✗ $*" >&2; exit 1; }
 OK() { echo "✓ $*"; }
@@ -33,12 +37,57 @@ KP_PODS=$(kubectl -n kube-system get pods -l k8s-app=kube-proxy --no-headers 2>/
 [ "${KP_PODS}" -eq 0 ] || FAIL "Found ${KP_PODS} kube-proxy pod(s) — bootstrap should skip addon/kube-proxy"
 OK "No kube-proxy pods"
 
-# ── 3. Cilium kube-proxy replacement ─────────────────────────────────────────
-KPR_LINE=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
-  cilium-dbg status 2>/dev/null | grep -i "KubeProxyReplacement" | head -1)
-echo "  ${KPR_LINE}"
-echo "${KPR_LINE}" | grep -q "True" || FAIL "cilium-dbg does not report KubeProxyReplacement: True"
-OK "Cilium KubeProxyReplacement is True"
+# ── 3. Cilium 1.20.1 and live kube-proxy replacement on every node ──────────
+CILIUM_JSON=$(kubectl -n kube-system get pods -l k8s-app=cilium -o json)
+echo "${CILIUM_JSON}" | jq -e --argjson expected "${EXPECTED_NODES}" '
+  (.items | length) == $expected
+  and all(.items[]; .status.phase == "Running"
+      and (.status.containerStatuses | length) > 0
+      and all(.status.containerStatuses[]; .ready == true)
+      and any(.spec.containers[]; .name == "cilium-agent" and (.image | contains(":v1.20.1"))))' >/dev/null \
+  || FAIL "actual cilium-agent pods are not ${EXPECTED_NODES}/${EXPECTED_NODES} Running+Ready on v1.20.1"
+
+mapfile -t CILIUM_PODS < <(echo "${CILIUM_JSON}" | jq -r '.items[].metadata.name' | sort)
+for CILIUM_POD in "${CILIUM_PODS[@]}"; do
+  KPR_LINE=$(kubectl -n kube-system exec "${CILIUM_POD}" -c cilium-agent -- \
+    cilium-dbg status 2>/dev/null | grep -i "KubeProxyReplacement" | head -1) \
+    || FAIL "could not read KPR status from live pod ${CILIUM_POD}"
+  echo "  ${CILIUM_POD}: ${KPR_LINE}"
+  echo "${KPR_LINE}" | grep -q "True" \
+    || FAIL "${CILIUM_POD} does not report KubeProxyReplacement: True"
+done
+
+CILIUM_DS=$(kubectl -n kube-system get ds cilium -o json)
+echo "${CILIUM_DS}" | jq -e --argjson expected "${EXPECTED_NODES}" '
+  .status.desiredNumberScheduled == $expected
+  and .status.updatedNumberScheduled == $expected
+  and .status.numberReady == $expected' >/dev/null \
+  || FAIL "cilium DaemonSet is not desired=updated=ready=${EXPECTED_NODES}"
+
+OP_JSON=$(kubectl -n kube-system get deployment cilium-operator -o json)
+echo "${OP_JSON}" | jq -e '
+  .status.replicas == .spec.replicas
+  and .status.updatedReplicas == .spec.replicas
+  and .status.readyReplicas == .spec.replicas' >/dev/null \
+  || FAIL "cilium-operator is not desired=updated=ready"
+kubectl -n kube-system get pods -l name=cilium-operator -o json | jq -e '
+  (.items | length) > 0
+  and all(.items[]; .status.phase == "Running"
+      and (.status.containerStatuses | length) > 0
+      and all(.status.containerStatuses[]; .ready == true)
+      and any(.spec.containers[]; .image | contains(":v1.20.1")))' >/dev/null \
+  || FAIL "actual cilium-operator pods are not Running+Ready on v1.20.1"
+
+ENVOY_DS=$(kubectl -n kube-system get ds cilium-envoy -o json)
+echo "${ENVOY_DS}" | jq -e --argjson expected "${EXPECTED_NODES}" '
+  .status.desiredNumberScheduled == $expected
+  and .status.updatedNumberScheduled == $expected
+  and .status.numberReady == $expected' >/dev/null \
+  || FAIL "cilium-envoy DaemonSet is not desired=updated=ready=${EXPECTED_NODES}"
+
+bash "${SCRIPT_DIR}/verify-cilium-120-schema.sh" \
+  || FAIL "Gateway API live schema is not the exact v1.6.1 hybrid required by Cilium 1.20.1"
+OK "Cilium 1.20.1: ${EXPECTED_NODES}/${EXPECTED_NODES} agents and Envoys Ready, operator Ready, KPR=True on every node; schema exact"
 
 # ── 4. providerID on every node ──────────────────────────────────────────────
 MISSING_PID=$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.providerID}{"\n"}{end}' \
@@ -858,17 +907,21 @@ WORKER_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
             "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
             "Name=instance-state-name,Values=running" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
-HEALTH_ELAPSED=0
-until TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --region "${AWS_REGION}") \
+HEALTH_START=$(date +%s)
+TARGETS_JSON='{"TargetHealthDescriptions":[]}'
+until TARGETS_JSON=$(timeout 15 aws elbv2 describe-target-health \
+      --target-group-arn "${TG_ARN}" --region "${AWS_REGION}" \
+      --cli-connect-timeout 5 --cli-read-timeout 10) \
   && [ "$(echo "${TARGETS_JSON}" | python3 -c '
 import json,sys
 t=json.load(sys.stdin)["TargetHealthDescriptions"]
 print("ok" if t and all(d["TargetHealth"]["State"]=="healthy" for d in t) else "no")')" = "ok" ]; do
+  HEALTH_ELAPSED=$(( $(date +%s) - HEALTH_START ))
   if [ "${HEALTH_ELAPSED}" -ge 300 ]; then
     echo "${TARGETS_JSON}" | python3 -c 'import json,sys; [print(" ", d["Target"]["Id"], d["TargetHealth"]["State"]) for d in json.load(sys.stdin)["TargetHealthDescriptions"]]' || true
     FAIL "NLB targets not ALL healthy after 300s"
   fi
-  sleep 15; HEALTH_ELAPSED=$((HEALTH_ELAPSED + 15))
+  sleep 15
 done
 TARGET_IDS=$(echo "${TARGETS_JSON}" | python3 -c '
 import json,sys
@@ -913,19 +966,25 @@ done
 OK "negative proof: NodePort closed on EVERY worker public IP (NLB is the only application door)"
 
 # 13e. POSITIVE e2e THROUGH the NLB: TLS pinned to the live Gateway cert.
-# 200 or 404 both prove the full datapath (world→NLB→NodePort→Gateway);
-# 404 simply means the app's HTTPRoute is not deployed yet (Repo 2's job).
+# A 404 proves the full datapath only when Envoy identifies itself in the
+# response. Refused, timeout, or an unmarked 404 is a failure. A real 200 is
+# the application path: e2e con 200 real llega con las rutas de Repo 2.
 GW_PIN=$(kubectl get secret -n infra shared-gw-tls -o jsonpath='{.data.tls\.crt}' \
   | base64 -d | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -binary | base64)
+E2E_HEADERS=$(mktemp)
+trap 'rm -f "${E2E_HEADERS}"; cleanup_pvc' EXIT
 E2E_CODE=$(curl -sk --max-time 20 --pinnedpubkey "sha256//${GW_PIN}" \
   --connect-to "shipments.logistics.lab:443:${NLB_DNS}:443" \
-  -o /dev/null -w '%{http_code}' "https://shipments.logistics.lab/") \
-  || FAIL "TLS through the NLB failed (pin mismatch or datapath broken)"
-case "${E2E_CODE}" in
-  200|404) OK "e2e through the NLB: TLS pinned to the Gateway cert, HTTP ${E2E_CODE} (datapath complete)";;
-  *) FAIL "unexpected HTTP ${E2E_CODE} through the NLB";;
-esac
+  -D "${E2E_HEADERS}" -o /dev/null -w '%{http_code}' "https://shipments.logistics.lab/") \
+  || FAIL "TLS through the NLB was refused/timed out or failed certificate pinning"
+envoy_e2e_verdict "${E2E_CODE}" "${E2E_HEADERS}" \
+  || { sed 's/^/  /' "${E2E_HEADERS}" >&2; FAIL "HTTP ${E2E_CODE} is not an Envoy-attributable datapath response"; }
+if [ "${E2E_CODE}" = 200 ]; then
+  OK "e2e con 200 real llega con las rutas de Repo 2"
+else
+  OK "e2e through NLB: Envoy-attributable HTTP 404 (datapath complete; Repo 2 routes absent)"
+fi
 
 # ── 14. HA control plane — endpoint, quorum, single door (S2 piece 3) ────────
 # Reuses NLB_ARN/NLB_DNS from section 13.
@@ -965,17 +1024,21 @@ CP_IDS=$(aws ec2 describe-instances --region "${AWS_REGION}" \
             "Name=tag:kubernetes.io/cluster/${CLUSTER_NAME},Values=owned" \
             "Name=instance-state-name,Values=running" \
   --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | sort)
-API_HEALTH_ELAPSED=0
-until API_TARGETS_JSON=$(aws elbv2 describe-target-health --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}") \
+API_HEALTH_START=$(date +%s)
+API_TARGETS_JSON='{"TargetHealthDescriptions":[]}'
+until API_TARGETS_JSON=$(timeout 15 aws elbv2 describe-target-health \
+      --target-group-arn "${API_TG_ARN}" --region "${AWS_REGION}" \
+      --cli-connect-timeout 5 --cli-read-timeout 10) \
   && [ "$(echo "${API_TARGETS_JSON}" | python3 -c '
 import json,sys
 t=json.load(sys.stdin)["TargetHealthDescriptions"]
 print("ok" if len(t)==3 and all(d["TargetHealth"]["State"]=="healthy" for d in t) else "no")')" = "ok" ]; do
+  API_HEALTH_ELAPSED=$(( $(date +%s) - API_HEALTH_START ))
   if [ "${API_HEALTH_ELAPSED}" -ge 300 ]; then
     echo "${API_TARGETS_JSON}" | python3 -c 'import json,sys; [print(" ", d["Target"]["Id"], d["TargetHealth"]["State"]) for d in json.load(sys.stdin)["TargetHealthDescriptions"]]' || true
     FAIL "API targets not 3/3 healthy after 300s"
   fi
-  sleep 15; API_HEALTH_ELAPSED=$((API_HEALTH_ELAPSED + 15))
+  sleep 15
 done
 API_TARGET_IDS=$(echo "${API_TARGETS_JSON}" | python3 -c '
 import json,sys

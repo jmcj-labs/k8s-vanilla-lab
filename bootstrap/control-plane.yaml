@@ -1,5 +1,5 @@
 #!/bin/bash
-# Control Plane bootstrap — FOUNDER node (index 0) of the HA control plane.
+# Control Plane bootstrap -- FOUNDER node (index 0) of the HA control plane.
 # Purpose: kubeadm init anchored to the NLB endpoint (kube-proxy-free),
 #          install Cilium in strict kube-proxy replacement mode, publish the
 #          join data + control-plane join material (SSM cp/ path) and open
@@ -16,69 +16,61 @@ log() {
 log "=== Starting Control Plane bootstrap (founder path) ==="
 
 # GENESIS OR REPLACEMENT? Index 0 renders this founder script statically at
-# plan time, so a REBUILT index 0 would land here too — and running
+# plan time, so a REBUILT index 0 would land here too -- and running
 # `kubeadm init` while CP-1/CP-2 still hold a live cluster would create a
 # second, irreconcilable one. The cluster's existence is decided by
 # cp/joined-count: the founder publishes it and `tofu destroy` deletes the
 # whole /k8s/<cluster>/ prefix, so on a genuinely fresh apply it is absent.
 #
 # FAIL CLOSED toward NOT initialising. `if aws ssm get-parameter; then` would
-# treat EVERY failure as "no cluster" — AccessDenied, IMDS credentials not
+# treat EVERY failure as "no cluster" -- AccessDenied, IMDS credentials not
 # ready yet, an SSM timeout or a network blip would all authorise a second
 # `kubeadm init` on top of a live cluster. Only ONE error means genesis:
-# ParameterNotFound. Parameter present ⇒ replacement; anything else ⇒ abort.
+# ParameterNotFound. Parameter present => replacement; anything else => abort.
 set +e
-SSM_OUT=$(aws ssm get-parameter \
+SSM_OUT=$(timeout 15 aws ssm get-parameter \
   --name "${ssm_parameter_path}/cp/joined-count" \
-  --region ${aws_region} 2>&1)
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 10 2>&1)
 SSM_RC=$?
 set -e
 
 if [ $${SSM_RC} -eq 0 ]; then
-  log "cp/joined-count exists — a cluster is already running."
+  log "cp/joined-count exists -- a cluster is already running."
   log "This node is a REPLACEMENT of index 0, not the founder: skipping kubeadm init."
   log "The control-plane JOIN script (next cloud-init part) will join it."
   exit 0
 fi
 
 if ! echo "$${SSM_OUT}" | grep -q "ParameterNotFound"; then
-  log "✗ ERROR: could not determine whether a cluster already exists (SSM rc=$${SSM_RC})"
+  log "ERROR: could not determine whether a cluster already exists (SSM rc=$${SSM_RC})"
   log "  $${SSM_OUT}"
   log "  Refusing to run kubeadm init: an unreadable answer cannot prove this is a genesis,"
   log "  and initialising on top of a live cluster would create a second, irreconcilable one."
   exit 1
 fi
-log "ParameterNotFound for cp/joined-count — this is the genesis of the cluster"
+log "ParameterNotFound for cp/joined-count -- this is the genesis of the cluster"
 
 # Step 1: Wait for common.yaml bootstrap to complete
 log "Step 1/9: Waiting for common bootstrap to complete"
-TIMEOUT=600  # 10 minutes
-ELAPSED=0
-INTERVAL=10
-
-while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+COMMON_START=$(date +%s)
+while true; do
   if grep -q "Step 8/8: Enabling kubelet service" /var/log/k8s-bootstrap.log 2>/dev/null && \
      grep -q "Common bootstrap completed successfully" /var/log/k8s-bootstrap.log 2>/dev/null; then
-    log "✓ Common bootstrap completed"
+    log "OK Common bootstrap completed"
     break
   fi
 
-  if [ $${ELAPSED} -eq 0 ]; then
-    log "Waiting for common bootstrap... (timeout: $${TIMEOUT}s)"
-  fi
-
-  sleep $${INTERVAL}
-  ELAPSED=$((ELAPSED + INTERVAL))
-
-  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
-    log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
+  COMMON_NOW=$(( $(date +%s) - COMMON_START ))
+  if [ $${COMMON_NOW} -ge 600 ]; then
+    log "ERROR: Common bootstrap did not complete within $${COMMON_NOW}s"
     log "Last 20 lines of bootstrap log:"
     tail -20 /var/log/k8s-bootstrap.log || true
     exit 1
   fi
+  sleep 10
 done
 
-# Step 1b: aws-iam-authenticator webhook material — MUST exist before
+# Step 1b: aws-iam-authenticator webhook material -- MUST exist before
 # kubeadm init (the API server starts with the webhook flags pointing at
 # these files). If anything here fails, ABORT: continuing would produce a
 # cluster silently missing IAM auth.
@@ -90,12 +82,12 @@ IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a
 curl -fsSL -o /usr/local/bin/aws-iam-authenticator \
   "https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v$${IAM_AUTH_VERSION}/aws-iam-authenticator_$${IAM_AUTH_VERSION}_linux_amd64"
 if ! echo "$${IAM_AUTH_SHA256}  /usr/local/bin/aws-iam-authenticator" | sha256sum -c -; then
-  log "✗ ERROR: aws-iam-authenticator checksum mismatch — aborting bootstrap"
+  log "ERROR: aws-iam-authenticator checksum mismatch -- aborting bootstrap"
   exit 1
 fi
 chmod 0755 /usr/local/bin/aws-iam-authenticator
 
-# clusterID disambiguated across accounts and regions: ACCOUNT.REGION.NAME —
+# clusterID disambiguated across accounts and regions: ACCOUNT.REGION.NAME --
 # the exact same value is computed by platform/install.sh, the Makefile and
 # the CI smoke.
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -115,17 +107,17 @@ for REQUIRED in /var/aws-iam-authenticator/cert.pem \
                 /var/aws-iam-authenticator/key.pem \
                 /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml; do
   if [ ! -s "$${REQUIRED}" ]; then
-    log "✗ ERROR: authenticator init did not produce $${REQUIRED} — aborting bootstrap"
+    log "ERROR: authenticator init did not produce $${REQUIRED} -- aborting bootstrap"
     exit 1
   fi
 done
-log "✓ aws-iam-authenticator webhook material in place"
+log "OK aws-iam-authenticator webhook material in place"
 
 # Step 2: Create kubeadm config file
 log "Step 2/9: Creating kubeadm configuration"
 
-# controlPlaneEndpoint is the NLB's DNS (ADR-007): every consumer — CP
-# joins, worker joins, kubeconfigs, Cilium, kubelets — uses the same stable
+# controlPlaneEndpoint is the NLB's DNS (ADR-007): every consumer -- CP
+# joins, worker joins, kubeconfigs, Cilium, kubelets -- uses the same stable
 # endpoint, and losing this founder node no longer strands the cluster.
 # kubeadm puts the endpoint host into the API server cert SANs by itself.
 PRIVATE_IP=$(hostname -i | awk '{print $1}')
@@ -134,34 +126,38 @@ log "API endpoint (NLB): ${api_endpoint_dns}:6443"
 
 # The NLB's DNS must resolve before kubeadm anchors to it (registration in
 # Route53 is fast but not instant after the NLB is created).
-DNS_ELAPSED=0
+DNS_START=$(date +%s)
 until getent hosts "${api_endpoint_dns}" >/dev/null 2>&1; do
-  if [ $${DNS_ELAPSED} -ge 300 ]; then
-    log "✗ ERROR: NLB DNS ${api_endpoint_dns} does not resolve after 300s"
+  DNS_NOW=$(( $(date +%s) - DNS_START ))
+  if [ $${DNS_NOW} -ge 300 ]; then
+    log "ERROR: NLB DNS ${api_endpoint_dns} does not resolve after $${DNS_NOW}s"
     exit 1
   fi
   sleep 10
-  DNS_ELAPSED=$((DNS_ELAPSED + 10))
 done
-log "✓ NLB DNS resolves"
+log "OK NLB DNS resolves"
 
 # ...but RESOLVING IS NOT ROUTING. A name that answers proves the NLB
 # exists, not that traffic to it can ever reach THIS node. If kubeadm init
 # ran before tofu registered this instance in the API target group, the
-# cluster would come up with an endpoint that black-holes its own API —
+# cluster would come up with an endpoint that black-holes its own API --
 # including the readiness checks kubeadm itself performs against it.
 # Gate on the registration fact: this instance ID present in the target
 # group (any health state; "healthy" is impossible before the API exists).
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $(curl -s -X PUT \
+IMDS_TOKEN=$(curl -fsS --connect-timeout 2 --max-time 5 -X PUT \
   'http://169.254.169.254/latest/api/token' \
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')" \
-  http://169.254.169.254/latest/meta-data/instance-id)
-[ -n "$${INSTANCE_ID}" ] || { log "✗ ERROR: could not read own instance-id from IMDSv2"; exit 1; }
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') \
+  || { log "ERROR: could not get an IMDSv2 token"; exit 1; }
+INSTANCE_ID=$(curl -fsS --connect-timeout 2 --max-time 5 \
+  -H "X-aws-ec2-metadata-token: $${IMDS_TOKEN}" \
+  http://169.254.169.254/latest/meta-data/instance-id) \
+  || { log "ERROR: could not read own instance-id from IMDSv2"; exit 1; }
+[ -n "$${INSTANCE_ID}" ] || { log "ERROR: could not read own instance-id from IMDSv2"; exit 1; }
 
 # DEADLINE DE RELOJ REAL, no una suma de sleeps. Acumular `sleep 15` mide
-# lo que dormimos, NO lo que tardó la iteración: si la CLI de AWS se cuelga
-# (timeout de conexión, de lectura, reintentos), cada vuelta puede durar
-# mucho más de 15s y el "límite de 600s" no existiría. Contar sleeps no es
+# lo que dormimos, NO lo que tardo la iteracion: si la CLI de AWS se cuelga
+# (timeout de conexion, de lectura, reintentos), cada vuelta puede durar
+# mucho mas de 15s y el "limite de 600s" no existiria. Contar sleeps no es
 # medir tiempo, igual que registrado no es enrutado.
 TG_START=$(date +%s)
 TG_LAST_LOG=0
@@ -173,13 +169,13 @@ until timeout 15 aws elbv2 describe-target-health \
         --output text 2>/dev/null | tr '\t' '\n' | grep -qx "$${INSTANCE_ID}"; do
   TG_NOW=$(( $(date +%s) - TG_START ))
   if [ $${TG_NOW} -ge 600 ]; then
-    log "✗ ERROR: $${INSTANCE_ID} not registered in the API target group after $${TG_NOW}s"
-    log "  diagnóstico (tolerado, solo informativo):"
+    log "ERROR: $${INSTANCE_ID} not registered in the API target group after $${TG_NOW}s"
+    log "  diagnostico (tolerado, solo informativo):"
     timeout 15 aws elbv2 describe-target-health \
       --target-group-arn "${api_target_group_arn}" --region ${aws_region} \
       --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason]' \
       --output text 2>&1 | sed 's/^/    /' | tee -a /var/log/k8s-cp-bootstrap.log || true
-    log "  the API endpoint would black-hole this node — refusing to run kubeadm init"
+    log "  the API endpoint would black-hole this node -- refusing to run kubeadm init"
     exit 1
   fi
   if [ $(( TG_NOW - TG_LAST_LOG )) -ge 120 ]; then
@@ -188,11 +184,11 @@ until timeout 15 aws elbv2 describe-target-health \
   fi
   sleep 15
 done
-# LO QUE EL REGISTRO GARANTIZA, Y NADA MÁS. Este gate NO prueba que el NLB
+# LO QUE EL REGISTRO GARANTIZA, Y NADA MAS. Este gate NO prueba que el NLB
 # enrute: para eso hace falta HEALTHY, y healthy es imposible antes de que
-# exista el API. Decir "the endpoint routes here" aquí era precisamente la
-# afirmación falsa que costó el Apply del 26-ago.
-log "✓ Registered in the API target group ($${INSTANCE_ID}) — kubeadm init is authorised"
+# exista el API. Decir "the endpoint routes here" aqui era precisamente la
+# afirmacion falsa que costo el Apply del 26-ago.
+log "OK Registered in the API target group ($${INSTANCE_ID}) -- kubeadm init is authorised"
 
 cat > /tmp/kubeadm-config.yaml <<KUBEADM_EOF
 apiVersion: kubeadm.k8s.io/v1beta4
@@ -233,7 +229,7 @@ networking:
   serviceSubnet: ${service_cidr}
 KUBEADM_EOF
 
-log "✓ kubeadm config created at /tmp/kubeadm-config.yaml"
+log "OK kubeadm config created at /tmp/kubeadm-config.yaml"
 cat /tmp/kubeadm-config.yaml >> /var/log/k8s-cp-bootstrap.log
 
 # Step 3: Initialize control plane with kubeadm
@@ -241,7 +237,7 @@ log "Step 3/9: Running kubeadm init (this takes 2-5 minutes)"
 
 # NOTE on --upload-certs: deliberately ABSENT. Passing it here would upload
 # the certs under a key kubeadm prints mid-log and this script never
-# captures — a second, unmanaged copy of control-plane-grade material with
+# captures -- a second, unmanaged copy of control-plane-grade material with
 # its own 2h life. Step 7 runs `init phase upload-certs` explicitly and
 # captures the key it returns: ONE publication, one owner, one TTL.
 #
@@ -254,11 +250,11 @@ kubeadm init \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 if [ $? -ne 0 ]; then
-  log "✗ ERROR: kubeadm init failed"
+  log "ERROR: kubeadm init failed"
   exit 1
 fi
 
-log "✓ kubeadm init completed successfully"
+log "OK kubeadm init completed successfully"
 
 # Step 4: Configure kubectl for root user
 log "Step 4/9: Configuring kubectl for root user"
@@ -267,10 +263,10 @@ cp -f /etc/kubernetes/admin.conf /root/.kube/config
 chown root:root /root/.kube/config
 chmod 600 /root/.kube/config
 export KUBECONFIG=/etc/kubernetes/admin.conf
-log "✓ kubectl configured for root user"
+log "OK kubectl configured for root user"
 
 # providerID note: spec.providerID is published by the kubelet itself via
-# --provider-id, set in common.yaml (Step 7b) before kubeadm init — same
+# --provider-id, set in common.yaml (Step 7b) before kubeadm init -- same
 # mechanism on all nodes, so no post-init patch is needed here.
 
 # Step 5: Install Cilium CNI in strict kube-proxy replacement mode
@@ -285,7 +281,7 @@ if ! command -v helm >/dev/null 2>&1; then
     amd64) HELM_ARCH="amd64" ;;
     arm64) HELM_ARCH="arm64" ;;
     *)
-      log "✗ ERROR: Unsupported architecture for Helm install: $${ARCH}"
+      log "ERROR: Unsupported architecture for Helm install: $${ARCH}"
       exit 1
       ;;
   esac
@@ -296,33 +292,27 @@ if ! command -v helm >/dev/null 2>&1; then
   tar -xzf /tmp/helm.tar.gz -C /tmp
   install -m 0755 "/tmp/linux-$${HELM_ARCH}/helm" /usr/local/bin/helm
   rm -rf /tmp/helm.tar.gz "/tmp/linux-$${HELM_ARCH}"
-  log "✓ Helm installed"
+  log "OK Helm installed"
 fi
 
-# Gateway API standard CRDs must exist BEFORE Cilium starts, so the operator
-# enables its Gateway API controller. Applied here (fresh bootstrap); if
-# Cilium were already installed, restart its operator to pick them up.
+# Gateway API CRDs must exist BEFORE Cilium starts, so the operator enables
+# its Gateway API controller on its first start.
 # SEGUNDO GATE DEL NLB, y deliberadamente NO es el mismo que el de kubeadm
-# init. Aquél esperaba REGISTRO (cualquier estado) porque "healthy" era
-# imposible antes de que el API existiera. Aquí el API YA existe, y lo que
+# init. Aquel esperaba REGISTRO (cualquier estado) porque "healthy" era
+# imposible antes de que el API existiera. Aqui el API YA existe, y lo que
 # este `kubectl apply` necesita es que el NLB ENRUTE: valida el manifiesto
 # descargando el openapi DESDE el endpoint, que es el DNS del NLB. Con el
-# target todavía unhealthy la conexión se rechaza, `pipefail` mata el
-# bootstrap, y CP-0 nunca llega a publicar el kubeconfig en SSM — que es
-# exactamente cómo murió el apply del 2026-08-26.
+# target todavia unhealthy la conexion se rechaza, `pipefail` mata el
+# bootstrap, y CP-0 nunca llega a publicar el kubeconfig en SSM -- que es
+# exactamente como murio el apply del 2026-08-26.
 #
-# Registrado no es enrutado. Aquí se espera HEALTHY, que ahora sí es
-# alcanzable, y el timeout FALLA con diagnóstico en vez de colgarse.
+# Registrado no es enrutado. Aqui se espera HEALTHY, que ahora si es
+# alcanzable, y el timeout FALLA con diagnostico en vez de colgarse.
 #
-# Coste en el caso feliz: CERO espera. `until` evalúa la condición antes del
-# primer sleep, así que un target ya healthy pasa con una sola llamada a la
+# Coste en el caso feliz: CERO espera. `until` evalua la condicion antes del
+# primer sleep, asi que un target ya healthy pasa con una sola llamada a la
 # API. La espera solo existe cuando de verdad hace falta.
 #
-# DEUDA RELACIONADA: esta misma línea del `kubectl apply` es la que habría
-# que tocar para que el cluster naciera ya con las CRDs de Gateway API en
-# v1.6.1 (el canal híbrido de 4b) en vez de en v1.2.1. Este fallo demostró
-# que el paso es frágil, así que esa deuda subió de prioridad — pero va en su
-# propio PR: una variable por vez.
 # Mismo reloj real que el gate de registro: el deadline se mide con date, no
 # sumando sleeps, y cada llamada a la CLI lleva su propio timeout para que
 # una AWS colgada no cuelgue el gate que promete no colgarse.
@@ -336,14 +326,14 @@ until timeout 15 aws elbv2 describe-target-health \
         --output text 2>/dev/null | grep -qx "healthy"; do
   TGH_NOW=$(( $(date +%s) - TGH_START ))
   if [ $${TGH_NOW} -ge 300 ]; then
-    log "✗ ERROR: $${INSTANCE_ID} never became healthy in the API target group after $${TGH_NOW}s"
-    log "  diagnóstico (tolerado, solo informativo):"
+    log "ERROR: $${INSTANCE_ID} never became healthy in the API target group after $${TGH_NOW}s"
+    log "  diagnostico (tolerado, solo informativo):"
     timeout 15 aws elbv2 describe-target-health \
       --target-group-arn "${api_target_group_arn}" --region ${aws_region} \
       --query 'TargetHealthDescriptions[].[Target.Id,TargetHealth.State,TargetHealth.Reason]' \
       --output text 2>&1 | sed 's/^/    /' | tee -a /var/log/k8s-cp-bootstrap.log || true
     log "  the NLB does not route to this node, so applying CRDs through the endpoint"
-    log "  would fail — refusing to continue with a half-built control plane"
+    log "  would fail -- refusing to continue with a half-built control plane"
     exit 1
   fi
   if [ $(( TGH_NOW - TGH_LAST_LOG )) -ge 60 ]; then
@@ -352,18 +342,77 @@ until timeout 15 aws elbv2 describe-target-health \
   fi
   sleep 10
 done
-log "✓ API target healthy ($${INSTANCE_ID}) — the NLB routes here, the endpoint is usable"
+log "OK API target healthy ($${INSTANCE_ID}) -- the NLB routes here, the endpoint is usable"
 
-log "Installing Gateway API standard CRDs (v1.2.1)"
-kubectl apply -f \
-  https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
-  2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+GW_VERSION="v1.6.1"
+GW_GROUP="gateway.networking.k8s.io"
+GW_KINDS="gatewayclasses gateways httproutes grpcroutes referencegrants backendtlspolicies"
+GW_EXPECTED_NAMES='["backendtlspolicies.gateway.networking.k8s.io","gatewayclasses.gateway.networking.k8s.io","gateways.gateway.networking.k8s.io","grpcroutes.gateway.networking.k8s.io","httproutes.gateway.networking.k8s.io","referencegrants.gateway.networking.k8s.io","tlsroutes.gateway.networking.k8s.io"]'
 
-if kubectl -n kube-system get deployment cilium-operator &>/dev/null; then
-  log "Cilium already present; restarting cilium-operator to pick up Gateway API CRDs"
-  kubectl -n kube-system rollout restart deployment/cilium-operator \
+assert_gateway_schema() {
+  local state="$1" crds
+  crds=$(kubectl get crd -o json) \
+    || { log "ERROR: [$${state}] could not read live CRDs"; exit 1; }
+  if ! printf '%s' "$${crds}" | jq -e --arg g "$${GW_GROUP}" \
+      --arg b "$${GW_VERSION}" --argjson expected "$${GW_EXPECTED_NAMES}" '
+        [.items[] | select(.spec.group == $g)] as $items
+        | ([$items[].metadata.name] | sort) == $expected
+        and ($items | length == 7)
+        and (all($items[]; any(.spec.versions[]; .name == "v1" and .served == true)))
+        and (all($items[]; .metadata.annotations[$g + "/bundle-version"] == $b))
+        and (([$items[] | select(.metadata.name == "tlsroutes." + $g)
+                         | .spec.versions[] | select(.served == true) | .name] | sort)
+             == ["v1", "v1alpha2", "v1alpha3"])' >/dev/null; then
+    log "ERROR: [$${state}] live Gateway API schema is not the exact hybrid $${GW_VERSION} state"
+    printf '%s' "$${crds}" | jq -r --arg g "$${GW_GROUP}" '
+      .items[] | select(.spec.group == $g)
+      | [.metadata.name,
+         (.metadata.annotations[$g + "/bundle-version"] // "<missing>"),
+         ([.spec.versions[] | select(.served == true) | .name] | join(","))] | @tsv' \
+      | sed 's/^/  /' || true
+    exit 1
+  fi
+  local served_v1 served_alpha2 expected_v1
+  expected_v1=$(printf '%s\n' \
+    "backendtlspolicies.$${GW_GROUP}" "gatewayclasses.$${GW_GROUP}" \
+    "gateways.$${GW_GROUP}" "grpcroutes.$${GW_GROUP}" \
+    "httproutes.$${GW_GROUP}" "referencegrants.$${GW_GROUP}" \
+    "tlsroutes.$${GW_GROUP}" | sort)
+  served_v1=$(kubectl api-resources --cached=false --api-version="$${GW_GROUP}/v1" -o name | sort) \
+    || { log "ERROR: [$${state}] API discovery for $${GW_GROUP}/v1 failed"; exit 1; }
+  [ "$${served_v1}" = "$${expected_v1}" ] \
+    || { log "ERROR: [$${state}] API discovery does not serve the exact seven v1 resources"; exit 1; }
+  served_alpha2=$(kubectl api-resources --cached=false --api-version="$${GW_GROUP}/v1alpha2" -o name | sort) \
+    || { log "ERROR: [$${state}] API discovery for TLSRoute v1alpha2 failed"; exit 1; }
+  [ "$${served_alpha2}" = "tlsroutes.$${GW_GROUP}" ] \
+    || { log "ERROR: [$${state}] API discovery v1alpha2 is '$${served_alpha2}', expected only TLSRoute"; exit 1; }
+  log "OK [$${state}] exact Gateway API schema: 7 CRDs serve v1, TLSRoute also serves v1alpha2, bundle $${GW_VERSION}"
+}
+
+log "Installing Gateway API CRDs $${GW_VERSION} (six standard CRDs + TLSRoute experimental overlay last)"
+GW_TMP=$(mktemp -d)
+trap 'rm -rf "$${GW_TMP}"' EXIT
+for KIND in $${GW_KINDS}; do
+  URL="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$${GW_VERSION}/config/crd/standard/gateway.networking.k8s.io_$${KIND}.yaml"
+  curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 -o "$${GW_TMP}/$${KIND}.yaml" "$${URL}"
+  if grep -q 'kind: TLSRoute' "$${GW_TMP}/$${KIND}.yaml"; then
+    log "ERROR: standard individual $${KIND} unexpectedly contains TLSRoute"
+    exit 1
+  fi
+  kubectl apply --server-side --field-manager=gateway-api-bootstrap \
+    -f "$${GW_TMP}/$${KIND}.yaml" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+done
+TLS_URL="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$${GW_VERSION}/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
+curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 -o "$${GW_TMP}/tlsroutes.yaml" "$${TLS_URL}"
+grep -q 'kind: TLSRoute' "$${GW_TMP}/tlsroutes.yaml" \
+  || { log "ERROR: experimental overlay does not contain TLSRoute"; exit 1; }
+kubectl apply --server-side --field-manager=gateway-api-bootstrap \
+  -f "$${GW_TMP}/tlsroutes.yaml" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+for KIND in $${GW_KINDS} tlsroutes; do
+  kubectl wait --for=condition=Established --timeout=60s "crd/$${KIND}.$${GW_GROUP}" \
     2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-fi
+done
+assert_gateway_schema "after CRD apply"
 
 helm repo add cilium https://helm.cilium.io \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
@@ -376,7 +425,7 @@ helm repo update \
 helm upgrade --install cilium cilium/cilium \
   --namespace kube-system \
   --create-namespace \
-  --version 1.19.6 \
+  --version 1.20.1 \
   --set ipam.mode=kubernetes \
   --set kubeProxyReplacement=true \
   --set k8sServiceHost="${api_endpoint_dns}" \
@@ -389,30 +438,77 @@ helm upgrade --install cilium cilium/cilium \
 
 kubectl -n kube-system rollout status daemonset/cilium --timeout=300s \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-log "✓ Cilium CNI installed (kube-proxy replacement, Gateway API, Hubble)"
+
+CILIUM_CHART=$(helm -n kube-system list -o json | jq -r '.[] | select(.name == "cilium") | .chart')
+[ "$${CILIUM_CHART}" = "cilium-1.20.1" ] \
+  || { log "ERROR: live Cilium chart is '$${CILIUM_CHART}', expected cilium-1.20.1"; exit 1; }
+CILIUM_DS=$(kubectl -n kube-system get ds cilium -o json)
+printf '%s' "$${CILIUM_DS}" | jq -e '
+  .status.desiredNumberScheduled > 0
+  and .status.numberReady == .status.desiredNumberScheduled
+  and .status.updatedNumberScheduled == .status.desiredNumberScheduled' >/dev/null \
+  || { log "ERROR: live cilium DaemonSet is not fully updated and Ready"; exit 1; }
+CILIUM_PODS=$(kubectl -n kube-system get pods -l k8s-app=cilium -o json)
+printf '%s' "$${CILIUM_PODS}" | jq -e '
+  (.items | length) > 0
+  and all(.items[]; .status.phase == "Running"
+      and (.status.containerStatuses | length) > 0
+      and all(.status.containerStatuses[]; .ready == true)
+      and any(.spec.containers[]; .name == "cilium-agent" and (.image | contains(":v1.20.1"))))' >/dev/null \
+  || { log "ERROR: actual cilium-agent pods are not Running/Ready on v1.20.1"; exit 1; }
+OPERATOR_START=$(date +%s)
+while true; do
+  OPERATOR_PODS=$(kubectl --request-timeout=15s -n kube-system get pods -l name=cilium-operator -o json) \
+    || { log "ERROR: could not read actual cilium-operator pods"; exit 1; }
+  if printf '%s' "$${OPERATOR_PODS}" | jq -e '
+      any(.items[]; .status.phase == "Running"
+        and (.status.containerStatuses | length) > 0
+        and all(.status.containerStatuses[]; .ready == true)
+        and any(.spec.containers[]; .image | contains(":v1.20.1")))' >/dev/null; then
+    break
+  fi
+  OPERATOR_NOW=$(( $(date +%s) - OPERATOR_START ))
+  if [ "$${OPERATOR_NOW}" -ge 300 ]; then
+    log "ERROR: no actual cilium-operator pod became Ready on v1.20.1 after $${OPERATOR_NOW}s"
+    printf '%s' "$${OPERATOR_PODS}" | jq -r '.items[] | [.metadata.name, .status.phase,
+      ([.status.containerStatuses[]? | "\(.name):ready=\(.ready)"] | join(","))] | @tsv' \
+      | sed 's/^/  /' || true
+    exit 1
+  fi
+  sleep 5
+done
+# The chart deliberately wants two operator replicas with required pod
+# anti-affinity. Only the founder exists at this point, so waiting for the
+# whole Deployment here would deadlock before CP-1 can enter. One live
+# operator proves the controller started; the final smoke requires the full
+# desired=updated=ready Deployment after all nodes have joined.
+KPR=$(kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status 2>/dev/null \
+  | awk -F: 'tolower($1) ~ /kubeproxyreplacement/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}')
+[ "$${KPR}" = "True" ] \
+  || { log "ERROR: live Cilium datapath reports KubeProxyReplacement='$${KPR}'"; exit 1; }
+[ "$(kubectl -n kube-system get pods -l k8s-app=kube-proxy -o name 2>/dev/null | wc -l)" -eq 0 ] \
+  || { log "ERROR: kube-proxy exists in a strict KPR cluster"; exit 1; }
+assert_gateway_schema "after Cilium start"
+log "OK Cilium 1.20.1 installed (KPR=True, Gateway API, Hubble)"
 
 # Step 6: Verify API server is responding
 log "Step 6/9: Verifying API server"
-TIMEOUT=120
-ELAPSED=0
-INTERVAL=5
-
-while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+API_START=$(date +%s)
+while true; do
   if kubectl get nodes &>/dev/null; then
-    log "✓ API server is responding"
+    log "OK API server is responding"
     kubectl get nodes >> /var/log/k8s-cp-bootstrap.log
     break
   fi
 
-  sleep $${INTERVAL}
-  ELAPSED=$((ELAPSED + INTERVAL))
-
-  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
-    log "✗ ERROR: API server not responding after $${TIMEOUT}s"
+  API_NOW=$(( $(date +%s) - API_START ))
+  if [ $${API_NOW} -ge 120 ]; then
+    log "ERROR: API server not responding after $${API_NOW}s"
     log "Kubelet status:"
     systemctl status kubelet >> /var/log/k8s-cp-bootstrap.log || true
     exit 1
   fi
+  sleep 5
 done
 
 # Step 7: Generate and store join data in SSM Parameter Store
@@ -420,32 +516,32 @@ log "Step 7/9: Generating join data and storing in SSM"
 
 # Generate bootstrap token with 24h TTL
 JOIN_TOKEN=$(kubeadm token create --ttl 24h)
-log "✓ Bootstrap token generated (TTL: 24h)"
+log "OK Bootstrap token generated (TTL: 24h)"
 
 # Extract CA certificate hash
 CA_CERT_HASH=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
                openssl rsa -pubin -outform der 2>/dev/null | \
                openssl dgst -sha256 -hex | \
                sed 's/^.* //')
-log "✓ CA certificate hash extracted"
+log "OK CA certificate hash extracted"
 
 # API endpoint for every join is the NLB (ADR-007): workers and joining
-# control planes must not anchor to this node's IP — it can die.
+# control planes must not anchor to this node's IP -- it can die.
 API_ENDPOINT="${api_endpoint_dns}:6443"
 
 # Construct full join command
 JOIN_COMMAND="kubeadm join $${API_ENDPOINT} --token $${JOIN_TOKEN} --discovery-token-ca-cert-hash sha256:$${CA_CERT_HASH}"
 
 # Control-plane join material: re-upload the certs Secret (kubeadm-certs)
-# and capture the fresh certificate-key deterministically — the phase
+# and capture the fresh certificate-key deterministically -- the phase
 # prints ONLY the key on its last line. 2h TTL: replacements arriving
 # later need the renewal ceremony (scripts/renew-cp-certificate-key.sh).
 CERT_KEY=$(kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1)
 if ! echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$'; then
-  log "✗ ERROR: could not capture a valid certificate-key from upload-certs"
+  log "ERROR: could not capture a valid certificate-key from upload-certs"
   exit 1
 fi
-log "✓ certificate-key captured (kubeadm-certs Secret TTL: 2h)"
+log "OK certificate-key captured (kubeadm-certs Secret TTL: 2h)"
 
 log "Storing parameters in SSM (region: ${aws_region}):"
 log "  - ${ssm_parameter_path}/join-command"
@@ -454,84 +550,93 @@ log "  - ${ssm_parameter_path}/api-endpoint"
 log "  - ${ssm_parameter_path}/cp/certificate-key (path excluded from the worker role)"
 
 # Store join command (SecureString)
-aws ssm put-parameter \
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/join-command" \
   --value "$${JOIN_COMMAND}" \
   --type SecureString \
   --overwrite \
-  --region ${aws_region} \
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 # Store CA cert hash (SecureString)
-aws ssm put-parameter \
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/ca-cert-hash" \
   --value "$${CA_CERT_HASH}" \
   --type SecureString \
   --overwrite \
-  --region ${aws_region} \
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
 # Store API endpoint (SecureString)
-aws ssm put-parameter \
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/api-endpoint" \
   --value "$${API_ENDPOINT}" \
   --type SecureString \
   --overwrite \
-  --region ${aws_region} \
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 
-# Store certificate-key under the cp/ subpath — EXCLUDED FROM THE WORKER
+# Store certificate-key under the cp/ subpath -- EXCLUDED FROM THE WORKER
 # ROLE (which enumerates exact ARNs and never sees cp/*): with it, anyone
 # holding the join token could elevate to control plane. Not "CP-only":
 # the CI/OIDC role reads /k8s/* and already holds the admin kubeconfig, a
-# strictly higher privilege — see ADR-007.
-aws ssm put-parameter \
+# strictly higher privilege -- see ADR-007.
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/cp/certificate-key" \
   --value "$${CERT_KEY}" \
   --type SecureString \
   --overwrite \
-  --region ${aws_region} \
-  >/dev/null 2>&1 || { log "✗ ERROR: failed to store certificate-key"; exit 1; }
-log "✓ certificate-key stored (never logged)"
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
+  >/dev/null 2>&1 || { log "ERROR: failed to store certificate-key"; exit 1; }
+log "OK certificate-key stored (never logged)"
 
 if [ $? -eq 0 ]; then
-  log "✓ Join data stored in SSM successfully"
+  log "OK Join data stored in SSM successfully"
 else
-  log "✗ ERROR: Failed to store join data in SSM"
+  log "ERROR: Failed to store join data in SSM"
   exit 1
 fi
 
 # Step 8: Publish kubeconfig to SSM for CI smoke test.
-# admin.conf already points at the NLB (controlPlaneEndpoint) — the sed is
-# a belt-and-braces normalization, no longer a private→public rewrite.
+# admin.conf already points at the NLB (controlPlaneEndpoint) -- the sed is
+# a belt-and-braces normalization, no longer a private->public rewrite.
 log "Step 8/9: Publishing kubeconfig to SSM for CI smoke test"
 KUBECONFIG_PATCHED=$(sed \
   "s|server: https://.*:6443|server: https://${api_endpoint_dns}:6443|" \
   /etc/kubernetes/admin.conf)
-aws ssm put-parameter \
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/kubeconfig" \
   --value "$${KUBECONFIG_PATCHED}" \
   --type SecureString \
   --tier Advanced \
   --overwrite \
-  --region ${aws_region} \
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-log "✓ Kubeconfig stored at ${ssm_parameter_path}/kubeconfig"
+log "OK Kubeconfig stored at ${ssm_parameter_path}/kubeconfig"
 
 # Step 9: Open the sequential-join gate for the other control planes.
 # LAST on purpose: CP-1 only starts joining once this founder is COMPLETE
 # (Cilium installed, join material published). The kubeadm HA guide
 # requires control-plane joins one at a time; CP-1 waits for count>=1,
-# CP-2 for count>=2 — each publishes its own increment after joining.
+# CP-2 for count>=2 -- each publishes its own increment after joining.
 log "Step 9/9: Opening control-plane join gate (cp/joined-count = 1)"
-aws ssm put-parameter \
+timeout 30 aws ssm put-parameter \
   --name "${ssm_parameter_path}/cp/joined-count" \
   --value "1" \
   --type String \
   --overwrite \
-  --region ${aws_region} \
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
   2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-log "✓ Join gate open"
+log "OK Join gate open"
+
+JOINED_COUNT_READBACK=$(timeout 15 aws ssm get-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --query Parameter.Value --output text --region ${aws_region} \
+  --cli-connect-timeout 5 --cli-read-timeout 10) \
+  || { log "ERROR: could not verify the founder join gate"; exit 1; }
+[ "$${JOINED_COUNT_READBACK}" = "1" ] \
+  || { log "ERROR: founder join-gate readback is '$${JOINED_COUNT_READBACK}', expected 1"; exit 1; }
+log "OK Join gate read back as 1"
 
 # Final status
 log "=== Control Plane bootstrap completed successfully ==="
@@ -540,5 +645,5 @@ kubectl cluster-info >> /var/log/k8s-cp-bootstrap.log
 log "Node status:"
 kubectl get nodes -o wide >> /var/log/k8s-cp-bootstrap.log
 log ""
-log "CNI: Cilium installed (strict kube-proxy replacement, Gateway API, Hubble), pod networking is ready"
+log "CNI: Cilium 1.20.1 installed (strict kube-proxy replacement, Gateway API, Hubble), pod networking is ready"
 log "Workers can now join using parameters from SSM: ${ssm_parameter_path}/*"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Control Plane JOIN bootstrap — rendered for EVERY control-plane index
+# Control Plane JOIN bootstrap -- rendered for EVERY control-plane index
 # (S2 piece 3, ADR-007). On index 0 it is a no-op during genesis (the
 # founder script already made that node a control plane) and the real
 # worker when index 0 is REBUILT against a live cluster.
@@ -8,7 +8,8 @@
 #          control-plane join at a time, so joins serialize through the SSM
 #          gate cp/joined-count (CP-1 waits for >=1, CP-2 for >=2; each
 #          publishes its own increment after joining).
-# Variables: cluster_name, aws_region, api_endpoint_dns, ssm_parameter_path, cp_index
+# Variables: cluster_name, aws_region, api_endpoint_dns, ssm_parameter_path,
+#            cp_index, cp_count, joined_count_library
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
@@ -17,24 +18,26 @@ log() {
   echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
 }
 
+${joined_count_library}
+
 log "=== Starting Control Plane JOIN bootstrap (index ${cp_index}) ==="
 
 # ALREADY-A-CONTROL-PLANE GUARD (runs first, no exceptions). Two callers
 # land here on a node that must NOT be touched:
 #   - index 0 on GENESIS: this script is rendered as the cloud-init part
 #     right after the founder's, so it executes seconds after `kubeadm
-#     init` — joining that node to itself would be absurd and destructive.
+#     init` -- joining that node to itself would be absurd and destructive.
 #   - any index re-running cloud-init (rescue, manual re-execution).
 # The presence of the API server static pod manifest is the strongest
 # possible signal: kubeadm writes it on BOTH init and join, and only a
 # successful `kubeadm reset` removes it. It does not depend on the node
 # being Ready yet, so it has no race with the founder's last steps.
 if [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
-  log "✓ This node is ALREADY a control plane (kube-apiserver manifest present) — nothing to do"
+  log "OK This node is ALREADY a control plane (kube-apiserver manifest present) -- nothing to do"
   exit 0
 fi
 
-# REENTRANCY GUARD — the single most destructive path in this script is
+# REENTRANCY GUARD -- the single most destructive path in this script is
 # `kubeadm reset` (retry branch) running on a node that is ALREADY a
 # healthy control plane: it would wipe a live etcd member and break the
 # quorum.
@@ -55,39 +58,35 @@ already_healthy_cp() {
 }
 
 if already_healthy_cp; then
-  log "✓ This node is ALREADY a healthy control plane — nothing to do (exit 0)"
+  log "OK This node is ALREADY a healthy control plane -- nothing to do (exit 0)"
   log "  (reentrancy guard: never reset/rejoin a live etcd member)"
   exit 0
 fi
 
 # Step 1: Wait for common.yaml bootstrap to complete
 log "Step 1/6: Waiting for common bootstrap to complete"
-TIMEOUT=600  # 10 minutes
-ELAPSED=0
-INTERVAL=10
-
-while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+COMMON_START=$(date +%s)
+while true; do
   if grep -q "Step 8/8: Enabling kubelet service" /var/log/k8s-bootstrap.log 2>/dev/null && \
      grep -q "Common bootstrap completed successfully" /var/log/k8s-bootstrap.log 2>/dev/null; then
-    log "✓ Common bootstrap completed"
+    log "OK Common bootstrap completed"
     break
   fi
 
-  sleep $${INTERVAL}
-  ELAPSED=$((ELAPSED + INTERVAL))
-
-  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
-    log "✗ ERROR: Common bootstrap did not complete within $${TIMEOUT}s"
+  COMMON_NOW=$(( $(date +%s) - COMMON_START ))
+  if [ $${COMMON_NOW} -ge 600 ]; then
+    log "ERROR: Common bootstrap did not complete within $${COMMON_NOW}s"
     tail -20 /var/log/k8s-bootstrap.log || true
     exit 1
   fi
+  sleep 10
 done
 
-# Step 2: aws-iam-authenticator webhook material — the DaemonSet does NOT
+# Step 2: aws-iam-authenticator webhook material -- the DaemonSet does NOT
 # create it, and this node's API server static pod (generated at join from
 # the cluster-stored ClusterConfiguration: same extraArgs/extraVolumes as
 # the founder's init) starts with the webhook flags pointing at these host
-# paths. MUST exist before kubeadm join; abort otherwise — continuing would
+# paths. MUST exist before kubeadm join; abort otherwise -- continuing would
 # produce a control plane silently missing IAM auth.
 log "Step 2/6: Installing aws-iam-authenticator v0.7.18 (server init)"
 
@@ -97,13 +96,13 @@ IAM_AUTH_SHA256="fbebd5350dd1a5f377097fd1b2e1ca8c5a5e7ecb35cc44ddc694b775d498d7a
 curl -fsSL -o /usr/local/bin/aws-iam-authenticator \
   "https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v$${IAM_AUTH_VERSION}/aws-iam-authenticator_$${IAM_AUTH_VERSION}_linux_amd64"
 if ! echo "$${IAM_AUTH_SHA256}  /usr/local/bin/aws-iam-authenticator" | sha256sum -c -; then
-  log "✗ ERROR: aws-iam-authenticator checksum mismatch — aborting bootstrap"
+  log "ERROR: aws-iam-authenticator checksum mismatch -- aborting bootstrap"
   exit 1
 fi
 chmod 0755 /usr/local/bin/aws-iam-authenticator
 
 # Same clusterID derivation as the founder, platform/install.sh and the CI
-# smoke: ACCOUNT.REGION.NAME. `init` self-signs a PER-NODE webhook cert —
+# smoke: ACCOUNT.REGION.NAME. `init` self-signs a PER-NODE webhook cert --
 # each API server talks to ITS OWN local authenticator over localhost.
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 CLUSTER_ID="$${ACCOUNT_ID}.${aws_region}.${cluster_name}"
@@ -119,74 +118,91 @@ for REQUIRED in /var/aws-iam-authenticator/cert.pem \
                 /var/aws-iam-authenticator/key.pem \
                 /etc/kubernetes/aws-iam-authenticator/kubeconfig.yaml; do
   if [ ! -s "$${REQUIRED}" ]; then
-    log "✗ ERROR: authenticator init did not produce $${REQUIRED} — aborting bootstrap"
+    log "ERROR: authenticator init did not produce $${REQUIRED} -- aborting bootstrap"
     exit 1
   fi
 done
-log "✓ aws-iam-authenticator webhook material in place"
+log "OK aws-iam-authenticator webhook material in place"
 
 # Step 3: Wait for my turn at the sequential-join gate
-log "Step 3/6: Waiting for join gate (cp/joined-count >= ${cp_index})"
-TIMEOUT=1800  # founder takes ~8-12 min; each predecessor join ~3-5 min
-ELAPSED=0
-INTERVAL=30
-
-while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
-  JOINED_COUNT=$(aws ssm get-parameter \
+log "Step 3/6: Waiting for the sequential join gate"
+GATE_START=$(date +%s)
+GATE_LAST_LOG=0
+while true; do
+  set +e
+  GATE_OUT=$(timeout 15 aws ssm get-parameter \
     --name "${ssm_parameter_path}/cp/joined-count" \
-    --query Parameter.Value \
-    --output text \
-    --region ${aws_region} 2>/dev/null || echo 0)
-  if [ "$${JOINED_COUNT}" -ge "${cp_index}" ] 2>/dev/null; then
-    log "✓ Gate open (joined-count=$${JOINED_COUNT}) — my turn"
-    break
-  fi
+    --query Parameter.Value --output text --region ${aws_region} \
+    --cli-connect-timeout 5 --cli-read-timeout 10 2>&1)
+  GATE_RC=$?
+  set -e
+  GATE_KIND=$(ssm_read_kind "$${GATE_RC}" "$${GATE_OUT}")
 
-  if [ $(($${ELAPSED} % 300)) -eq 0 ] && [ $${ELAPSED} -gt 0 ]; then
-    log "Still waiting for gate... (joined-count=$${JOINED_COUNT}, $${ELAPSED}s elapsed)"
-  fi
+  case "$${GATE_KIND}" in
+    present)
+      if ! GATE_DECISION=$(joined_count_decision "$${GATE_OUT}" "${cp_index}" "${cp_count}"); then
+        log "ERROR: cp/joined-count is not a non-negative integer: '$${GATE_OUT}'"
+        exit 1
+      fi
+      if [ "$${GATE_DECISION}" = proceed ]; then
+        log "OK Gate open (joined-count=$${GATE_OUT}) -- my turn"
+        break
+      fi
+      ;;
+    absent)
+      GATE_OUT="absent"
+      ;;
+    error)
+      log "ERROR: could not read cp/joined-count (rc=$${GATE_RC}); refusing to open the gate"
+      log "  $${GATE_OUT}"
+      exit 1
+      ;;
+  esac
 
-  sleep $${INTERVAL}
-  ELAPSED=$((ELAPSED + INTERVAL))
-
-  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
-    log "✗ ERROR: join gate did not reach ${cp_index} within $${TIMEOUT}s"
+  GATE_NOW=$(( $(date +%s) - GATE_START ))
+  if [ "$${GATE_NOW}" -ge 1800 ]; then
+    log "ERROR: join gate did not authorise index ${cp_index} within $${GATE_NOW}s (last=$${GATE_OUT})"
     log "Check the predecessor's /var/log/k8s-cp-bootstrap.log"
     exit 1
   fi
+  if [ $(( GATE_NOW - GATE_LAST_LOG )) -ge 300 ]; then
+    log "Still waiting for gate... (joined-count=$${GATE_OUT}, $${GATE_NOW}s elapsed)"
+    GATE_LAST_LOG=$${GATE_NOW}
+  fi
+  sleep 30
 done
 
 # Step 4: Fetch join material (shared join-command + certificate-key from
 # the cp/ path, which the worker role is excluded from)
 log "Step 4/6: Fetching join material from SSM"
 
-JOIN_COMMAND=$(aws ssm get-parameter \
+JOIN_COMMAND=$(timeout 15 aws ssm get-parameter \
   --name "${ssm_parameter_path}/join-command" \
   --with-decryption \
   --query Parameter.Value \
   --output text \
-  --region ${aws_region})
-[ -n "$${JOIN_COMMAND}" ] || { log "✗ ERROR: empty join-command"; exit 1; }
-log "✓ Join command retrieved (endpoint: ${api_endpoint_dns}:6443)"
+  --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 10)
+[ -n "$${JOIN_COMMAND}" ] || { log "ERROR: empty join-command"; exit 1; }
+log "OK Join command retrieved (endpoint: ${api_endpoint_dns}:6443)"
 
 fetch_cert_key() {
-  aws ssm get-parameter \
+  timeout 15 aws ssm get-parameter \
     --name "${ssm_parameter_path}/cp/certificate-key" \
     --with-decryption \
     --query Parameter.Value \
     --output text \
-    --region ${aws_region}
+    --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 10
 }
 CERT_KEY=$(fetch_cert_key)
-echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "✗ ERROR: invalid certificate-key"; exit 1; }
-log "✓ certificate-key retrieved (never logged)"
+echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "ERROR: invalid certificate-key"; exit 1; }
+log "OK certificate-key retrieved (never logged)"
 
-# Step 5: Join as control plane — with RETRY + key re-fetch. The kubeadm-certs
+# Step 5: Join as control plane -- with RETRY + key re-fetch. The kubeadm-certs
 # Secret expires 2h after upload: if this node arrives late (e.g. a
 # replacement CP), the join fails until an operator runs the renewal
 # ceremony (scripts/renew-cp-certificate-key.sh) which publishes a FRESH
 # key to SSM; each retry re-fetches it. Reading the old key from SSM would
-# NOT help — the Secret itself is gone; re-upload is the only cure.
+# NOT help -- the Secret itself is gone; re-upload is the only cure.
 log "Step 5/6: Joining as control plane (kubeadm join --control-plane)"
 
 MAX_ATTEMPTS=6
@@ -198,12 +214,12 @@ until [ $${ATTEMPT} -gt $${MAX_ATTEMPTS} ]; do
        --certificate-key "$${CERT_KEY}" \
        --cri-socket unix:///run/containerd/containerd.sock \
        2>&1 | tee -a /var/log/k8s-cp-bootstrap.log; then
-    log "✓ kubeadm join (control-plane) completed"
+    log "OK kubeadm join (control-plane) completed"
     break
   fi
 
   if [ $${ATTEMPT} -eq $${MAX_ATTEMPTS} ]; then
-    log "✗ ERROR: control-plane join failed after $${MAX_ATTEMPTS} attempts"
+    log "ERROR: control-plane join failed after $${MAX_ATTEMPTS} attempts"
     log "If the kubeadm-certs Secret expired (2h TTL), run scripts/renew-cp-certificate-key.sh and re-run cloud-init or replace the node"
     exit 1
   fi
@@ -213,15 +229,15 @@ until [ $${ATTEMPT} -gt $${MAX_ATTEMPTS} ]; do
   # kubelet after etcd already joined). Resetting THAT would remove a live
   # member from the quorum.
   if already_healthy_cp; then
-    log "✓ join reported failure but this node IS a healthy control plane — keeping it (no reset)"
+    log "OK join reported failure but this node IS a healthy control plane -- keeping it (no reset)"
     break
   fi
 
-  log "Join failed — resetting and retrying in 120s (re-fetching certificate-key)"
+  log "Join failed -- resetting and retrying in 120s (re-fetching certificate-key)"
   kubeadm reset -f 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log || true
   sleep 120
   CERT_KEY=$(fetch_cert_key)
-  echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "✗ ERROR: invalid certificate-key on re-fetch"; exit 1; }
+  echo "$${CERT_KEY}" | grep -Eq '^[0-9a-f]{64}$' || { log "ERROR: invalid certificate-key on re-fetch"; exit 1; }
   ATTEMPT=$((ATTEMPT + 1))
 done
 
@@ -233,49 +249,73 @@ chmod 600 /root/.kube/config
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # Verify this node registered and its LOCAL etcd member is running before
-# passing the baton — the next join needs a healthy quorum.
+# passing the baton -- the next join needs a healthy quorum.
 NODE_NAME=$(hostname)
-TIMEOUT=300
-ELAPSED=0
-while [ $${ELAPSED} -lt $${TIMEOUT} ]; do
+HEALTH_START=$(date +%s)
+while true; do
   if kubectl get node "$${NODE_NAME}" &>/dev/null && \
      [ "$(kubectl -n kube-system get pod "etcd-$${NODE_NAME}" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ]; then
-    log "✓ Node registered and local etcd member Running"
+    log "OK Node registered and local etcd member Running"
     break
   fi
-  sleep 10
-  ELAPSED=$((ELAPSED + 10))
-  if [ $${ELAPSED} -ge $${TIMEOUT} ]; then
-    log "✗ ERROR: node/etcd not healthy after $${TIMEOUT}s — NOT passing the baton"
+  HEALTH_NOW=$(( $(date +%s) - HEALTH_START ))
+  if [ $${HEALTH_NOW} -ge 300 ]; then
+    log "ERROR: node/etcd not healthy after $${HEALTH_NOW}s -- NOT passing the baton"
     exit 1
   fi
+  sleep 10
 done
 
-# Step 6: Pass the baton — open the gate for the next control plane.
+# Step 6: Pass the baton -- open the gate for the next control plane.
 # MONOTONIC: the counter may only ever rise. A REPLACEMENT of a low index
 # (say 0 or 1) rejoining a cluster that already reached 3 must not lower
 # the gate, or a later replacement of a higher index would wait forever for
 # a baton that already passed.
 NEXT_COUNT=$((${cp_index} + 1))
-CURRENT_COUNT=$(aws ssm get-parameter \
+set +e
+CURRENT_OUT=$(timeout 15 aws ssm get-parameter \
   --name "${ssm_parameter_path}/cp/joined-count" \
-  --query Parameter.Value --output text \
-  --region ${aws_region} 2>/dev/null || echo 0)
-case "$${CURRENT_COUNT}" in
-  ''|*[!0-9]*) CURRENT_COUNT=0 ;;
+  --query Parameter.Value --output text --region ${aws_region} \
+  --cli-connect-timeout 5 --cli-read-timeout 10 2>&1)
+CURRENT_RC=$?
+set -e
+CURRENT_KIND=$(ssm_read_kind "$${CURRENT_RC}" "$${CURRENT_OUT}")
+case "$${CURRENT_KIND}" in
+  present) CURRENT_COUNT="$${CURRENT_OUT}" ;;
+  absent) log "ERROR: cp/joined-count disappeared before baton publication"; exit 1 ;;
+  error)
+    log "ERROR: could not read cp/joined-count before baton publication (rc=$${CURRENT_RC})"
+    log "  $${CURRENT_OUT}"
+    exit 1
+    ;;
 esac
+joined_count_decision "$${CURRENT_COUNT}" "${cp_index}" "${cp_count}" >/dev/null \
+  || { log "ERROR: current cp/joined-count is invalid: '$${CURRENT_COUNT}'"; exit 1; }
 if [ "$${CURRENT_COUNT}" -gt "$${NEXT_COUNT}" ]; then
   log "Step 6/6: cp/joined-count stays at $${CURRENT_COUNT} (replacement of index ${cp_index}; counter is monotonic)"
 else
   log "Step 6/6: Publishing cp/joined-count = $${NEXT_COUNT}"
-  aws ssm put-parameter \
+  timeout 30 aws ssm put-parameter \
     --name "${ssm_parameter_path}/cp/joined-count" \
     --value "$${NEXT_COUNT}" \
     --type String \
     --overwrite \
-    --region ${aws_region} \
+    --region ${aws_region} --cli-connect-timeout 5 --cli-read-timeout 20 \
     2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
 fi
+
+READBACK=$(timeout 15 aws ssm get-parameter \
+  --name "${ssm_parameter_path}/cp/joined-count" \
+  --query Parameter.Value --output text --region ${aws_region} \
+  --cli-connect-timeout 5 --cli-read-timeout 10) \
+  || { log "ERROR: could not verify cp/joined-count after publication"; exit 1; }
+joined_count_decision "$${READBACK}" "${cp_index}" "${cp_count}" >/dev/null \
+  || { log "ERROR: cp/joined-count readback is invalid: '$${READBACK}'"; exit 1; }
+[ "$${READBACK}" -ge "$${CURRENT_COUNT}" ] \
+  || { log "ERROR: cp/joined-count readback '$${READBACK}' is below prior value '$${CURRENT_COUNT}'"; exit 1; }
+[ "$${READBACK}" -ge "$${NEXT_COUNT}" ] \
+  || { log "ERROR: cp/joined-count readback '$${READBACK}' did not reach '$${NEXT_COUNT}'"; exit 1; }
+log "OK cp/joined-count verified at $${READBACK}"
 
 log "=== Control Plane JOIN bootstrap (index ${cp_index}) completed successfully ==="
 kubectl get nodes >> /var/log/k8s-cp-bootstrap.log 2>&1 || true

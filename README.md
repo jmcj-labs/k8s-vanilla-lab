@@ -43,9 +43,9 @@ running — CLUSTER.md §FinOps holds the measured number).
 | Kubernetes | 1.35.x (latest patch) | Orchestration platform |
 | containerd | latest from Docker repo (2.3.x) | Container runtime (CRI) |
 | kubeadm / kubelet / kubectl | 1.35.x (latest patch) | Cluster bootstrap and node management |
-| Cilium | v1.19.6 | eBPF CNI, **strict kube-proxy replacement**, Gateway API, Hubble |
+| Cilium | v1.20.1 | eBPF CNI, **strict kube-proxy replacement**, Gateway API, Hubble |
 | kube-proxy | — | **Not installed** (`skipPhases: addon/kube-proxy`) |
-| Gateway API CRDs | v1.2.1 | Standard install, applied before Cilium |
+| Gateway API CRDs | v1.6.1 | Six standard CRDs + experimental TLSRoute overlay, applied before Cilium |
 | Ubuntu | 24.04 LTS | Base OS |
 | OpenTofu | 1.8.0 | Infrastructure as Code |
 
@@ -190,6 +190,7 @@ breakdown: [ADR-002](docs/decisions/ADR-002-spot-workers-ondemand-cp.md).
 | [ADR-003](docs/decisions/ADR-003-cilium-ebpf.md) | Cilium as CNI (now strict kube-proxy replacement) | eBPF datapath; bootstrap wires `k8sServiceHost/Port` so no kube-proxy is ever installed |
 | [ADR-004](docs/decisions/ADR-004-kubeconfig-ssm.md) | Kubeconfig via SSM | CI smoke test without opening port 22 to runner CIDR |
 | [ADR-007](docs/decisions/ADR-007-api-endpoint-nlb.md) | HA control plane behind the NLB API endpoint | 3 CPs (stacked etcd) + stable endpoint on the existing NLB; 6443 only from the NLB's SG |
+| [ADR-009](docs/decisions/ADR-009-direct-network-bootstrap.md) | Bootstrap directly into Cilium 1.20.1 + Gateway API v1.6.1 | Fresh clusters avoid a live network upgrade; the validated 4a/4b procedures become operations material |
 
 ---
 
