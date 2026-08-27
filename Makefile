@@ -79,6 +79,8 @@ test: ## Run the script test suites that need no cluster and no AWS
 	@echo ""
 	@bash scripts/test-kpr-gate.sh
 	@echo ""
+	@bash scripts/test-fetch-exec.sh
+	@echo ""
 	@if command -v go >/dev/null 2>&1; then \
 	  echo "=== node-readiness (Go) ==="; \
 	  (cd platform/node-readiness && go test ./...); \
@@ -87,6 +89,9 @@ test: ## Run the script test suites that need no cluster and no AWS
 	  echo "  OMITIDO: go ausente. Esto NO es un pase — es un no-ejecutado."; \
 	  exit 1; \
 	fi
+
+user-data-size: ## Measure real user_data (gzip+base64) for the three profiles and fail above budget
+	@bash scripts/check-user-data-size.sh
 
 plan-empty: ## Plan the lab stack against an EMPTY state (catches count/for_each on known-after-apply — INCIDENTS #11)
 	@STACK=tofu/envs/lab; \

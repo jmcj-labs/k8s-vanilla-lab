@@ -76,6 +76,14 @@ jobs:
         run: make test
         working-directory: .
 
+      # EC2 rejects user_data over 16384 B at RunInstances, which `tofu plan`
+      # never reaches -- so this was invisible to CI until the fifth apply died
+      # on it with 95 bytes of headroom spent (INCIDENTS #25). Permanent, and
+      # it stays even now that the stubs measure under 4 KB.
+      - name: user_data transport budget (INCIDENTS #25 guardrail)
+        run: make user-data-size
+        working-directory: .
+
       - name: Render official Cilium 1.20.1 bootstrap chart
         run: |
           bash scripts/test-cilium-bootstrap-chart.sh

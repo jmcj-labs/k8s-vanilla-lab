@@ -1385,3 +1385,89 @@ redirige su stdout al fichero con `exec >>` y ademas hace
 `... | tee -a /var/log/k8s-cp-bootstrap.log` en varios puntos: `tee` escribe en
 el fichero y en su stdout, que es el mismo fichero. Cosmetico, pero indujo a
 error dos veces al leer los logs. Anotado, no corregido.
+
+---
+
+## 25. El presupuesto de transporte que nadie vigilaba
+
+**Cuándo**: 2026-08-27, quinto Apply del día, el primero con el gate de #24
+corregido (run `33071611144`, `main` en `10821c61`).
+**Severidad**: el apply murió creando la instancia; **CP-0 nunca llegó a
+existir**. CP-1 y CP-2 sí se crearon y quedaron esperando a un fundador
+imposible. Sin cluster, sin fundador, sin logs que preservar. Ventana:
+10m20s, **0,0235 USD**.
+
+### Qué pasó
+
+```
+Error: creating EC2 Instance: RunInstances
+  InvalidParameterValue: User data is limited to 16384 bytes
+  with module.control_plane.aws_instance.control_plane[0]
+```
+
+Medido sobre el render real, antes y después del PR que lo rompió:
+
+```
+antes de #83   user_data (gzip) = 16289 B   margen  +95
+con #83        user_data (gzip) = 16704 B   margen -320
+```
+
+El fundador **ya viajaba a 95 bytes del techo**. Las 60 líneas de
+`bootstrap/kpr-gate.sh` -- el fix de #24, correcto en su contenido -- lo
+cruzaron. Solo falló el índice 0: CP-1 y CP-2 no llevan el script del fundador.
+
+### Por qué no lo vio nadie
+
+**El límite era conocido y estaba medido esa misma mañana.** Durante el
+forense del arranque del 26-ago se calculó ese payload y se escribió el
+límite de 16384 B en el propio análisis. Se añadieron 2,3 KB al fundador y no
+se volvió a medir.
+
+El fallo de revisión es **compartido**: el ejecutor escribió el cambio con la
+herramienta de medida ya montada y no la usó; el director aprobó el diff,
+añadió una línea más y tampoco midió.
+
+Y **el CI no podía atraparlo**: `Format · Validate · Plan` estaba verde porque
+`tofu plan` no llega a `RunInstances`. El límite solo se ejerce al crear la
+instancia, de modo que ninguna cantidad de plan lo habría revelado.
+
+### Decisión de diseño: cambiar el transporte, no adelgazar
+
+Raspar bytes compra **un** arranque y deja el techo donde estaba. Peor: pone
+cada PR futuro a pelear su margen contra los comentarios que documentan
+#22-#24, es decir, invita a borrar precisamente la memoria que ha costado
+cinco arranques escribir.
+
+Los renders del fundador y del join pasan a **S3** (`aws_s3_object` sobre el
+bucket persistente, pero **propiedad del stack `lab`**: el destroy se lleva los
+objetos y deja el bucket). En `user_data` viaja solo un stub que descarga,
+**verifica el SHA-256 horneado por `templatefile`** y ejecuta. Nunca se
+ejecuta lo que no se ha verificado: una descarga se reintenta, un hash que no
+cuadra significa que los bytes no son los que tofu renderizó.
+
+```
+perfil    antes      ahora
+cp0       16704 B     3840 B
+cp1..N     ~8800 B    3789 B
+worker     4901 B     4901 B   (inline por decisión: no estaba contra el techo)
+```
+
+### El gate que faltaba
+
+`scripts/check-user-data-size.sh`, permanente en CI, mide el `user_data`
+**real** -- multipart MIME, gzip y base64 a través del propio provider, no una
+reimplementación -- de los tres perfiles y falla por encima de **14336 B**.
+Se queda aunque hoy los stubs midan menos de 4 KB: su valor no es el número de
+hoy, sino que el número exista y lo vigile algo que no olvida.
+
+**Los presupuestos de transporte se vigilan con gates, no con memoria de
+revisores.** Un límite que solo vive en la cabeza de quien revisó ayer no es
+un límite: es una probabilidad.
+
+### Efecto colateral a recordar
+
+Los scripts ya no se materializan en `/var/lib/cloud/instance/scripts/`, sino
+en `/opt/k8s-bootstrap/`. El listado de esa carpeta era el **primer paso** del
+procedimiento forense de #23 y #24; a partir de ahora hay que mirar en los dos
+sitios: cloud-init sigue escribiendo ahí el stub, y el script real está en
+`/opt`.

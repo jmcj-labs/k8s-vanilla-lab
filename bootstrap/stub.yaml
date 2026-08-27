@@ -1,0 +1,19 @@
+#!/bin/bash
+# Cloud-init stub: fetches the real bootstrap script from S3, verifies its
+# SHA-256 and executes it. The script itself no longer fits in user_data
+# (INCIDENTS #25) -- this is all that rides there now.
+# Variables: log_file, aws_region, s3_uri, sha256, dest, fetch_exec_library
+
+set -euo pipefail
+exec >> ${log_file} 2>&1
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+export AWS_DEFAULT_REGION=${aws_region}
+
+${fetch_exec_library}
+
+log "=== Stub: fetching ${s3_uri} ==="
+fetch_and_exec "${s3_uri}" "${sha256}" "${dest}" 300 5

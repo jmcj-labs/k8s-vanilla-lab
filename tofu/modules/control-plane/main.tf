@@ -241,6 +241,27 @@ resource "aws_iam_role_policy" "control_plane_etcd_backup" {
   })
 }
 
+# INCIDENTS #25: the bootstrap scripts no longer fit in user_data and are
+# fetched from S3 at first boot. Read-only, and scoped to this cluster's
+# bootstrap prefix -- NOT the bucket, which also holds etcd snapshots and
+# CNPG backups the control plane has no business reading.
+resource "aws_iam_role_policy" "control_plane_bootstrap_fetch" {
+  name = "${var.name}-cp-bootstrap-fetch"
+  role = aws_iam_role.control_plane.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "BootstrapScriptGet"
+        Effect   = "Allow"
+        Action   = "s3:GetObject"
+        Resource = "arn:aws:s3:::${var.bootstrap_bucket_name}/${var.bootstrap_prefix}/*"
+      }
+    ]
+  })
+}
+
 # EBS CSI driver: EC2 volume operations (attach/detach/create/delete)
 # Out-of-band access (INCIDENTS #16 → brief de cierre de la pieza 3).
 #
@@ -339,6 +360,14 @@ resource "aws_instance" "control_plane" {
       "kubernetes.io/cluster/${var.cluster_name}" = "owned"
     }
   )
+
+  # The first-boot stub fetches its script from S3 using the instance profile.
+  # The profile is attached via iam_instance_profile, but the POLICY that lets
+  # it read the object is a separate resource nothing here references -- so the
+  # edge is explicit, or an instance can boot and get AccessDenied on a grant
+  # that was seconds away from existing (INCIDENTS #25).
+  # No worker twin: worker payloads stay inline and fetch nothing.
+  depends_on = [aws_iam_role_policy.control_plane_bootstrap_fetch]
 
   lifecycle {
     # user_data kept alongside user_data_base64 to absorb the attribute
