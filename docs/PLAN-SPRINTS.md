@@ -175,9 +175,12 @@ mete una variable más en un día que ya tiene la suya.
   manifestaciones del mismo incidente en el mismo canal S3 -- primero sin
   `PutObject`, luego sin `PutObjectTagging` -- salieron ambas de simular en vez
   de ejercitar. Cuando el rol no sea asumible (OIDC-only, como el de CI),
-  `simulate-principal-policy` es el sustituto, pero con la lista tomada del 403
-  real y una negativa de control sobre un prefijo vecino. Al checklist de
-  revision.
+  `simulate-principal-policy` es el sustituto -- pero la lista **no** sale del
+  403 (eso solo nombra el siguiente fallo, no el conjunto) ni de la memoria:
+  sale del **call graph de la version del provider fijada en el lock**. En #26
+  eso revelo `s3:ListBucketVersions`, accion de bucket que ninguna lista de
+  acciones de objeto podia contener y que habria roto el destroy, no el apply.
+  Con negativa de control sobre un prefijo vecino. Al checklist de revision.
 - **Bucket propio para los objetos de bootstrap** (27-ago, nota de fase 2, con
   INCIDENTS #26 de contexto): hoy los renders viven bajo `bootstrap/` en el
   bucket persistente de backups, junto a `etcd/` y `cnpg/`. Un bucket del

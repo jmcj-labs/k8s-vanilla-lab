@@ -198,18 +198,31 @@ JSON
 # The grant that existed covered only the reader (the CP instance role) --
 # the sixth apply died on AccessDenied for PutObject.
 #
-# The action list is the OBJECT LIFECYCLE, not a minimal guess. Granting three
-# actions and then verifying those same three proved only that the policy said
-# what had been written; the seventh apply advanced exactly one call and died
-# on PutObjectTagging, which the provider's default_tags make unavoidable.
-# The role is OIDC-only and cannot be assumed locally, so the required set
-# cannot be enumerated by exercising it -- and enumerating it from memory is
-# what already cost two applies. Tagging and version variants are included
-# because the bucket is versioned and every object carries default_tags.
+# The action list comes from the CALL GRAPH of the pinned provider
+# (hashicorp/aws 6.46.0), not from memory and not from whatever the last 403
+# happened to name. Granting three actions and verifying those same three
+# proved only that the policy said what had been written; the seventh apply
+# advanced exactly one call and died on PutObjectTagging. Answering that with
+# a superset was the same mistake pointing upwards.
 #
-# What keeps this narrow is the RESOURCE, not the action list: one prefix,
-# object-level only. Nothing here can touch etcd/ or cnpg/, which hold the
-# only data in this account worth conserving, nor act on the bucket itself.
+# What aws_s3_object actually calls, with default_tags set and the bucket
+# versioned: PutObject + PutObjectTagging on create, GetObject +
+# GetObjectTagging on read, and on destroy ListObjectVersions followed by
+# DeleteObject/DeleteObjectVersion for every version and delete marker.
+#
+# ListBucketVersions is the one that is easy to miss and expensive to miss:
+# it is a BUCKET-level action, so the object grant above cannot carry it. An
+# apply would succeed without it and the DESTROY would fail. It is scoped by
+# the s3:prefix condition so it cannot enumerate etcd/ or cnpg/.
+#
+# Deliberately NOT granted, because this call graph never reaches them:
+# AbortMultipartUpload (payloads are ~30 KiB, under the multipart threshold),
+# DeleteObjectTagging (destroy removes the version, not its tags),
+# GetObjectVersion and GetObjectVersionTagging.
+#
+# What keeps this narrow is the RESOURCE: one prefix, object-level, plus one
+# conditioned bucket action. Nothing here can touch etcd/ or cnpg/, which hold
+# the only data in this account worth conserving.
 PERMISSIONS_POLICY=$(cat <<JSON
 {
   "Version": "2012-10-17",
@@ -468,18 +481,25 @@ PERMISSIONS_POLICY=$(cat <<JSON
       "Sid": "BootstrapScriptObjects",
       "Effect": "Allow",
       "Action": [
-        "s3:AbortMultipartUpload",
         "s3:DeleteObject",
-        "s3:DeleteObjectTagging",
         "s3:DeleteObjectVersion",
         "s3:GetObject",
         "s3:GetObjectTagging",
-        "s3:GetObjectVersion",
-        "s3:GetObjectVersionTagging",
         "s3:PutObject",
         "s3:PutObjectTagging"
       ],
       "Resource": "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}/bootstrap/${CLUSTER_NAME}/*"
+    },
+    {
+      "Sid": "BootstrapScriptListVersions",
+      "Effect": "Allow",
+      "Action": "s3:ListBucketVersions",
+      "Resource": "arn:aws:s3:::${CLUSTER_NAME}-backups-${ACCOUNT_ID}",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "bootstrap/${CLUSTER_NAME}/*"
+        }
+      }
     },
     {
       "Sid": "TofuStateDynamoDB",
