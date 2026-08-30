@@ -137,6 +137,16 @@ Aprobado y pendiente, fuera del camino crítico:
   posterior siempre es cero. Eliminar la falsa rama; no bloquea el arranque.
 - **Retry acotado en el gate de join** ante errores SSM transitorios,
   conservando fail-closed y el diagnóstico.
+- **Estándar de verificación de permisos nuevos** (INCIDENTS #26): un permiso
+  nuevo se verifica **ejercitando el ciclo real con el rol asumido** (put + get
+  + delete sobre una key canario), no simulando el contrato. Cuando el rol no
+  sea asumible —OIDC-only, como el de CI— `simulate-principal-policy` es el
+  sustituto, pero la lista de acciones **no sale del 403** (eso nombra el
+  siguiente fallo, no el conjunto) **ni de la memoria**: sale del **call graph
+  de la versión del provider fijada en el lock**. Así apareció
+  `s3:ListBucketVersions`, acción de **bucket** que ninguna lista de acciones de
+  **objeto** podía contener y que habría roto el **destroy**, no el apply. Con
+  negativa de control sobre un prefijo vecino. Al checklist de revisión.
 - **Auditar gates que parsean salida humana** de `cilium-dbg`, `kubeadm` y
   `helm` (INCIDENTS #23), y asignaciones `VAR=$(... 2>/dev/null)` bajo `set -e`
   sin guarda en línea (#24). Auditoría, no reescritura preventiva.
