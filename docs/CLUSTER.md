@@ -251,7 +251,7 @@ cero salvo el bucket de backups (céntimos).
 
 ## 5. Límites conocidos (deuda consciente)
 
-Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
+Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
 
 - ~~IMDS alcanzable desde toda la red de pods~~ **CERRADA (2026-08-11)**:
   CiliumClusterwideNetworkPolicy deniega `169.254.169.254` a todos los pods
