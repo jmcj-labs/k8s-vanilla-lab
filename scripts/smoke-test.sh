@@ -15,7 +15,12 @@
 set -euo pipefail
 
 FAIL() { echo "✗ $*" >&2; exit 1; }
-OK() { echo "✓ $*"; }
+# The suite reports how many checks it ran, from a counter -- not from whoever
+# is counting ✓ lines afterwards. Three different figures for this suite
+# circulated in one day because the closing banner is itself a ✓ and got
+# counted as a check. A number that matters is a datum, not a tally.
+CHECKS_OK=0
+OK() { CHECKS_OK=$((CHECKS_OK + 1)); echo "✓ $*"; }
 
 # PREFLIGHT, genuinely first: before sourcing anything and before any external
 # process at all. It used to sit below, after `dirname` had already run, which
@@ -128,8 +133,13 @@ echo "${ENVOY_DS}" | jq -e --argjson expected "${EXPECTED_NODES}" '
   and .status.numberReady == $expected' >/dev/null \
   || FAIL "cilium-envoy DaemonSet is not desired=updated=ready=${EXPECTED_NODES}"
 
-bash "${SCRIPT_DIR}/verify-cilium-120-schema.sh" \
-  || FAIL "Gateway API live schema is not the exact v1.6.1 hybrid required by Cilium 1.20.1"
+# Its checks are its own, so they are counted from what it actually printed
+# rather than added as a constant here -- a hardcoded 10 would drift the day
+# that script gains or loses an assertion.
+SCHEMA_OUT=$(bash "${SCRIPT_DIR}/verify-cilium-120-schema.sh") \
+  || { printf '%s\n' "${SCHEMA_OUT}"; FAIL "Gateway API live schema is not the exact v1.6.1 hybrid required by Cilium 1.20.1"; }
+printf '%s\n' "${SCHEMA_OUT}"
+CHECKS_OK=$((CHECKS_OK + $(printf '%s\n' "${SCHEMA_OUT}" | grep -c '✓')))
 OK "Cilium 1.20.1: ${EXPECTED_NODES}/${EXPECTED_NODES} agents and Envoys Ready, operator Ready, KPR=True on every node; schema exact"
 
 # ── 4. providerID on every node ──────────────────────────────────────────────
@@ -1219,4 +1229,4 @@ else
 fi
 
 echo ""
-echo "✓ Smoke test passed: cluster, platform, IAM, network, data, registry, app contract, backups, NLB entry, HA control plane and out-of-band access are healthy"
+echo "✓ Smoke test passed — ${CHECKS_OK} checks OK: cluster, platform, IAM, network, data, registry, app contract, backups, NLB entry, HA control plane and out-of-band access are healthy"
