@@ -74,8 +74,27 @@ El conteo real son las llamadas a `OK()` de `scripts/smoke-test.sh` más los
 checks que imprime `scripts/verify-cilium-120-schema.sh`. En el run de
 coronación: **54 de `OK()` + 10 del sub-script = 64**.
 
+La cifra errónea quedó escrita en el registro permanente y no se reescribe:
+el commit **`f422f4d`** dice *"local run rc=0, 61/61 green including 15d"*, y
+el cuerpo del PR **#87** repite *"61/61 verdes en local"*. Ambos incluían el
+banner de cierre en la cuenta. El número correcto de ese mismo run es **60**.
+Se deja trazable a propósito: una cifra mala corregida en silencio reaparece.
+
 Desde este PR el número lo lleva un contador (`CHECKS_OK`) y lo imprime el
 propio banner, para que deje de ser una cuenta de líneas a ojo.
+
+> **El contador está DECLARADO NO OBSERVADO.** El 64 de arriba se deriva del
+> log del run de coronación (54 líneas sin sangrar de `OK()` + 10 sangradas
+> del sub-script) y la lógica de suma se probó con un sub-script simulado,
+> pero **nadie ha visto todavía al contador imprimir un número**. Se intentó
+> con stubs: la suite muere en el primer check, porque cada `OK()` está
+> condicionado a una aserción sobre estado real y estructurado — 129
+> invocaciones de `kubectl`, 32 de `aws` y 19 consultas `-o json/jsonpath`
+> distintas. Satisfacerlas no sería un stub, sería un cluster falso.
+>
+> Por tanto **el próximo smoke en CI es su primera ejecución real, no una
+> confirmación de trámite**. Si imprime un número distinto de 64, la razón la
+> tiene el contador y no esta derivación.
 
 | canal | checks | qué cubre y qué no |
 |---|---|---|
@@ -160,7 +179,7 @@ Backlog ejecutable en [PLAN-SPRINTS.md](PLAN-SPRINTS.md). Además:
 
 - **Higiene de repo**, aprobada y pendiente: archivar runbooks a
   `docs/operations/`, borrar prototipos muertos, podar ramas mergeadas y
-  divergentes. `TODO(verificar)`: número exacto de ramas a podar.
+  divergentes.
 - **Guía para dummies** de crear-cuenta-AWS hasta el borde final, con sección
   de última milla a PROD real.
 - **logistics-lab** (Repo 2, app Go): en pausa explícita desde el pivote al
