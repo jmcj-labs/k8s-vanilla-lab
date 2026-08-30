@@ -48,7 +48,7 @@ vivo** —, sin Route53 hasta post-S4.
 
 | Componente | Versión | Pin |
 |---|---|---|
-| Kubernetes (kubeadm/kubelet/kubectl) | serie 1.35.x (hoy 1.35.7) | serie |
+| Kubernetes (kubeadm/kubelet/kubectl) | serie `stable:/v1.35`, sin patch fijado | serie |
 | containerd (repo Docker) | 2.3.x | latest del repo |
 | Cilium (KPR estricto, Gateway API, Hubble) | 1.20.1 | chart |
 | Gateway API CRDs (6 standard + overlay experimental TLSRoute) | v1.6.1 | manifiestos individuales |
@@ -138,7 +138,7 @@ real, no existencia) y targets de Prometheus `up==1` con muestras.
 **Handoff tras recreate**: cada apply desde cero cambia `K8S_SERVER` y
 `K8S_CA_DATA` (el resto — `K8S_CLUSTER_ID`, `AWS_ROLE_ARN`, `AWS_REGION`,
 `K8S_DEVELOPER_ROLE_ARN` — es estable). Procedimiento: destroy → apply
-(smoke 38+ verde) → el operador actualiza esas 2 variables en el repo
+(smoke 64 checks OK en CI) → el operador actualiza esas 2 variables en el repo
 logistics-lab → `workflow_dispatch` (rebuild→push SHA→deploy→e2e) →
 `make smoke-app-contract`. El refresh es manual (deuda §5).
 
@@ -345,11 +345,26 @@ Cada uno con su "cuándo se paga" en [PLAN-SPRINTS.md](PLAN-SPRINTS.md):
 - **Ventana sin tokens IAM en cada bootstrap**: entre el arranque del API
   server y el rollout del DaemonSet del authenticator solo funciona el
   break-glass. Asumido (ADR-005) — el authenticator nunca es SPOF de acceso.
-- **Sin HA, sin backups** — Sprint 2 (backups con restore probado primero).
 - **Subred pública sin NAT** y **workers spot** — tradeoffs de coste
   documentados que sobreviven a ambos sprints.
 - **Token de join con TTL 24h** — workers que se unan más tarde necesitan
   token nuevo (`docs/troubleshooting.md`).
+- **Flujo humano SSO de `jm-dev` NO ejercitado — sin evidencia.** El smoke
+  prueba el camino IAM con roles asumidos por la identidad de CI, no el login
+  interactivo de un humano. Y ojo con la prueba equivocada: el
+  `ForbiddenException: No access` que registra
+  [platform/access/README.md](../platform/access/README.md) es un rechazo de
+  **Identity Center** por sesión de navegador, no el `Forbidden` de **RBAC de
+  Kubernetes** que exige el criterio de aceptación. Se leen igual y no lo son:
+  dar el primero por bueno validaría el módulo con la prueba equivocada. La
+  verificación válida es un login real como `jm-dev` que llegue hasta un
+  `kubectl` denegado **por el API server**.
+- **Endpoint de readiness por nodo: no existe** (INCIDENTS #20). El health
+  check del NLB es TCP contra el NodePort, que Cilium programa con
+  independencia de la salud del datapath, así que no puede detectar un nodo
+  que dejó de servir. El fix —un endpoint agregador por nodo— sigue sin
+  implementar; hay un prototipo en `platform/node-readiness/` que NO está
+  desplegado. Límite abierto, no cerrado.
 
 ## 6. Historial de incidencias
 

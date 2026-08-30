@@ -46,6 +46,15 @@ kubectl get nodes
 > # open the printed URL in an INCOGNITO window, log in as jm-dev
 > ```
 
+> **ESTADO: flujo humano SSO NO ejercitado — sin evidencia.** Y el matiz que
+> hace falta para que la verificación futura valga: este
+> `ForbiddenException: No access` es un rechazo de **Identity Center** por la
+> sesión del navegador, NO el `Forbidden` de **RBAC de Kubernetes** que exige
+> el criterio de aceptación. Son dos errores distintos que se leen igual.
+> Darlo por bueno validaría el módulo con la prueba equivocada. La prueba
+> válida es un login real como `jm-dev` que termine en un `kubectl` denegado
+> **por el API server**, no por el portal.
+
 ```bash
 aws sso login --profile k8s-dev             # browser → log in AS jm-dev
 export KUBECONFIG=~/.kube/k8s-vanilla-lab-dev.conf

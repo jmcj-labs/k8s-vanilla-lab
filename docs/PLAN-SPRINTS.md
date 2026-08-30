@@ -131,22 +131,33 @@ Retomar el path donde manda el mapa: Fase 1.5 (Cilium a fondo: L7, Hubble avanza
 
 ## Deuda consciente que sobrevive a ambos sprints
 
-### ⬆ SUBE DE PRIORIDAD (26-ago): pinear Gateway API v1.6.1 en el bootstrap
+### ~~SUBE DE PRIORIDAD (26-ago): pinear Gateway API v1.6.1 en el bootstrap~~ — HECHO (27-ago)
 
-`bootstrap/control-plane.yaml` instala las CRDs en **v1.2.1**, así que **cada
-encarnación del cluster necesita reejecutar la escalera de 4b antes de 4a** —
-4b es un ESTADO del cluster, no un hito alcanzado una vez.
+**Cerrada.** `bootstrap/control-plane.yaml` instala Gateway API **v1.6.1**
+desde `b9adbaa`, por la ruta híbrida (seis CRDs standard individuales +
+overlay del TLSRoute experimental). La afirmación previa de esta entrada —que
+el bootstrap instalaba v1.2.1 y que cada encarnación del cluster tenía que
+reejecutar la escalera de 4b— **ya no es cierta**. Verificado en los dos
+arranques verdes del 27-ago: los dos `assert_gateway_schema` pasan con siete
+CRDs sirviendo `v1`, TLSRoute también en `v1alpha2` y `bundle-version` exacto
+v1.6.1.
 
-**Por qué sube de prioridad hoy y no antes**: el Apply del 26-ago murió
-*exactamente en esa línea* (`kubectl apply` de las CRDs corriendo antes de que
-el NLB enrutara al CP recién iniciado; arreglado en #77 con un gate de
-`healthy`). El paso demostró ser frágil, y es **el mismo** que habría que
-tocar para nacer en v1.6.1. Ya no es solo comodidad: es reducir superficie
-donde hoy nos ha costado un Apply entero.
+Se conserva el motivo original por si sirve de contexto: el Apply del 26-ago
+murió en esa misma línea (CRDs aplicándose antes de que el NLB enrutara al CP
+recién iniciado; arreglado en #77 con un gate de `healthy`), y ese paso frágil
+era el mismo que había que tocar para nacer en v1.6.1.
 
-**Sigue siendo su propio PR, post-hoy**: cambia el camino probado — 4b se
-validó *subiendo escalón a escalón* desde v1.2.1, no naciendo en v1.6.1 — y
-mete una variable más en un día que ya tiene la suya.
+### Endpoint de readiness por nodo — INCIDENTS #20, ABIERTO
+
+El health check del NLB es TCP contra el NodePort, que Cilium programa con
+independencia de la salud del datapath: **no puede detectar un nodo que dejó
+de servir**. El fix es un endpoint agregador por nodo que responda 200 solo
+con el AND del agente y de Envoy. Hay un prototipo en
+`platform/node-readiness/` que **NO está desplegado**. Ver
+[CLUSTER.md](CLUSTER.md) §5, donde consta como límite abierto.
+
+Es prerrequisito del upgrade de Cilium en vivo (4a-v3): sin él, sacar un nodo
+del pool durante el drenaje es una hipótesis, no una operación observable.
 - Subred pública sin NAT (tradeoff lab documentado)
 - Workers spot (fallback on-demand vía variable)
 - Sin OTel/tracing hasta Fase 2
