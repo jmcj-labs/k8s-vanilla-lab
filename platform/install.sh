@@ -277,10 +277,22 @@ NR_READY=$(kubectl -n infra get ds node-readiness -o jsonpath='{.status.numberRe
   || { echo "✗ node-readiness is ${NR_READY:-0}/${NR_DESIRED:-0} Ready" >&2; exit 1; }
 # It must land on the WORKERS and nowhere else: a readiness answer from a
 # control plane would be about a Gateway that does not serve there.
-NR_ON_CP=$(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
-  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
-  | while read -r n; do [ -n "$n" ] && kubectl get node "$n" \
-      -o jsonpath='{.metadata.labels}' | grep -q 'node-role.kubernetes.io/control-plane' && echo "$n"; done | wc -l | tr -d ' ')
+# No pipeline in the test, and no `&&` chain as the last statement of a loop
+# body: both are fatal here under `set -euo pipefail`. The `&&` form makes the
+# body exit non-zero on the GOOD path (no control plane matched), which
+# pipefail propagates out of the command substitution and `set -e` turns into a
+# silent exit -- the check killed the install precisely when it passed. And
+# `kubectl | grep -q` SIGPIPEs kubectl when grep DOES match, so pipefail would
+# report a control-plane pod as if there were none. See INCIDENTS #29.
+NR_ON_CP=0
+for n in $(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u); do
+  [ -n "$n" ] || continue
+  NR_LBL=$(kubectl get node "$n" -o jsonpath='{.metadata.labels}')
+  case "${NR_LBL}" in
+    *node-role.kubernetes.io/control-plane*) NR_ON_CP=$(( NR_ON_CP + 1 )) ;;
+  esac
+done
 [ "${NR_ON_CP}" -eq 0 ] \
   || { echo "✗ node-readiness scheduled on ${NR_ON_CP} control plane(s)" >&2; exit 1; }
 log "✓ node-readiness ${NR_READY}/${NR_DESIRED} Ready on workers only, listening on :${READINESS_PORT:-8910}"

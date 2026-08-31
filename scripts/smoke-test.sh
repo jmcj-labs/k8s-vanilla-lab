@@ -217,12 +217,18 @@ echo "${NR_JSON}" | jq -e --argjson w "${WORKER_COUNT}" '
   || FAIL "node-readiness is not desired=updated=ready=${WORKER_COUNT} (workers only)"
 OK "node-readiness DaemonSet ${WORKER_COUNT}/${WORKER_COUNT} Ready on the workers"
 
-NR_CP=$(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
-  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read -r n; do
-    [ -n "${n}" ] || continue
-    kubectl get node "${n}" -o jsonpath='{.metadata.labels}' \
-      | grep -q 'node-role.kubernetes.io/control-plane' && echo "${n}"
-  done | wc -l | tr -d ' ')
+# Same shape as platform/install.sh: no pipeline in the test and no `&&` chain
+# closing a loop body. Under `set -euo pipefail` the old form died silently on
+# the GOOD path and under-counted on the bad one. See INCIDENTS #29.
+NR_CP=0
+for NR_N in $(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
+    -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u); do
+  [ -n "${NR_N}" ] || continue
+  NR_LBL=$(kubectl get node "${NR_N}" -o jsonpath='{.metadata.labels}')
+  case "${NR_LBL}" in
+    *node-role.kubernetes.io/control-plane*) NR_CP=$(( NR_CP + 1 )) ;;
+  esac
+done
 [ "${NR_CP}" -eq 0 ] || FAIL "node-readiness is scheduled on ${NR_CP} control plane(s)"
 OK "node-readiness absent from every control plane (the Gateway does not serve there)"
 

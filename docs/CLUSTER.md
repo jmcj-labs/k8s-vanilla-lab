@@ -133,6 +133,23 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 
 ## 4. Operación
 
+**Cambiar un puerto (o cualquier constante que viva en dos capas) toca el repo
+Y Tofu — el merge no aplica nada.** Suena obvio escrito, y aun así costó una
+sesión: el puerto del agregador se movió de 9890 a 8910, el PR se mergeó, y la
+infraestructura siguió sondeando 9890 durante 49 minutos porque nadie corrió
+`make apply`. Un puerto de este tipo vive en **tres** sitios y hay que tocar
+los tres, en este orden:
+
+1. `platform/manifests/*.yaml` — dónde escucha el proceso (capa plataforma)
+2. `tofu/**/variables.tf` — health check del TG y reglas de SG (capa infra)
+3. `make apply` — **el paso que la gente olvida**: sin él, (2) es un fichero,
+   no una regla
+
+Es la misma forma que los fallos de INCIDENTS #26/#28/#29: el artefacto
+correcto en un sitio y el sistema real en otro. La comprobación barata es
+`make plan` — si dice `0 to change` después de tocar Tofu, o ya está aplicado
+o no has tocado lo que creías.
+
 **Smoke de contrato de app** (`make smoke-app-contract`, con `GITHUB_SHA`):
 se ejecuta tras el deploy de Repo 2 (la coronación, no el Apply): los 4
 servicios Ready con imagen `<repo>:<SHA>` **traída de ECR por digest** (pull
@@ -386,6 +403,32 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   mientras su propio datapath está roto **sigue sin detectarse**. Cerrar eso
   exigiría una sonda que atraviese el datapath en vez de preguntarle a quien lo
   programa.
+- **Ventana entre el TG cambiado y el agregador sirviendo: ~36 s en el camino
+  limpio.** El health check HTTP vive en Tofu y el DaemonSet en la capa de
+  plataforma, así que entre que el TG pasa a sondear `:8910/healthz` y que
+  `node-readiness` responde ahí, el TG marca los targets `unhealthy`. Cuando
+  todos los targets de un TG están `unhealthy` el NLB abre (`fail-open`) y
+  reparte igualmente, así que la ventana **no corta el tráfico**: degrada la
+  señal a lo que teníamos antes de la pieza.
+
+  **Medido el 2026-08-31, y hay que leer las dos cifras con cuidado**:
+
+  | tramo | medido |
+  |---|---|
+  | camino limpio: `tofu apply` corrige el TG (13:03:27Z) → 3 targets `healthy` (13:04:03Z), con el DaemonSet ya corriendo | **36 s** — dos intervalos de health check (`interval=10`, `healthy_threshold=2`) |
+  | reloj de pared de aquella sesión: 12:14:38Z → 13:04:03Z | 49 m 25 s |
+
+  **Los 49 minutos NO son la ventana**: son la duración de tres incidentes
+  encadenados (el 403 del pull de ECR, la colisión de puerto de #28 y un
+  `tofu apply` que faltaba). Se consignan para que nadie los reconstruya como
+  si fueran el coste de la pieza. **La cifra de la ventana es 36 s**, y una
+  lectura futura de "49 minutos" concluiría que la pieza es inviable en un
+  cluster vivo, que no es lo que ocurrió.
+
+  En un arranque desde vacío la ventana es mayor por construcción — el TG nace
+  con `make apply` y el DaemonSet no existe hasta el paso 6 de `make platform`,
+  con la espera de bootstrap en medio — pero el cluster tampoco está sirviendo
+  tráfico todavía.
 
 ## 6. Historial de incidencias
 
