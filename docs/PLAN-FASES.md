@@ -43,7 +43,29 @@ CI, 60 en local**. Detalle y método de conteo en [HANDOFF.md](HANDOFF.md).
 
 El riesgo aquí es de alcance, no técnico: timeboxing estricto por frente.
 
-### Pieza 0 — Endpoint de readiness por nodo (INCIDENTS #20) · PRIMERA
+### Pieza 0 — Endpoint de readiness por nodo (INCIDENTS #20) · 👑 CORONADA (31-ago-2026)
+
+**Coronada con la prueba, no con un razonamiento.** `kill -STOP` sobre el
+`cilium-envoy` de un worker: el TG marcó **ese** target `unhealthy` entre 19 s
+y 24 s después, y los otros dos siguieron `healthy` en las 34 muestras. La
+misma intervención contra el health check TCP anterior daba 22 muestras
+seguidas de `healthy`. Criterio escrito antes de ejecutar, con sus dos formas
+de fallar declaradas. Evidencia en
+[`docs/evidence/pieza0-2026-08-31/`](evidence/pieza0-2026-08-31/).
+
+Entregado: agregador `node-readiness` (DaemonSet `hostNetwork` en workers,
+imagen pinada por digest desde ECR), health check del TG a `HTTP :8910/healthz`
+con `matcher=200`, regla de SG, 4 checks nuevos en el smoke y el gate de
+tamaño de user_data intacto. Cuatro incidentes por el camino: #26 (tercera
+manifestación, el extremo lector del pull de ECR), #28 (la constante `:9890`
+heredada de un prototipo nunca desplegado, que colisiona con `cilium-agent`) y
+#29 (la guarda que mataba la instalación justo cuando pasaba, con un falso
+negativo por SIGPIPE en su único cometido). Los cuatro los cazó el hierro.
+
+**Límite que NO cierra**: la prueba mata a Envoy, no al datapath del agente. Un
+agente que se reporta sano con su datapath roto sigue sin detectarse. Ver
+[CLUSTER.md](CLUSTER.md) §5.
+
 
 No es una elección: el propio plan lo declara **prerrequisito del upgrade de
 Cilium en vivo (4a-v3)**, y multi-AZ agrava el fallo en vez de tolerarlo.

@@ -1,0 +1,17 @@
+experiment       kill -STOP sobre cilium-envoy, deteccion por el TG del gateway
+date             2026-08-31
+cluster          k8s-vanilla-lab (eu-west-1, cuenta 487985088962)
+main             c5387af
+target_group     gw-tg 5a1acccc9c445ad2
+health_check     HTTP :8910/healthz matcher=200 interval=10 timeout=6 unhealthy=2 healthy=2
+aggregator       node-readiness DaemonSet, hostNetwork, imagen @sha256:43b7fa17...
+intervened_node  i-0b39f2a85f2d77523 = 10.0.1.221
+control_nodes    i-07e1d654c96b37838 = 10.0.1.88 ; i-0e285e4282cc88dc8 = 10.0.1.69
+process          pid 3474 comm=cilium-envoy (hijo de 3462 cilium-envoy-starter)
+method           SSM Run Command autolimitado: STOP -> sleep 100 -> CONT en el
+                 propio nodo, para que Envoy se recupere aunque se pierda la
+                 sesion del operador. CommandId 9bd64d61-020a-4be3-9c02-9573f9d81c6c
+sampling         describe-target-health cada ~5 s, 34 muestras
+stop_at          13:36:26Z   (marca del propio nodo, no del operador)
+cont_at          13:38:06Z   (marca del propio nodo)
+after_cont       ps -> "3474 Sl cilium-envoy"  (S, no T: volvio a correr)

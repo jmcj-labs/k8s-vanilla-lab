@@ -397,6 +397,15 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   responde 200 solo con el AND del agente y de Envoy. Corre como DaemonSet
   `hostNetwork` en los workers, y su puerto solo lo alcanza el SG del NLB.
 
+  **Probado, no razonado** (2026-08-31,
+  [evidencia](evidence/pieza0-2026-08-31/)): `kill -STOP` sobre el
+  `cilium-envoy` de un worker → el TG marcó **ese** target `unhealthy` entre
+  19 s y 24 s después, mientras los otros dos siguieron `healthy` en las 34
+  muestras. La misma intervención contra el health check TCP anterior había
+  dado 22 muestras seguidas de `healthy` con Envoy parado. El criterio se
+  escribió antes de ejecutar, incluidas las dos formas de fallar (que cayeran
+  los tres = fallo del agregador; que no cayera ninguno = agregador inútil).
+
   **Lo que NO cierra, y es un límite abierto distinto**: el experimento que lo
   demostró mató a **Envoy**, no al datapath del agente. El agregador **le
   pregunta al agente si está bien**, así que un agente que se reporta sano
