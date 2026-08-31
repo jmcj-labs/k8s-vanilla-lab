@@ -80,7 +80,7 @@ spec:
         - name: node-readiness
           # PINNED BY DIGEST. The repository lives in the persistent stack so
           # this digest keeps naming something that exists after a destroy.
-          image: 487985088962.dkr.ecr.eu-west-1.amazonaws.com/k8s-vanilla-lab-node-readiness@sha256:eb25278c2212c0215d94f6ce34b57f378d3e7ccb837a1c54b34663a90c8cf0ff
+          image: 487985088962.dkr.ecr.eu-west-1.amazonaws.com/k8s-vanilla-lab-node-readiness@sha256:43b7fa1762c0e99c8642110e62de7b7b053a6b1c7282df8b5bb6f09c2b2474e5
           imagePullPolicy: IfNotPresent
           ports:
             - name: readiness
