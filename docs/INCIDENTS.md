@@ -1921,6 +1921,12 @@ evidencia que tenemos de que la pieza hace su trabajo, y llegó gratis.
 
 ## 29. La comprobación que mataba la instalación justo cuando pasaba
 
+> **Un check con el bug en su único cometido es peor que no tener el check,
+> porque ocupa su sitio.** No perdimos una comprobación: tuvimos una
+> comprobación falsa ocupando el hueco de la buena, y el hueco parecía
+> cubierto. La regla técnica del `pipefail` explica el mecanismo; esto explica
+> por qué importa.
+
 **Fecha**: 2026-08-31
 **Pieza**: Fase 2, pieza 0
 **Detectado por**: el hierro — `make platform` salía `Error 1` sin imprimir nada

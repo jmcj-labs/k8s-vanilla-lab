@@ -146,6 +146,23 @@ Checklist de revisión permanente:
    cuando el rol no sea asumible, y con lista tomada del call graph (#26).
 8. Un check que **declara dónde no llega** vale más que un ✓ que suma sin
    ejecutar: los resúmenes no son ejecuciones (#22, §15d).
+9. **Todo check declara qué mide, y se prueba con un caso que debe fallar.**
+   Es la regla que cubre las cinco anteriores de una vez: el banner `✓` que
+   sumaba sin ejecutar, el `None` contado como línea, el 61/61, el `grep -q
+   "True"` del parser (#23) y la guarda de control-plane de #29. Cinco veces
+   el mismo patrón en una semana — **el instrumento diciendo más o distinto
+   de lo que mide** — y las cinco se cazaron, que es lo que hay que leer del
+   número: no una racha mala, un proyecto que las encuentra.
+
+   Lo que da la medida de por qué importa lo dijo #29 mejor que ninguna regla
+   técnica: **un check con el bug en su único cometido es peor que no tener el
+   check, porque ocupa su sitio.** No se pierde una comprobación; se instala
+   una falsa en el hueco de la buena, y el hueco parece cubierto.
+
+   El gesto concreto, barato, que la hace operativa: antes de dar por bueno un
+   check, ejecutarlo contra un caso que **debe** salir en rojo. Si no falla
+   cuando debe, no mide lo que dice medir. Los dos caminos de #29 se probaron
+   así, aislados en `bash -c`, antes de tocar el cluster.
 
 ---
 
