@@ -99,6 +99,31 @@ locals {
   joined_count_library = file("${path.module}/../../../bootstrap/joined-count.sh")
   kpr_gate_library     = file("${path.module}/../../../bootstrap/kpr-gate.sh")
   fetch_exec_library   = file("${path.module}/../../../bootstrap/fetch-exec.sh")
+
+  # INCIDENTS #27: the seven Gateway API CRDs are vendored in the repo and
+  # travel through the same S3 transport as the renders. They used to be seven
+  # curl calls to raw.githubusercontent.com in the founder's critical path, and
+  # one of them returning 400 killed the founder with the cluster already
+  # initialised.
+  gateway_api_version = "v1.6.1"
+  gateway_api_crds = [
+    "gateway.networking.k8s.io_gatewayclasses.yaml",
+    "gateway.networking.k8s.io_gateways.yaml",
+    "gateway.networking.k8s.io_httproutes.yaml",
+    "gateway.networking.k8s.io_grpcroutes.yaml",
+    "gateway.networking.k8s.io_referencegrants.yaml",
+    "gateway.networking.k8s.io_backendtlspolicies.yaml",
+    # The experimental TLSRoute overlay goes LAST, as it does on the node.
+    "gateway.networking.k8s.io_tlsroutes.yaml",
+  ]
+  gateway_api_dir = "${path.module}/../../../bootstrap/gateway-api/${local.gateway_api_version}"
+  # digest -> filename, computed by tofu from the file on disk. It is baked into
+  # the founder BEFORE anything is downloaded: a digest derived from the
+  # download would only prove the bytes arrived intact, not that they are the
+  # bytes this repo reviewed.
+  gateway_api_manifest = join("\n", [
+    for f in local.gateway_api_crds : "${filesha256("${local.gateway_api_dir}/${f}")}  ${f}"
+  ])
   bootstrap_prefix     = "bootstrap/${var.cluster_name}"
   bootstrap_cp_founder = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
     cluster_name         = var.cluster_name
@@ -109,6 +134,10 @@ locals {
     api_target_group_arn = module.nlb.api_target_group_arn
     ssm_parameter_path   = local.ssm_parameter_base
     kpr_gate_library     = local.kpr_gate_library
+    gateway_api_version  = local.gateway_api_version
+    gateway_api_manifest = local.gateway_api_manifest
+    bootstrap_bucket     = local.backup_bucket_name
+    bootstrap_prefix     = local.bootstrap_prefix
   })
   bootstrap_cp_join = [for index in range(var.control_plane_count) : templatefile("${path.module}/../../../bootstrap/control-plane-join.yaml", {
     cluster_name         = var.cluster_name
@@ -174,6 +203,20 @@ resource "aws_s3_object" "bootstrap_cp_join" {
   content_type           = "text/x-shellscript"
   server_side_encryption = "AES256"
   etag                   = md5(local.bootstrap_cp_join[count.index])
+}
+
+# The vendored CRDs ride the same transport as the renders (INCIDENTS #25/#27):
+# owned by this stack, so destroy removes them and the bucket survives.
+resource "aws_s3_object" "gateway_api_crd" {
+  # STATIC count (INCIDENTS #11): a literal list, never a computed value.
+  count = length(local.gateway_api_crds)
+
+  bucket                 = local.backup_bucket_name
+  key                    = "${local.bootstrap_prefix}/gateway-api/${local.gateway_api_crds[count.index]}"
+  source                 = "${local.gateway_api_dir}/${local.gateway_api_crds[count.index]}"
+  content_type           = "application/yaml"
+  server_side_encryption = "AES256"
+  etag                   = filemd5("${local.gateway_api_dir}/${local.gateway_api_crds[count.index]}")
 }
 
 # Multi-part cloud-init for control planes.
@@ -299,6 +342,7 @@ module "control_plane" {
     terraform_data.cleanup_dynamic_ebs,
     aws_s3_object.bootstrap_cp_founder,
     aws_s3_object.bootstrap_cp_join,
+    aws_s3_object.gateway_api_crd,
   ]
 }
 

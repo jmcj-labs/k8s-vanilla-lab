@@ -4,7 +4,7 @@
 #          install Cilium in strict kube-proxy replacement mode, publish the
 #          join data + control-plane join material (SSM cp/ path) and open
 #          the sequential-join gate for CP-1/CP-2 (control-plane-join.yaml).
-# Variables: cluster_name, aws_region, pod_cidr, service_cidr, api_endpoint_dns, api_target_group_arn, ssm_parameter_path, kpr_gate_library
+# Variables: cluster_name, aws_region, pod_cidr, service_cidr, api_endpoint_dns, api_target_group_arn, ssm_parameter_path, kpr_gate_library, gateway_api_version, gateway_api_manifest, bootstrap_bucket, bootstrap_prefix
 
 set -euo pipefail
 exec >> /var/log/k8s-cp-bootstrap.log 2>&1
@@ -346,7 +346,7 @@ until timeout 15 aws elbv2 describe-target-health \
 done
 log "OK API target healthy ($${INSTANCE_ID}) -- the NLB routes here, the endpoint is usable"
 
-GW_VERSION="v1.6.1"
+GW_VERSION="${gateway_api_version}"
 GW_GROUP="gateway.networking.k8s.io"
 GW_KINDS="gatewayclasses gateways httproutes grpcroutes referencegrants backendtlspolicies"
 GW_EXPECTED_NAMES='["backendtlspolicies.gateway.networking.k8s.io","gatewayclasses.gateway.networking.k8s.io","gateways.gateway.networking.k8s.io","grpcroutes.gateway.networking.k8s.io","httproutes.gateway.networking.k8s.io","referencegrants.gateway.networking.k8s.io","tlsroutes.gateway.networking.k8s.io"]'
@@ -397,25 +397,75 @@ assert_gateway_schema() {
   log "OK [$${state}] exact Gateway API schema: 7 CRDs serve v1, TLSRoute also serves v1alpha2, bundle $${GW_VERSION}"
 }
 
-log "Installing Gateway API CRDs $${GW_VERSION} (six standard CRDs + TLSRoute experimental overlay last)"
+# INCIDENTS #27: these seven files used to be seven curl calls to
+# raw.githubusercontent.com, in the founder's critical path. One of them
+# returned 400 for a file that demonstrably existed in the tag -- the other six
+# served fine, and the contents API returned it -- and the founder died with
+# kubeadm init already completed and the NLB already routing.
+#
+# They are now vendored in the repo and travel through the same S3 transport as
+# the renders. The digest of each was computed by tofu FROM THE FILE ON DISK and
+# baked into this script before anything was downloaded. That ordering is the
+# whole protection: a digest derived from the download would only prove the
+# bytes arrived intact, never that they are the bytes this repo reviewed.
+#
+# NOTHING IS APPLIED THAT HAS NOT BEEN VERIFIED. A download can be retried; a
+# hash mismatch cannot -- it means the bytes are not the ones tofu published.
+log "Installing Gateway API CRDs $${GW_VERSION} from S3 (six standard CRDs + TLSRoute experimental overlay last)"
 GW_TMP=$(mktemp -d)
 trap 'rm -rf "$${GW_TMP}"' EXIT
-for KIND in $${GW_KINDS}; do
-  URL="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$${GW_VERSION}/config/crd/standard/gateway.networking.k8s.io_$${KIND}.yaml"
-  curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 -o "$${GW_TMP}/$${KIND}.yaml" "$${URL}"
-  if grep -q 'kind: TLSRoute' "$${GW_TMP}/$${KIND}.yaml"; then
-    log "ERROR: standard individual $${KIND} unexpectedly contains TLSRoute"
+GW_S3="s3://${bootstrap_bucket}/${bootstrap_prefix}/gateway-api"
+
+cat > "$${GW_TMP}/MANIFEST" <<'GWMANIFEST'
+${gateway_api_manifest}
+GWMANIFEST
+
+while read -r WANT_SHA FILE; do
+  [ -n "$${FILE}" ] || continue
+  DEST="$${GW_TMP}/$${FILE}"
+
+  GW_START=$(date +%s)
+  while true; do
+    GW_LEFT=$(( 300 - ( $(date +%s) - GW_START ) ))
+    if [ "$${GW_LEFT}" -le 0 ]; then
+      log "ERROR: could not fetch $${GW_S3}/$${FILE} within 300s (last rc=$${GW_RC:-none})"
+      printf '%s\n' "$${GW_OUT:-(no attempt completed)}" | sed 's/^/  /'
+      exit 1
+    fi
+    GW_ATTEMPT=$(( GW_LEFT < 60 ? GW_LEFT : 60 ))
+    set +e
+    GW_OUT=$(timeout "$${GW_ATTEMPT}" aws s3 cp "$${GW_S3}/$${FILE}" "$${DEST}" \
+      --only-show-errors --cli-connect-timeout 5 --cli-read-timeout 30 2>&1)
+    GW_RC=$?
+    set -e
+    [ "$${GW_RC}" -eq 0 ] && break
+    GW_NAP=$(( GW_LEFT < 5 ? GW_LEFT : 5 ))
+    [ "$${GW_NAP}" -le 0 ] || sleep "$${GW_NAP}"
+  done
+
+  GOT_SHA=$(sha256sum "$${DEST}" | awk '{print $1}')
+  if [ "$${GOT_SHA}" != "$${WANT_SHA}" ]; then
+    log "ERROR: $${FILE} failed SHA-256 verification -- refusing to apply it"
+    log "  expected $${WANT_SHA}"
+    log "  got      $${GOT_SHA}"
     exit 1
   fi
+
+  # The overlay is the ONLY file allowed to carry TLSRoute, in either direction.
+  if [ "$${FILE}" = "gateway.networking.k8s.io_tlsroutes.yaml" ]; then
+    grep -q 'kind: TLSRoute' "$${DEST}" \
+      || { log "ERROR: experimental overlay does not contain TLSRoute"; exit 1; }
+  else
+    if grep -q 'kind: TLSRoute' "$${DEST}"; then
+      log "ERROR: standard $${FILE} unexpectedly contains TLSRoute"
+      exit 1
+    fi
+  fi
+
+  log "OK verified $${FILE} ($${WANT_SHA})"
   kubectl apply --server-side --field-manager=gateway-api-bootstrap \
-    -f "$${GW_TMP}/$${KIND}.yaml" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
-done
-TLS_URL="https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/$${GW_VERSION}/config/crd/experimental/gateway.networking.k8s.io_tlsroutes.yaml"
-curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 -o "$${GW_TMP}/tlsroutes.yaml" "$${TLS_URL}"
-grep -q 'kind: TLSRoute' "$${GW_TMP}/tlsroutes.yaml" \
-  || { log "ERROR: experimental overlay does not contain TLSRoute"; exit 1; }
-kubectl apply --server-side --field-manager=gateway-api-bootstrap \
-  -f "$${GW_TMP}/tlsroutes.yaml" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+    -f "$${DEST}" 2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
+done < "$${GW_TMP}/MANIFEST"
 for KIND in $${GW_KINDS} tlsroutes; do
   kubectl wait --for=condition=Established --timeout=60s "crd/$${KIND}.$${GW_GROUP}" \
     2>&1 | tee -a /var/log/k8s-cp-bootstrap.log
