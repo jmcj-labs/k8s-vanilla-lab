@@ -230,17 +230,36 @@ OK "node-readiness absent from every control plane (the Gateway does not serve t
 # the NLB probes.
 NR_PORT="${READINESS_PORT:-8910}"
 NR_BAD=""
+NR_NOTMINE=""
 for NR_IP in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
     -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'); do
   [ -n "${NR_IP}" ] || continue
-  NR_CODE=$(kubectl -n infra run "smoke-nr-$(echo "${NR_IP}" | tr '.' '-')" \
+  # Body and code in one request: -w appends the code on its own last line, so
+  # the aggregator's own output stays intact above it.
+  NR_OUT=$(kubectl -n infra run "smoke-nr-$(echo "${NR_IP}" | tr '.' '-')" \
     --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet --command -- \
-    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-    "http://${NR_IP}:${NR_PORT}/healthz" 2>/dev/null | tr -d '\r\n')
+    curl -s -w '\n%{http_code}' --max-time 5 \
+    "http://${NR_IP}:${NR_PORT}/healthz" 2>/dev/null | tr -d '\r')
+  NR_CODE=$(printf '%s' "${NR_OUT}" | tail -n1)
+  NR_BODY=$(printf '%s' "${NR_OUT}" | sed '$d')
   [ "${NR_CODE}" = "200" ] || NR_BAD="${NR_BAD} ${NR_IP}=${NR_CODE:-no-answer}"
+
+  # WHOSE port is this? A 200 alone does not prove the aggregator is the process
+  # holding it -- :9890 was already taken by cilium-agent (INCIDENTS #28), and
+  # any future squatter that answers 200 would satisfy the check above while the
+  # NLB is told the node serves. So assert the answer carries this component's
+  # own shape: the verdict line plus one line per named upstream.
+  printf '%s' "${NR_BODY}" | head -n1 | grep -qx 'ready' \
+    && printf '%s' "${NR_BODY}" | grep -qE '^agent +ok ' \
+    && printf '%s' "${NR_BODY}" | grep -qE '^envoy +ok ' \
+    || NR_NOTMINE="${NR_NOTMINE} ${NR_IP}"
 done
 [ -z "${NR_BAD}" ] || FAIL "node-readiness did not answer 200 on:${NR_BAD}"
 OK "node-readiness answers HTTP 200 on :${NR_PORT} on every worker"
+
+[ -z "${NR_NOTMINE}" ] || FAIL \
+  "something other than node-readiness answers :${NR_PORT} on:${NR_NOTMINE} (port collision)"
+OK "the process answering :${NR_PORT} is node-readiness itself on every worker"
 
 # ── 7. Data operators running ────────────────────────────────────────────────
 kubectl -n data wait --for=condition=Ready pod \

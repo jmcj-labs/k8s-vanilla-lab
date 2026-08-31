@@ -1825,3 +1825,94 @@ NLB enrutando.
 Queda **fuera de este fix**, anotado: `scripts/run-4b-rung.sh:38` sigue
 apuntando a `raw.githubusercontent.com`. Es la ceremonia de la escalera 4b, no
 está ni en el bootstrap ni en la validación de CI.
+
+---
+
+## 28. La constante que venía de un prototipo nunca desplegado
+
+**Fecha**: 2026-08-31
+**Pieza**: Fase 2, pieza 0 (agregador de readiness por nodo)
+**Detectado por**: el hierro — `CrashLoopBackOff` del DaemonSet en los 3 workers
+**Estado**: CERRADO (PR #99)
+
+### El síntoma
+
+`make platform` desplegó el DaemonSet y los tres pods entraron en
+`CrashLoopBackOff` inmediatamente. Log idéntico en los tres:
+
+```
+node-readiness listening on :9890 (agent=http://127.0.0.1:9879/healthz envoy=http://127.0.0.1:9878/healthz timeout=2s)
+listen tcp :9890: bind: address already in use
+```
+
+### La causa
+
+En el nodo, vía SSM:
+
+```
+LISTEN 0 4096 127.0.0.1:9890 0.0.0.0:* users:(("cilium-agent",pid=3560,fd=4))
+```
+
+**`cilium-agent` ya escuchaba en `127.0.0.1:9890`.** El agregador bindea
+`0.0.0.0:9890`, que incluye el loopback, así que el bind falla.
+
+### De dónde salía el 9890
+
+Del prototipo. `platform/node-readiness/main.go` se escribió durante la
+investigación de H3 con `:9890` como valor por defecto y llevaba una cabecera
+`// NOT DEPLOYED`. Nunca se ejecutó contra un nodo — se compilaba, pasaba sus
+tests unitarios (que levantan servidores en `:0`, puerto efímero, donde jamás
+hay colisión) y ahí se quedó.
+
+**El aprendizaje transferible: una constante de un prototipo nunca desplegado no
+está validada por nada.** No lo está por compilar, ni por pasar tests, ni por
+llevar semanas en el repo sin que nadie se queje. Un valor que solo ha existido
+en un entorno que no es aquel donde va a correr es una hipótesis, y al
+promocionar el prototipo hay que tratar cada uno de esos valores como tal.
+`:9890` sobrevivió a una lectura completa del fichero por dos personas — el
+autor del brief y quien lo implementó — precisamente porque parecía un detalle
+ya resuelto en vez de una hipótesis pendiente de contrastar.
+
+### El patrón, que es más grande que este fallo
+
+Es el tercero seguido de la misma familia en esta pieza. En los tres había una
+**fuente autoritativa a mano** y se usó una sustituta:
+
+| # | artefacto heredado | fuente autoritativa disponible | sustituta usada |
+|---|---|---|---|
+| a | `trivy-action@0.28.0` | la API de tags de GitHub | una versión recordada, "verificada" con un grep del fichero que yo mismo acababa de escribir |
+| b | permisos del pull de ECR (#26, tercera vez) | el grafo de llamadas del proveedor | una lista de acciones deducida |
+| c | el puerto `:9890` | `ss -tlnH` en un worker vivo | la constante del prototipo |
+
+No es "no comprobar contra el sistema real" a secas: es **confiar en un
+artefacto heredado teniendo delante con qué contrastarlo**. La regla que sale de
+aquí es de procedimiento, no de atención: al promocionar código de prototipo a
+desplegado, cada constante que describe el entorno (puertos, rutas, endpoints,
+nombres de recurso) se contrasta contra el entorno antes del primer despliegue,
+no después del primer crash.
+
+### El fix
+
+Puerto a **8910**, elegido con el inventario del nodo delante y no de memoria.
+La justificación completa vive en `platform/manifests/node-readiness.yaml`
+junto a la constante, incluido **lo que el inventario NO cubría**: la capa de
+plataforma había fallado en el paso 6, así que monitorización no estaba
+instalada y el `9100` de `node-exporter` nunca apareció en la lista. Por eso la
+elección evita barrios enteros (los `42xx`/`92xx`/`98xx`/`99xx` de Cilium, los
+`102xx` del kubelet, los `90xx`/`91xx` de exporters, el rango de NodePort y el
+efímero) en lugar de coger el siguiente número libre.
+
+Y un check en vez de una nota: el smoke ya no se conforma con un `200` en el
+puerto — verifica que **el proceso que contesta es este agregador**, exigiendo
+la forma de su propia respuesta (línea de veredicto + una línea por upstream
+con nombre). Un futuro okupa que devolviera `200` pasaba el check anterior
+mientras el NLB daba el nodo por bueno.
+
+### Lo que sí funcionó, y no lo habíamos diseñado como prueba
+
+Durante los tres incidentes de esta pieza el `gw-tg` estuvo **`unhealthy`**. El
+health check HTTP nuevo se negó, tres veces seguidas y por tres causas
+distintas, a declarar que un nodo servía mientras el agregador no respondía.
+Con el health check TCP anterior los tres nodos habrían estado `healthy` desde
+el primer minuto — que es exactamente el falso positivo de #20. Es la mejor
+evidencia que tenemos de que la pieza hace su trabajo, y llegó gratis.
