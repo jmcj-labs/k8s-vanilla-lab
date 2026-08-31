@@ -446,12 +446,17 @@ module "worker" {
   control_plane_security_group_id = module.control_plane.security_group_id
   user_data_base64                = data.cloudinit_config.worker.rendered
   ecr_repository_arns             = module.registry.repository_arns
-  cluster_name                    = var.cluster_name
-  worker_count                    = var.worker_count
-  capacity_type                   = var.worker_capacity_type
-  gateway_nodeport                = var.gateway_nodeport
-  nlb_security_group_id           = module.nlb.security_group_id
-  tags                            = local.common_tags
+  # Derived by convention, like backup_bucket_name: the persistent stack owns
+  # this repository and the graphs stay decoupled -- no remote state.
+  platform_ecr_repository_arns = [
+    "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/${var.cluster_name}-node-readiness"
+  ]
+  cluster_name          = var.cluster_name
+  worker_count          = var.worker_count
+  capacity_type         = var.worker_capacity_type
+  gateway_nodeport      = var.gateway_nodeport
+  nlb_security_group_id = module.nlb.security_group_id
+  tags                  = local.common_tags
 
   depends_on = [module.control_plane, aws_internet_gateway.main, terraform_data.cleanup_dynamic_ebs]
 }
