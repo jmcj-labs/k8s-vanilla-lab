@@ -1,18 +1,22 @@
-// NOT DEPLOYED — kept as the record of an investigation, not as a component.
+// DEPLOYED as the Pieza 0 component of Fase 2 (INCIDENTS #20).
 //
-// The readiness aggregator was designed for a health check the NLB cannot
-// perform in this topology: TCP is blind to Envoy, and the native HTTPS check
-// cannot send the SNI/Host required by the Gateway listener.
-// 4a therefore stopped relying on DETECTION and moved to proactive DRAINING
-// (docs/RUNBOOK-upgrade-cilium-v3.md): the node leaves the pool before it is
-// touched and returns only after it is proven to serve.
+// It was written as the record of an investigation and not as a component,
+// because 4a had moved from DETECTION to proactive DRAINING and nothing needed
+// it. What changed is that H3 stopped being a hypothesis: on 2026-08-31 the
+// target group reported healthy for a worker whose Envoy was stopped, across 22
+// consecutive samples, while its NodePort kept accepting TCP and Kubernetes had
+// already marked the pod NotReady. Evidence in docs/evidence/h3-2026-08-31/.
 //
-// What survives here is worth more than the binary: the comments below record
-// what was proven from Cilium's own source — that the agent's /healthz does
-// NOT cover NodePort datapath programming, and that Cilium's kube-proxy
-// healthz "reasonably assumes" it. That is INCIDENTS #20. The drain runbook
-// supersedes this component with a sustained HTTP+gRPC probation through the
-// real NLB after each target is re-registered (step 2.8).
+// Kubernetes knew and the load balancer did not. This closes that gap.
+//
+// The comments below also record what was proven from Cilium's own source --
+// that the agent's /healthz does NOT cover NodePort datapath programming, and
+// that Cilium's kube-proxy healthz "reasonably assumes" it.
+//
+// WHAT IT DOES NOT COVER, and this is a limit and not an omission: the
+// experiment killed ENVOY, not the agent's datapath. An agent that reports
+// itself healthy while its own datapath is broken is still undetectable by
+// this endpoint, because this endpoint asks the agent whether it is well.
 //
 // Command node-readiness answers ONE question about the node it runs on:
 // can this node serve Gateway traffic right now?
