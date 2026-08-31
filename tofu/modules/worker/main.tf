@@ -351,4 +351,3 @@ resource "aws_instance" "worker" {
     ]
   }
 }
-
