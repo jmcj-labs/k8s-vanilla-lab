@@ -54,11 +54,14 @@ resource "aws_security_group" "worker" {
   # is all-inline. A standalone rule here would have been the very bug #6
   # records, pointing the other way.
   #
-  # Same shape as the NodePort rule above: only the NLB's SG may reach it. The
-  # endpoint says whether this node can serve Gateway traffic -- it is for the
-  # balancer, not for the world.
+  # WHAT THIS RULE DOES, and not more: it admits the NLB's security group. It
+  # does NOT make 9890 reachable *only* from there -- security group rules are
+  # additive, and the two rules below (self = true, and all-from-control-plane)
+  # already cover every port on this SG, 9890 included. What this buys is that
+  # the port is closed to the world and to anything outside the VPC, which is
+  # what matters for an endpoint that reports whether a node can serve.
   ingress {
-    description     = "Node readiness aggregator from the NLB only"
+    description     = "Node readiness aggregator: NLB health checks (also reachable from workers and CPs via the broader rules)"
     from_port       = var.readiness_port
     to_port         = var.readiness_port
     protocol        = "tcp"
