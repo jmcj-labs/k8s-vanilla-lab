@@ -203,7 +203,7 @@ resource "aws_iam_role_policy" "worker_ssm" {
 # ECR pull for the app images (Repo 2): auth token is account-wide by AWS
 # design; layer/image reads are scoped to exactly the app repositories.
 resource "aws_iam_role_policy" "worker_ecr_pull" {
-  count = length(var.ecr_repository_arns) > 0 ? 1 : 0
+  count = length(var.ecr_repository_arns) > 0 || length(var.platform_ecr_repository_arns) > 0 ? 1 : 0
 
   name = "${var.name}-worker-ecr-pull"
   role = aws_iam_role.worker.id
@@ -226,6 +226,25 @@ resource "aws_iam_role_policy" "worker_ecr_pull" {
           "ecr:GetDownloadUrlForLayer"
         ]
         Resource = var.ecr_repository_arns
+      },
+      # The per-node readiness aggregator (Pieza 0 / INCIDENTS #20). Its own
+      # statement rather than widening the app list: that repository lives in
+      # the PERSISTENT stack and has nothing to do with the application ones,
+      # which are recreated on every apply.
+      #
+      # This is the READER end of the channel whose writer was granted in
+      # bootstrap-aws.sh. Granting one and forgetting the other is exactly
+      # INCIDENTS #26, and forgetting it here cost an apply: the DaemonSet came
+      # up ImagePullBackOff with 403 on every worker.
+      {
+        Sid    = "PullPlatformImages"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer"
+        ]
+        Resource = var.platform_ecr_repository_arns
       }
     ]
   })

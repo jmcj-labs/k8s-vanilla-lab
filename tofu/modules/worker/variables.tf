@@ -103,3 +103,9 @@ variable "readiness_port" {
   type        = number
   default     = 9890
 }
+
+variable "platform_ecr_repository_arns" {
+  description = "ECR repositories of PLATFORM images the workers pull (node-readiness). Separate from the application ones: these live in the persistent stack and survive a cluster destroy"
+  type        = list(string)
+  default     = []
+}
