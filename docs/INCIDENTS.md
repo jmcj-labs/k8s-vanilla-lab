@@ -866,7 +866,12 @@ three distinct outcomes and a decision table in
 
 ---
 
-## 20. `externalTrafficPolicy: Cluster` had nothing to fall back to
+## 20. `externalTrafficPolicy: Cluster` had nothing to fall back to — CERRADO (2026-08-31)
+
+> **CERRADO con H3 confirmada en vivo.** Lo que este incidente afirmaba desde
+> la configuración del target group quedó **medido** el 31-ago-2026. Evidencia
+> completa en [`evidence/h3-2026-08-31/`](evidence/h3-2026-08-31/); el
+> apartado de cierre está al final de la entrada.
 
 **When**: 2026-08-24, second attempt at 4a (Cilium 1.19.6 → 1.20.1).
 **Severity**: entry path degraded ~4 min, recovered by rollback in 67s. No
@@ -993,6 +998,53 @@ So the NLB cannot reach them, and the fix is not "repoint the health check at
 a port that already exists" — the per-node readiness endpoint has to be
 built. That is TIEMPO 1 of the plan, and it is the reason the plan has three
 separately validated steps instead of one.
+
+### CIERRE (2026-08-31): H3 medida, no deducida
+
+H3 —*el health check no puede ver un Envoy caído*— estaba **verificada por la
+configuración del target group y nunca observada**. El runbook v2 diseñó el
+muestreador que lo demostraría y 4a-v2 nunca se ejecutó, así que la serie no
+existía. Ahora existe.
+
+**Método**: `kill -STOP` al proceso **hijo** `cilium-envoy` (pid 3512) de un
+worker, dejando vivo el agente — la condición exacta que H3 predice invisible.
+`kill -CONT` a los 215 s, dentro de los 270 del `livenessProbe`, así que el
+contenedor nunca se reinició y el datapath observado fue el mismo de principio
+a fin.
+
+**Ventana probatoria**: 09:43:09Z → 09:45:09Z. Los primeros ~95 s desde el
+corte son **ciegos** y se descartan: con `interval=30s` y
+`unhealthy threshold=3`, un target no puede cambiar antes, detecte o no.
+
+**22 muestras consecutivas**, sin una sola excepción, para el worker
+intervenido (`i-04c78fcdcb32eb068 / 10.0.1.234 / ip-10-0-1-234`):
+
+```
+tg   = i-04c78fcdcb32eb068=healthy      el balanceador lo da por sano
+tcp  = 10.0.1.234=open                  el NodePort sigue aceptando
+ds   = agent=6/6  envoy=6/5             Kubernetes SÍ lo ve caído
+pods = ip-10-0-1-234=false
+```
+
+**Kubernetes lo sabía y el balanceador no.** El `readinessProbe` marcó el pod
+`NotReady` dentro de su rango de 60-90 s —visible ya en la muestra de
+09:42:57Z— y el target group siguió reportando `healthy` durante los dos
+minutos completos de la ventana.
+
+**Y la saturación de la cola de accept queda descartada**, que era la otra
+explicación posible y la razón por la que el diseño del experimento advertía
+que la rama `unhealthy` no habría refutado nada: el sondeo TCP directo al
+NodePort devolvió `open` en **las 22 muestras**. El puerto nunca dejó de
+aceptar, así que el health check no falló *ni pudo* fallar por cola llena. La
+rama ambigua no se ejerció; se ejerció la que confirma.
+
+Sobre `nlb=`: 17 muestras `http404` —código que **el NLB devolvió**— y 5
+`ERROR:curl-rc28`. Las cinco con `ERROR:` **no sostienen la conclusión**: son
+ausencia de lectura, no prueba de fallo de servicio. La confirmación descansa
+en el par `tg=healthy` + `tcp=open`, que es lo que H3 afirma.
+
+Serie íntegra, `meta` con el mapa de identidades y guía de lectura en
+[`evidence/h3-2026-08-31/`](evidence/h3-2026-08-31/).
 
 ---
 

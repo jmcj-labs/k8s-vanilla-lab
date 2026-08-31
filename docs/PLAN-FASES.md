@@ -48,15 +48,40 @@ El riesgo aquí es de alcance, no técnico: timeboxing estricto por frente.
 No es una elección: el propio plan lo declara **prerrequisito del upgrade de
 Cilium en vivo (4a-v3)**, y multi-AZ agrava el fallo en vez de tolerarlo.
 
-El health check del NLB es TCP contra el NodePort, que Cilium programa con
-independencia de la salud del datapath: no puede detectar un nodo que dejó de
-servir. Con una sola AZ eso cuesta un porcentaje de peticiones; con varias, el
-NLB decide **a qué zona enviar** sobre esa misma señal falsa.
+#### El enunciado, ahora con dato en vez de hipótesis
 
-El fix es un endpoint agregador por nodo que responda 200 solo con el AND del
-agente y de Envoy. Hay un prototipo en `platform/node-readiness/` que **NO
-está desplegado**. Diseño de la pieza pendiente de leer el incidente #20
-íntegro.
+**El health check del NLB no puede distinguir un nodo cuyo Envoy no sirve,
+porque sondea un puerto que el agente programa con independencia de Envoy.**
+
+Medido el 31-ago-2026, no deducido de la configuración. Con el proceso
+`cilium-envoy` de un worker detenido y el agente vivo, **22 muestras
+consecutivas** de la ventana probatoria:
+
+| señal | qué dijo |
+|---|---|
+| target group | `healthy` — el balanceador siguió mandándole tráfico |
+| TCP al NodePort | `open` — el puerto aceptaba, programado por el agente |
+| DaemonSet de Envoy | `6/5`, y el pod del nodo `Ready=false` |
+
+**Kubernetes lo sabía y el balanceador no.** Y el `open` sostenido descarta la
+única explicación alternativa —saturación de la cola de accept—: el puerto
+nunca dejó de aceptar, así que el check no falló ni pudo fallar por cola llena.
+
+Evidencia en [`evidence/h3-2026-08-31/`](evidence/h3-2026-08-31/); cierre del
+incidente en [INCIDENTS.md](INCIDENTS.md) #20.
+
+#### Lo que la pieza tiene que resolver
+
+Que el balanceador reciba la señal que Kubernetes ya tiene. Un endpoint
+agregador por nodo que responda 200 solo con el **AND** del agente y de Envoy
+—ambos sirven `/healthz`, pero **solo en loopback**, así que el NLB no los
+alcanza y hay que construir el agregador, no repuntar el check a un puerto
+existente.
+
+Hay un prototipo en `platform/node-readiness/` que **NO está desplegado**, con
+sus decisiones de diseño y su tabla de tiempos ya razonadas. Si es la forma
+correcta se decide al abordar la pieza; lo que ya no está en discusión es el
+problema.
 
 ### Piezas restantes (orden por decidir tras la pieza 0)
 
