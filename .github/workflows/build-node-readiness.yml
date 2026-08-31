@@ -75,15 +75,24 @@ jobs:
           # The tag is the commit that built it; the DIGEST is what gets pinned.
           docker build -t "${REG}/${REPOSITORY}:${GITHUB_SHA}" platform/node-readiness
 
-      - name: Scan with Trivy (fails on HIGH/CRITICAL)
+      # Same action and same pinned trivy version as validate.yml, so the repo
+      # has one way of running trivy and not two.
+      - name: Install Trivy
         if: ${{ inputs.canary != 'canary' }}
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/setup-trivy@v0.3.1
         with:
-          image-ref: ${{ steps.login.outputs.registry }}/k8s-vanilla-lab-node-readiness:${{ github.sha }}
-          format: table
-          exit-code: '1'
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
+          version: v0.70.0
+
+      - name: Scan the image (fails on HIGH/CRITICAL)
+        if: ${{ inputs.canary != 'canary' }}
+        run: |
+          set -euo pipefail
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --format table \
+            "${{ steps.login.outputs.registry }}/${REPOSITORY}:${GITHUB_SHA}"
 
       - name: Push and print the digest to pin
         if: ${{ inputs.canary != 'canary' }}
