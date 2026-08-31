@@ -202,6 +202,46 @@ kubectl -n infra wait --for=condition=Programmed gateway/shared-gw --timeout=120
   || FAIL "Gateway shared-gw not Programmed"
 OK "Gateway infra/shared-gw Accepted=True and Programmed=True"
 
+# ── 6b. Per-node readiness aggregator (Pieza 0 / INCIDENTS #20) ─────────────
+# The signal the NLB health check now depends on. Three separate assertions,
+# because "the DaemonSet is Ready", "it is not on a control plane" and "the
+# endpoint answers 200" are different claims: the first two are Kubernetes'
+# opinion, the third is what the balancer actually reads.
+NR_JSON=$(kubectl -n infra get ds node-readiness -o json 2>/dev/null) \
+  || FAIL "node-readiness DaemonSet not found in infra"
+WORKER_COUNT=$(( EXPECTED_NODES - 3 ))
+echo "${NR_JSON}" | jq -e --argjson w "${WORKER_COUNT}" '
+  .status.desiredNumberScheduled == $w
+  and .status.numberReady == $w
+  and .status.updatedNumberScheduled == $w' >/dev/null \
+  || FAIL "node-readiness is not desired=updated=ready=${WORKER_COUNT} (workers only)"
+OK "node-readiness DaemonSet ${WORKER_COUNT}/${WORKER_COUNT} Ready on the workers"
+
+NR_CP=$(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | while read -r n; do
+    [ -n "${n}" ] || continue
+    kubectl get node "${n}" -o jsonpath='{.metadata.labels}' \
+      | grep -q 'node-role.kubernetes.io/control-plane' && echo "${n}"
+  done | wc -l | tr -d ' ')
+[ "${NR_CP}" -eq 0 ] || FAIL "node-readiness is scheduled on ${NR_CP} control plane(s)"
+OK "node-readiness absent from every control plane (the Gateway does not serve there)"
+
+# The endpoint itself, on each worker's own address and port -- the same ones
+# the NLB probes.
+NR_PORT="${READINESS_PORT:-9890}"
+NR_BAD=""
+for NR_IP in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
+    -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'); do
+  [ -n "${NR_IP}" ] || continue
+  NR_CODE=$(kubectl -n infra run "smoke-nr-$(echo "${NR_IP}" | tr '.' '-')" \
+    --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet --command -- \
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    "http://${NR_IP}:${NR_PORT}/healthz" 2>/dev/null | tr -d '\r\n')
+  [ "${NR_CODE}" = "200" ] || NR_BAD="${NR_BAD} ${NR_IP}=${NR_CODE:-no-answer}"
+done
+[ -z "${NR_BAD}" ] || FAIL "node-readiness did not answer 200 on:${NR_BAD}"
+OK "node-readiness answers HTTP 200 on :${NR_PORT} on every worker"
+
 # ── 7. Data operators running ────────────────────────────────────────────────
 kubectl -n data wait --for=condition=Ready pod \
   -l app.kubernetes.io/name=cloudnative-pg --timeout=120s \

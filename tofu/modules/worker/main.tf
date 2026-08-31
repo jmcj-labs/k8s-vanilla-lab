@@ -329,3 +329,20 @@ resource "aws_instance" "worker" {
     ]
   }
 }
+
+
+# Per-node readiness aggregator (Pieza 0 / INCIDENTS #20). Standalone and NEVER
+# inline: mixing inline and standalone rules on the same security group makes
+# tofu fight itself on every apply (INCIDENTS #6).
+#
+# Same shape as the Gateway NodePort rule: only the NLB's security group may
+# reach it. The endpoint answers whether this node can serve Gateway traffic --
+# it is for the balancer, not for the world.
+resource "aws_vpc_security_group_ingress_rule" "readiness_from_nlb" {
+  security_group_id            = aws_security_group.worker.id
+  description                  = "Node readiness aggregator from the NLB only"
+  from_port                    = var.readiness_port
+  to_port                      = var.readiness_port
+  ip_protocol                  = "tcp"
+  referenced_security_group_id = var.nlb_security_group_id
+}

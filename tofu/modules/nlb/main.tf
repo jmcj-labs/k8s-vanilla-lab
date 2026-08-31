@@ -105,15 +105,46 @@ resource "aws_lb_target_group" "gateway" {
   # Ephemeral lab: the default 300s deregistration delay only slows destroy.
   deregistration_delay = 10
 
+  # Pieza 0 / INCIDENTS #20. This used to be TCP on traffic-port, and that was
+  # measured to be blind: on 2026-08-31, 22 consecutive samples reported this
+  # target group HEALTHY for a worker whose Envoy was stopped, because Cilium's
+  # agent programs the NodePort independently of whether Envoy can serve
+  # (docs/evidence/h3-2026-08-31/). The check now asks the per-node aggregator,
+  # which answers 200 only with the AND of the agent and Envoy.
+  #
+  # Thresholds are EXPLICIT rather than inherited. The H3 experiment cost a
+  # misread window because nobody could say from the code how long a target
+  # takes to flip: it was interval 30 x threshold 3, up to ~95s, and that had to
+  # be recovered from the AWS defaults. 10 x 2 puts detection under ~30s and,
+  # more importantly, puts the number in the file.
   health_check {
-    protocol = "TCP"
-    port     = "traffic-port"
+    protocol = "HTTP"
+    port     = tostring(var.readiness_port)
+    path     = "/healthz"
+    # The aggregator answers 200 or 503 and nothing else; the default 200-399
+    # range would accept codes it never emits.
+    matcher             = "200"
+    interval            = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
   }
 
   tags = merge(var.tags, {
     Name = "${var.name}-gw-tg"
     Role = "nlb"
   })
+}
+
+# The health check leaves the NLB's ENIs towards the aggregator's port, so the
+# NLB's own egress has to allow it -- the forwarded-traffic rule only covers
+# the NodePort.
+resource "aws_vpc_security_group_egress_rule" "to_readiness" {
+  security_group_id = aws_security_group.nlb.id
+  description       = "HTTP health checks to the per-node readiness aggregator"
+  from_port         = var.readiness_port
+  to_port           = var.readiness_port
+  ip_protocol       = "tcp"
+  cidr_ipv4         = var.vpc_cidr
 }
 
 resource "aws_lb_listener" "https" {

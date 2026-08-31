@@ -97,3 +97,9 @@ variable "nlb_security_group_id" {
   description = "SG of the application NLB — sole allowed source for the Gateway NodePort. Inline rule on purpose: this SG is inline-managed and mixing inline with standalone rules deletes rules on apply (INCIDENTS #6)"
   type        = string
 }
+
+variable "readiness_port" {
+  description = "Port of the per-node readiness aggregator the NLB health-checks (Pieza 0 / INCIDENTS #20)"
+  type        = number
+  default     = 9890
+}

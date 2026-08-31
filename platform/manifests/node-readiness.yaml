@@ -1,0 +1,102 @@
+# Per-node readiness aggregator — Pieza 0 de Fase 2, cierre de INCIDENTS #20.
+#
+# WHY IT EXISTS, measured and not assumed. On 2026-08-31, with one worker's
+# cilium-envoy process stopped and its agent alive, 22 consecutive samples
+# showed the NLB target group reporting that worker HEALTHY while Kubernetes
+# had already marked its Envoy pod NotReady and its NodePort kept accepting
+# TCP. Kubernetes knew and the load balancer did not
+# (docs/evidence/h3-2026-08-31/).
+#
+# The NLB health check probes the Gateway NodePort, which Cilium's agent
+# programs INDEPENDENTLY of whether the local Envoy can serve. This endpoint
+# gives the balancer a signal that covers both.
+#
+# WORKERS ONLY. The Gateway does not serve on control planes, so a readiness
+# answer from a CP would be meaningless and its 503s would be noise.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-readiness
+  namespace: infra
+  labels:
+    app.kubernetes.io/name: node-readiness
+    app.kubernetes.io/component: platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-readiness
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-readiness
+        app.kubernetes.io/component: platform
+    spec:
+      # hostNetwork: the aggregator asks the agent and Envoy over LOOPBACK,
+      # because both bind 127.0.0.1 only -- that is the whole reason it has to
+      # exist instead of repointing the health check at an existing port.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      # No tolerations on purpose: this must NOT run where the Gateway does not.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: node-readiness
+          # PINNED BY DIGEST. The repository lives in the persistent stack so
+          # this digest keeps naming something that exists after a destroy.
+          image: 487985088962.dkr.ecr.eu-west-1.amazonaws.com/k8s-vanilla-lab-node-readiness@sha256:eb25278c2212c0215d94f6ce34b57f378d3e7ccb837a1c54b34663a90c8cf0ff
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: readiness
+              containerPort: 9890
+              hostPort: 9890
+              protocol: TCP
+          env:
+            - name: LISTEN_ADDR
+              value: ":9890"
+            - name: AGENT_HEALTH_URL
+              value: "http://127.0.0.1:9879/healthz"
+            - name: ENVOY_HEALTH_URL
+              value: "http://127.0.0.1:9878/healthz"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          # Its own probes ask ITSELF over loopback, not the aggregate verdict:
+          # a node whose Envoy is down must keep ANSWERING 503, not be restarted.
+          # Probing /healthz here would make the pod die exactly when its answer
+          # matters most.
+          startupProbe:
+            tcpSocket:
+              port: 9890
+            failureThreshold: 15
+            periodSeconds: 2
+          livenessProbe:
+            tcpSocket:
+              port: 9890
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 9890
+            periodSeconds: 10
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 5

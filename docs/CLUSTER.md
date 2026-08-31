@@ -57,6 +57,7 @@ vivo** —, sin Route53 hasta post-S4.
 | CloudNativePG operator | chart 0.29.0 | chart |
 | Strimzi operator | chart 1.1.0 | chart |
 | kube-prometheus-stack | chart 88.2.0 | chart |
+| node-readiness (agregador de readiness por nodo) | Go 1.26, imagen `FROM scratch` fijada **por digest** | digest |
 | ecr-credential-provider | v1.36.1 (binario por SHA-256; staging bucket oficial, artifacts.k8s.io roto para >=1.30) | binario |
 | aws-iam-authenticator | v0.7.18 (binario con SHA-256; imagen EKS Distro `v0.7.18-cvefix-eks-1-35-12` por digest — upstream no publica imagen) | binario + digest |
 | OpenTofu | 1.8.0 | CI |
@@ -95,6 +96,8 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | Workers spot + CP on-demand | 60% de ahorro asumiendo reclaims; el CP nunca se pierde | [ADR-002](decisions/ADR-002-spot-workers-ondemand-cp.md) |
 | `skipPhases: addon/kube-proxy` + Cilium KPR=true | kube-proxy nunca existe; eBPF hace su trabajo — requiere `k8sServiceHost/Port` cableados para evitar el deadlock de bootstrap | [ADR-003](decisions/ADR-003-cilium-ebpf.md) |
 | Kubeconfig y join data en SSM | CI opera el cluster sin abrir SSH al runner | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) |
+| Health check del TG del gateway: **HTTP `:9890/healthz`**, no TCP al NodePort | El TCP mide un puerto que el agente de Cilium programa con independencia de Envoy: se midió 22 muestras con el TG en `healthy` y Envoy parado. Umbrales explícitos (`interval 10`, `2`/`2`), no heredados | [INCIDENTS #20](INCIDENTS.md) · [evidencia](evidence/h3-2026-08-31/) |
+| Imagen de `node-readiness` en el stack **persistent** | El DaemonSet la fija **por digest**; si el repo muriera con el cluster el digest nombraría algo inexistente | [tofu/envs/persistent](../tofu/envs/persistent/README.md) |
 | IMDS hop limit **3** (no 1, no 2) | El tunnel de Cilium añade un salto al camino de vuelta pod←IMDS; con 2 el EBS CSI muere sin credenciales | [INCIDENTS #4](INCIDENTS.md) |
 | `--provider-id` en el kubelet (los 6 nodos, pre-init/join) | kubeadm vanilla deja `providerID` vacío y el EBS CSI lo exige; un solo mecanismo, sin RBAC ni patches | [INCIDENTS #3](INCIDENTS.md) |
 | `controller.region` explícito en el EBS CSI | Defensa en profundidad: no depender de IMDS para descubrir la región | [INCIDENTS #4](INCIDENTS.md) |
@@ -371,12 +374,18 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   `Forbidden` en `infra` sería compatible con «el acceso no funciona en
   absoluto». Con las dos, lo demostrado es **segregación por namespace**, que
   es el criterio de aceptación.
-- **Endpoint de readiness por nodo: no existe** (INCIDENTS #20). El health
-  check del NLB es TCP contra el NodePort, que Cilium programa con
-  independencia de la salud del datapath, así que no puede detectar un nodo
-  que dejó de servir. El fix —un endpoint agregador por nodo— sigue sin
-  implementar; hay un prototipo en `platform/node-readiness/` que NO está
-  desplegado. Límite abierto, no cerrado.
+- **Endpoint de readiness por nodo: RESUELTO PARCIALMENTE** (INCIDENTS #20,
+  Pieza 0 de Fase 2). El health check del TG del gateway ya no es TCP contra el
+  NodePort: es `HTTP :9890/healthz` contra el agregador `node-readiness`, que
+  responde 200 solo con el AND del agente y de Envoy. Corre como DaemonSet
+  `hostNetwork` en los workers, y su puerto solo lo alcanza el SG del NLB.
+
+  **Lo que NO cierra, y es un límite abierto distinto**: el experimento que lo
+  demostró mató a **Envoy**, no al datapath del agente. El agregador **le
+  pregunta al agente si está bien**, así que un agente que se reporta sano
+  mientras su propio datapath está roto **sigue sin detectarse**. Cerrar eso
+  exigiría una sonda que atraviese el datapath en vez de preguntarle a quien lo
+  programa.
 
 ## 6. Historial de incidencias
 

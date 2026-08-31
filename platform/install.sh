@@ -72,7 +72,7 @@ ensure_clean_release() {
 
 log "=== Installing platform layer (region: ${AWS_REGION}) ==="
 
-log "Step 1/12: Adding Helm repositories"
+log "Step 1/13: Adding Helm repositories"
 helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver >/dev/null
 helm repo add jetstack https://charts.jetstack.io >/dev/null
 helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null
@@ -81,7 +81,7 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update >/dev/null
 log "✓ Helm repositories ready"
 
-log "Step 2/12: Namespaces (infra, data, logistics) + StorageClass gp3"
+log "Step 2/13: Namespaces (infra, data, logistics) + StorageClass gp3"
 kubectl apply -f "${MANIFESTS}/namespaces.yaml"
 # The SC carries the cluster tag (__CLUSTER_NAME__) in tagSpecification_1.
 # SC parameters are immutable, so recreation is BOUNDED to exactly one
@@ -203,7 +203,7 @@ kubectl apply -f "${ACCESS}/daemonset.yaml"
 kubectl -n kube-system rollout status ds/aws-iam-authenticator --timeout=180s
 log "✓ IAM access ready (DynamicFile mappings, RBAC, authenticator DaemonSet)"
 
-log "Step 3/12: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
+log "Step 3/13: EBS CSI driver (chart ${EBS_CSI_CHART_VERSION})"
 ensure_clean_release kube-system aws-ebs-csi-driver
 # controller.region is set explicitly: IMDS is not reachable from the pod
 # network even with hop limit 2 (see docs/INCIDENTS.md #4), so the controller
@@ -215,7 +215,7 @@ helm upgrade --install aws-ebs-csi-driver aws-ebs-csi-driver/aws-ebs-csi-driver 
   --wait --timeout 5m
 log "✓ EBS CSI driver installed"
 
-log "Step 4/12: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
+log "Step 4/13: cert-manager (chart ${CERT_MANAGER_CHART_VERSION}) + selfsigned ClusterIssuer"
 ensure_clean_release infra cert-manager
 # --enable-gateway-api activates the gateway-shim controller that resolves
 # the cert-manager.io/cluster-issuer annotation on Gateway resources.
@@ -228,7 +228,7 @@ helm upgrade --install cert-manager jetstack/cert-manager \
 kubectl apply -f "${MANIFESTS}/clusterissuer-selfsigned.yaml"
 log "✓ cert-manager installed, ClusterIssuer 'selfsigned' applied"
 
-log "Step 5/12: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
+log "Step 5/13: Shared Gateway (cilium class, HTTPS *.logistics.lab)"
 # The 'cilium' GatewayClass is created by the cilium-operator at startup
 # (gatewayAPI.enabled=true in the bootstrap Helm install).
 kubectl wait --for=condition=Accepted gatewayclass/cilium --timeout=180s
@@ -260,7 +260,32 @@ FINAL_NP=$(kubectl -n infra get svc "${GW_SVC}" -o jsonpath='{.spec.ports[0].nod
 [ "${FINAL_NP}" = "${GATEWAY_NODEPORT}" ] || { echo "✗ Gateway NodePort is ${FINAL_NP}, want ${GATEWAY_NODEPORT}" >&2; exit 1; }
 log "✓ Gateway infra/shared-gw applied — NodePort deterministic at ${GATEWAY_NODEPORT} (NLB is the public entry)"
 
-log "Step 6/12: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
+log "Step 6/13: Per-node readiness aggregator (INCIDENTS #20)"
+# Pieza 0 de Fase 2. Gives the NLB a signal it cannot obtain by itself: its
+# health check probes the Gateway NodePort, which the Cilium agent programs
+# INDEPENDENTLY of whether the local Envoy can serve. Measured on 2026-08-31 --
+# 22 consecutive samples with the target group healthy while Envoy was stopped
+# (docs/evidence/h3-2026-08-31/).
+#
+# Image pinned BY DIGEST, from the repository in the persistent stack.
+# Reentrant: apply is declarative and the rollout wait is idempotent.
+kubectl apply -f "${MANIFESTS}/node-readiness.yaml"
+kubectl -n infra rollout status daemonset/node-readiness --timeout=180s
+NR_DESIRED=$(kubectl -n infra get ds node-readiness -o jsonpath='{.status.desiredNumberScheduled}')
+NR_READY=$(kubectl -n infra get ds node-readiness -o jsonpath='{.status.numberReady}')
+[ -n "${NR_DESIRED}" ] && [ "${NR_DESIRED}" = "${NR_READY}" ] \
+  || { echo "✗ node-readiness is ${NR_READY:-0}/${NR_DESIRED:-0} Ready" >&2; exit 1; }
+# It must land on the WORKERS and nowhere else: a readiness answer from a
+# control plane would be about a Gateway that does not serve there.
+NR_ON_CP=$(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
+  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' \
+  | while read -r n; do [ -n "$n" ] && kubectl get node "$n" \
+      -o jsonpath='{.metadata.labels}' | grep -q 'node-role.kubernetes.io/control-plane' && echo "$n"; done | wc -l | tr -d ' ')
+[ "${NR_ON_CP}" -eq 0 ] \
+  || { echo "✗ node-readiness scheduled on ${NR_ON_CP} control plane(s)" >&2; exit 1; }
+log "✓ node-readiness ${NR_READY}/${NR_DESIRED} Ready on workers only, listening on :9890"
+
+log "Step 7/13: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg
 # Operator only — PostgreSQL clusters are application-owned, not platform-owned.
 helm upgrade --install cnpg cnpg/cloudnative-pg \
@@ -269,7 +294,7 @@ helm upgrade --install cnpg cnpg/cloudnative-pg \
   --wait --timeout 5m
 log "✓ CloudNativePG operator installed"
 
-log "Step 7/12: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
+log "Step 8/13: Strimzi Kafka operator (chart ${STRIMZI_CHART_VERSION})"
 ensure_clean_release data strimzi
 # Operator only — Kafka clusters are application-owned, not platform-owned.
 helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
@@ -278,7 +303,7 @@ helm upgrade --install strimzi strimzi/strimzi-kafka-operator \
   --wait --timeout 5m
 log "✓ Strimzi operator installed"
 
-log "Step 8/12: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
+log "Step 9/13: kube-prometheus-stack (chart ${KUBE_PROM_STACK_CHART_VERSION})"
 ensure_clean_release infra kube-prometheus-stack
 helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
   --namespace infra \
@@ -289,7 +314,7 @@ helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheu
   --wait --timeout 10m
 log "✓ kube-prometheus-stack installed"
 
-log "Step 9/12: Cilium network policies (IMDS deny + logistics default-deny)"
+log "Step 10/13: Cilium network policies (IMDS deny + logistics default-deny)"
 # Applied last: everything above must be able to install without them, and
 # the deny-IMDS exception (EBS CSI) is verified by the smoke right after.
 # The data-namespace policy is deliberately DEFERRED to phase 2: today it
@@ -353,7 +378,7 @@ aws ssm put-parameter \
   --region "${AWS_REGION}" >/dev/null
 log "✓ SSM cnpg-server-name = ${CNPG_SERVER_NAME}"
 
-log "Step 10/12: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
+log "Step 11/13: Data layer — PostgreSQL (CNPG x3) + Kafka (Strimzi KRaft x3)"
 DATA="$(cd "$(dirname "${BASH_SOURCE[0]}")/data" && pwd)"
 # Whole directory EXCEPT cnpg-cluster.yaml, which carries __BACKUP_BUCKET__
 # and is templated — never applied raw (a literal placeholder would poison
@@ -449,7 +474,7 @@ json.dump({"apiVersion":"v1","kind":"Secret",
   | kubectl apply -f - >/dev/null
 log "✓ Projected logistics/logistics-pg-app and logistics/logistics-kafka-cluster-ca-cert (ca.crt only)"
 
-log "Step 11/12: Network policies — data operands + logistics app contract"
+log "Step 12/13: Network policies — data operands + logistics app contract"
 # By operand labels, not the whole namespace: the operators stay free.
 kubectl apply -f "${POLICIES}/cnp-data-postgres.yaml"
 kubectl apply -f "${POLICIES}/cnp-data-kafka.yaml"
@@ -461,7 +486,7 @@ kubectl apply -f "${POLICIES}/cnp-data-kafka.yaml"
 kubectl apply -f "${POLICIES}/cnp-logistics-metrics.yaml"
 log "✓ Network policies applied (data operands + logistics metrics contract)"
 
-log "Step 12/12: Backups — etcd CronJob (6h) + CNPG ScheduledBackup (daily, immediate)"
+log "Step 13/13: Backups — etcd CronJob (6h) + CNPG ScheduledBackup (daily, immediate)"
 sed -e "s|__BACKUP_BUCKET__|${BACKUP_BUCKET}|g" \
     -e "s|__AWS_REGION__|${AWS_REGION}|g" \
     "${BACKUP_DIR}/etcd-backup-cronjob.yaml" | kubectl apply -f -
