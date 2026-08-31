@@ -193,6 +193,25 @@ TRUST_POLICY=$(cat <<JSON
 JSON
 )
 
+# ECRPushPlatformImage (Pieza 0 / INCIDENTS #20): the node-readiness image is
+# built and pushed by .github/workflows/build-node-readiness.yml, so the CI
+# role needs push -- but ONLY on that one repository, which lives in the
+# persistent stack and is not one of the four application repositories.
+#
+# The action list comes from the CALL GRAPH of what the workflow runs, not from
+# memory and not from whatever the next 403 names (the rule #26 cost two
+# applies to learn):
+#
+#   aws ecr get-login-password  -> GetAuthorizationToken (registry-scoped, so
+#                                  Resource must be "*": it takes no resource)
+#   docker push                 -> BatchCheckLayerAvailability, InitiateLayerUpload,
+#                                  UploadLayerPart, CompleteLayerUpload, PutImage
+#   reading back the digest     -> DescribeImages, BatchGetImage
+#   deleting the canary         -> BatchDeleteImage
+#
+# GetAuthorizationToken is split into its own statement because it is the one
+# action here that cannot be scoped to a repository ARN. Everything else is.
+#
 # BootstrapScriptObjects (INCIDENTS #26): since #25 the bootstrap renders
 # travel through S3, so CI WRITES them during apply and destroy REMOVES them.
 # The grant that existed covered only the reader (the CP instance role) --
@@ -500,6 +519,27 @@ PERMISSIONS_POLICY=$(cat <<JSON
           "s3:prefix": "bootstrap/${CLUSTER_NAME}/*"
         }
       }
+    },
+    {
+      "Sid": "ECRAuthForPlatformImagePush",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRPushPlatformImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchDeleteImage",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Resource": "arn:aws:ecr:*:${ACCOUNT_ID}:repository/${CLUSTER_NAME}-node-readiness"
     },
     {
       "Sid": "TofuStateDynamoDB",

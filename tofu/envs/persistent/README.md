@@ -1,14 +1,30 @@
-# Persistent stack — backups bucket + barman IAM user (lab account)
+# Persistent stack — backups bucket, barman IAM user, platform image (lab account)
 
 Separate-lifecycle stack: **persistent**, applied **locally** with
 lab-account credentials, region **eu-west-1**. It is never part of
-`apply.yml`/`destroy.yml` — destroying the cluster must never touch
-backups. Second persistent piece of the lab, after `tofu/envs/identity`.
+`apply.yml`/`destroy.yml` — destroying the cluster must never touch what
+lives here. Second persistent piece of the lab, after `tofu/envs/identity`.
+
+## Two classes of thing, persistent for different reasons
+
+Since the node-readiness piece (INCIDENTS #20) this stack custodies **two
+kinds of thing**, and conflating them would be a mistake:
+
+| clase | qué es | por qué persiste | ciclo |
+|---|---|---|---|
+| **datos de conservación** | el bucket de backups (`etcd/`, `cnpg/`) | para que un destroy total del cluster no pierda nada | escriben los clusters, continuamente |
+| **artefactos de plataforma** | el repositorio ECR `node-readiness` | porque el DaemonSet **fija su imagen por digest** en el repo: si el repositorio muriera con el cluster, ese digest nombraría algo inexistente y el siguiente apply levantaría un componente roto | **propio**: se reconstruye cuando cambia el binario, **nunca en cada apply** |
+
+La diferencia es operativa, no decorativa. Los repositorios ECR de la
+aplicación viven en el stack `lab` con `force_delete = true` y mueren en cada
+destroy, que es lo correcto para ellos. Este **no** lleva `force_delete`:
+borrarlo es un acto deliberado, no un efecto colateral.
 
 | Piece | Purpose |
 |---|---|
 | S3 bucket `<cluster>-backups-<account>` | One bucket, two prefixes: `etcd/` (snapshots, 7-day lifecycle) and `cnpg/` (base backups + WAL, **18-day lifecycle** — barman's 14d retention prunes first; the lifecycle is the safety net). Versioned, SSE-S3, public access fully blocked |
 | IAM user `k8s-vanilla-lab-cnpg-backup` | barman's identity — Put/Get/Delete/List scoped to `cnpg/*` only. Static user because the IMDS CCNP denies the instance profile to CNPG pods and is not to be widened |
+| ECR repo `k8s-vanilla-lab-node-readiness` | Image of the per-node readiness aggregator (INCIDENTS #20). IMMUTABLE, scan-on-push, AES256, last-10 lifecycle. Built and pushed by `.github/workflows/build-node-readiness.yml` on `workflow_dispatch`; the DaemonSet pins the resulting **digest** |
 
 The etcd CronJob does NOT use this user: it runs `hostNetwork` on the CP,
 so the **CP instance role** covers it (write-only grant on `etcd/*`, managed
