@@ -1,0 +1,13 @@
+# Gateway API v1.6.1 CRDs, vendored from kubernetes-sigs/gateway-api.
+# Downloaded through the GitHub Contents API at ref v1.6.1 -- NOT through
+# raw.githubusercontent.com, which returned 400 for gatewayclasses at this
+# very tag while serving the other six (INCIDENTS #27).
+#
+# kind  channel  git-blob-sha  sha256  bytes
+gatewayclasses standard ea55d0dad02d431952739c5bdac13db35fad3a3d 53710048ba26f8620eed59d5e51b157ecf040daf5c6eef31a4b991e0808c4be5 23255
+gateways standard 6de4376f21fc8d304ac467f089686b84ccc5dbfb 25b885f5870b8fff1ae82efa2628b2761cef3745900c2aecf8fb76629a01255a 188714
+httproutes standard 32145881f43cbc528911e5640ee37af75e06d9d7 a424a0d6c953b162e71d1d97bb7e75012d8f1ac264e7274f2763d1b96ab39852 429088
+grpcroutes standard 452de9a22e3318fe722410814c753e223bffaefc 53a8d029da8f07e55d3fa58a5cf6de5950dab19fbb8d6a8082fb5e51ca5ef6fc 122702
+referencegrants standard feb92c3727eb9ebc77ae9cedd9dd2add44429184 8c645e9333cfa67790cc2a53e0c00076f88b2bd4230d2b49688c78bc34f9b2c3 14848
+backendtlspolicies standard 6555c44258d2a3ff7b12494ad0b557c49ea050d0 0d48c9e4b53dd9510cf615b9b1192d9d7afb07a1cc0498c9515627cb1c075419 78548
+tlsroutes experimental a8169c7d1aad10a91208c43f8b6a38afc57bbc20 c7fcddb73966fc83ad7001eff8bb910d8a640c7c1f280254e88b93541fc9a82b 135634

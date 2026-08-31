@@ -1724,9 +1724,52 @@ El transporte por S3 de #25, el gate `healthy` del NLB de #77 y el gate de join
 fail-closed se comportaron los tres. El fallo entró por una dependencia
 externa en mitad del Step 5, no por ninguno de ellos.
 
-### Sin fix
+### Fix
 
-El diseño se decide aparte. Lo que este incidente fija es el hecho medido: **el
-arranque depende de siete descargas HTTP a un servicio de terceros en el camino
-crítico, y una sola de ellas fallando mata el fundador** — con el cluster ya
-inicializado, `kubeadm init` hecho y el NLB enrutando.
+Los siete CRDs se **vendorizan en el repo** bajo
+`bootstrap/gateway-api/v1.6.1/`, descargados por la **Contents API** — que es
+la que sirvió el fichero cuando el endpoint raw lo rechazaba— y viajan por el
+**mismo transporte S3** que los renders (`aws_s3_object` con `source` al
+fichero local, bajo `bootstrap/<cluster>/gateway-api/`). El Step 5 los descarga
+de S3 y **verifica el SHA-256 antes de aplicar**, con el mismo patrón de
+`fetch-exec.sh` adaptado a YAML: verificar y aplicar, no ejecutar.
+
+`aws_instance.control_plane` depende explícitamente de esos objetos, así que
+ningún CP nace sin ellos.
+
+`bootstrap/gateway-api/v1.6.1/MANIFEST` guarda la procedencia de cada fichero:
+`kind`, canal, **sha de blob de git** y **SHA-256**. Y
+`scripts/test-gateway-bootstrap-manifests.sh` valida contra los ficheros
+vendorizados, sin red: comprueba que los digests siguen siendo los del MANIFEST
+—si alguien edita un CRD sin actualizarlo, el test se pone rojo— además de que
+TLSRoute solo aparece en el overlay y de que el `bundle-version` es exacto.
+GitHub queda fuera también de la validación en CI.
+
+### La razón, que no es «no depender de la red»
+
+Podría parecer que basta con reintentar mejor, o con un mirror. No es eso.
+
+**El digest tiene que preexistir a la descarga.** Aquí lo calcula tofu con
+`filesha256()` **del fichero en disco**, en el momento del plan, y lo hornea en
+el script del fundador antes de que nada se descargue. Un digest derivado de la
+propia descarga probaría solo que los bytes llegaron íntegros — nunca que son
+los bytes que este repo revisó.
+
+Esa distinción es lo que protege de una **republicación upstream**: si el
+proyecto de Gateway API moviera el tag, o si el contenido servido bajo la misma
+ruta cambiara, la verificación falla y el fundador se niega a aplicar. Con el
+diseño anterior —descargar y aplicar— el cambio habría entrado sin que nadie
+lo notase, y el 400 solo fue la forma ruidosa de un fallo que también tiene
+forma silenciosa.
+
+### Lo que este incidente deja fijado
+
+**El arranque no aplica nada que no haya verificado contra un digest que ya
+existía antes de la descarga.** Y una dependencia de terceros en el camino
+crítico del fundador es una decisión, no un detalle de implementación: aquí
+costó un Apply entero con el cluster ya inicializado, `kubeadm init` hecho y el
+NLB enrutando.
+
+Queda **fuera de este fix**, anotado: `scripts/run-4b-rung.sh:38` sigue
+apuntando a `raw.githubusercontent.com`. Es la ceremonia de la escalera 4b, no
+está ni en el bootstrap ni en la validación de CI.
