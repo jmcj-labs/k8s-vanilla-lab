@@ -168,18 +168,24 @@ Detalle de cada una en [CLUSTER.md](CLUSTER.md) §5.
 
 ## Pendientes de observación (no son deuda: son afirmaciones sin verificar)
 
-1. **El contador de checks del smoke está declarado NO OBSERVADO.** El próximo
-   smoke en CI es su primera ejecución real, no una confirmación de trámite. Si
-   imprime un número distinto de 64, la razón la tiene el contador.
+1. ~~El contador de checks del smoke está declarado NO OBSERVADO.~~
+   **OBSERVADO (31-ago-2026): imprime 64.** Run `33375935701`, `main` en
+   `bccebff`: `✓ Smoke test passed — 64 checks OK`. Era su primera ejecución
+   real y coincide con la derivación previa (54 llamadas a `OK()` + 10 del
+   sub-script de esquema).
 2. **Inventario AWS post-destroy sin verificar**: nadie ha comprobado bucket de
    bootstrap, parámetros SSM, snapshots, ECR ni volúmenes EBS huérfanos. La
    consola de EC2 vacía no es "cuenta a cero".
-3. **Flujo humano SSO de `jm-dev` sin evidencia.** El smoke prueba el camino
-   IAM con roles asumidos por la identidad de CI, no el login interactivo. Y
-   ojo con la prueba equivocada: el `ForbiddenException: No access` del
-   `platform/access/README.md` es un rechazo de **Identity Center** por sesión
-   de navegador, no el `Forbidden` de **RBAC de Kubernetes** que exige el
-   criterio de aceptación.
+3. ~~Flujo humano SSO de `jm-dev` sin evidencia.~~ **VERIFICADO
+   (31-ago-2026).** Login SSO real en incógnito:
+   `sts get-caller-identity` devuelve `AWSReservedSSO_K8sDevBridge_.../jm-dev`;
+   `get pods -n infra` devuelve el `Forbidden` **del API server**
+   (`User "developer:jm-dev" cannot list resource "pods" ... in the namespace
+   "infra"`), no el `ForbiddenException: No access` de Identity Center; y
+   `get pods -n logistics` devuelve `No resources found`. **Esa última mitad es
+   la que cierra la prueba**: sin ella el `Forbidden` sería compatible con «el
+   acceso no funciona», y lo que se demuestra con las dos es segregación por
+   namespace. Detalle en [CLUSTER.md](CLUSTER.md) §5.
 4. **Coste del 27-ago sin medir** en granularidad diaria.
 
 ---

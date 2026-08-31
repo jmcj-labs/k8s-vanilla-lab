@@ -46,7 +46,15 @@ kubectl get nodes
 > # open the printed URL in an INCOGNITO window, log in as jm-dev
 > ```
 
-> **ESTADO: flujo humano SSO NO ejercitado — sin evidencia.** Y el matiz que
+> **ESTADO: flujo humano SSO VERIFICADO (31-ago-2026).** Login real en
+> incógnito como `jm-dev`: `AWSReservedSSO_K8sDevBridge_.../jm-dev`,
+> `get pods -n infra` denegado **por el API server**
+> (`User "developer:jm-dev" cannot list resource "pods"`), y
+> `get pods -n logistics` con acceso concedido. Se conserva el aviso de abajo
+> porque el error del portal sigue existiendo y sigue siendo la prueba
+> equivocada.
+>
+> **El aviso original:** Y el matiz que
 > hace falta para que la verificación futura valga: este
 > `ForbiddenException: No access` es un rechazo de **Identity Center** por la
 > sesión del navegador, NO el `Forbidden` de **RBAC de Kubernetes** que exige

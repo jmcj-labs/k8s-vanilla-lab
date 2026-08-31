@@ -349,16 +349,28 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   documentados que sobreviven a ambos sprints.
 - **Token de join con TTL 24h** — workers que se unan más tarde necesitan
   token nuevo (`docs/troubleshooting.md`).
-- **Flujo humano SSO de `jm-dev` NO ejercitado — sin evidencia.** El smoke
-  prueba el camino IAM con roles asumidos por la identidad de CI, no el login
-  interactivo de un humano. Y ojo con la prueba equivocada: el
-  `ForbiddenException: No access` que registra
-  [platform/access/README.md](../platform/access/README.md) es un rechazo de
-  **Identity Center** por sesión de navegador, no el `Forbidden` de **RBAC de
-  Kubernetes** que exige el criterio de aceptación. Se leen igual y no lo son:
-  dar el primero por bueno validaría el módulo con la prueba equivocada. La
-  verificación válida es un login real como `jm-dev` que llegue hasta un
-  `kubectl` denegado **por el API server**.
+- **Flujo humano SSO de `jm-dev`: VERIFICADO (31-ago-2026).** Ya no es un
+  límite abierto. Login SSO real en ventana de incógnito, y las tres piezas que
+  hacen falta para que la prueba valga:
+
+  ```
+  aws sts get-caller-identity  →  AWSReservedSSO_K8sDevBridge_.../jm-dev
+  kubectl get pods -n infra    →  Error from server (Forbidden): pods is forbidden:
+                                  User "developer:jm-dev" cannot list resource "pods"
+                                  in API group "" in the namespace "infra"
+  kubectl get pods -n logistics → No resources found
+  ```
+
+  **El `Forbidden` es del API server**, no el `ForbiddenException: No access` de
+  Identity Center que registra
+  [platform/access/README.md](../platform/access/README.md) — se leen igual y
+  prueban cosas distintas; el segundo solo diría que el portal rechazó la
+  sesión del navegador.
+
+  **Y la mitad de `logistics` es la que cierra la prueba**: sin ella, un
+  `Forbidden` en `infra` sería compatible con «el acceso no funciona en
+  absoluto». Con las dos, lo demostrado es **segregación por namespace**, que
+  es el criterio de aceptación.
 - **Endpoint de readiness por nodo: no existe** (INCIDENTS #20). El health
   check del NLB es TCP contra el NodePort, que Cilium programa con
   independencia de la salud del datapath, así que no puede detectar un nodo
