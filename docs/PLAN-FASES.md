@@ -232,9 +232,25 @@ Detalle de cada una en [CLUSTER.md](CLUSTER.md) §5.
    `bccebff`: `✓ Smoke test passed — 64 checks OK`. Era su primera ejecución
    real y coincide con la derivación previa (54 llamadas a `OK()` + 10 del
    sub-script de esquema).
-2. **Inventario AWS post-destroy sin verificar**: nadie ha comprobado bucket de
-   bootstrap, parámetros SSM, snapshots, ECR ni volúmenes EBS huérfanos. La
-   consola de EC2 vacía no es "cuenta a cero".
+2. ~~Inventario AWS post-destroy sin verificar.~~ **VERIFICADO
+   (31-ago-2026)**: destroy de 80 recursos, `rc=0`, e inventario inmediato —
+   EC2/EBS/ENI/EIP/LB/TG/VPC/SG/snapshots/NAT/ASG/spot/log-groups **todos a
+   cero**, y 0 EC2 en otras tres regiones. Persisten solo los del stack
+   persistente (tfstate, backups con 262 objetos y 509 MB, DynamoDB, ECR del
+   agregador, IAM/OIDC, 2 SSM `/k8s/persistent/`, el key pair de entrada y las
+   2 claves KMS **gestionadas por AWS**). Evidencia y tabla completa en
+   [`docs/evidence/inventario-2026-08-31/`](evidence/inventario-2026-08-31/).
+
+   **Hallazgo del inventario**: los 4 repos ECR de aplicación viven en el stack
+   **lab**, no en el persistente, y con `force_delete = true` — cada destroy los
+   borra con sus imágenes dentro. Coherente con el handoff documentado (que
+   reconstruye), pero desmiente la lectura de que "ECR persiste": persiste el
+   del agregador, no los de aplicación.
+
+   **Coste del día: sin dato todavía, que no es cero.** Cost Explorer devuelve
+   `0` con `Estimated: true` para el día en curso; los días anteriores sí
+   responden (29-ago 0,00084 USD, 30-ago 0,00092 USD, ambos con el cluster
+   apagado). Hay que volver a pedirlo en ≥24 h.
 3. ~~Flujo humano SSO de `jm-dev` sin evidencia.~~ **VERIFICADO
    (31-ago-2026).** Login SSO real en incógnito:
    `sts get-caller-identity` devuelve `AWSReservedSSO_K8sDevBridge_.../jm-dev`;
