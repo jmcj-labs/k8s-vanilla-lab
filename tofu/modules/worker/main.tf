@@ -46,6 +46,25 @@ resource "aws_security_group" "worker" {
     security_groups = [var.nlb_security_group_id]
   }
 
+  # Per-node readiness aggregator (Pieza 0 / INCIDENTS #20). INLINE, like every
+  # other rule on THIS security group. #6 is often quoted as "never inline",
+  # but what it actually says is never MIX: inline rules are enforced as the
+  # complete set, so a standalone rule attached to an inline-managed SG gets
+  # deleted on the next apply. The control-plane SG is all-standalone; this one
+  # is all-inline. A standalone rule here would have been the very bug #6
+  # records, pointing the other way.
+  #
+  # Same shape as the NodePort rule above: only the NLB's SG may reach it. The
+  # endpoint says whether this node can serve Gateway traffic -- it is for the
+  # balancer, not for the world.
+  ingress {
+    description     = "Node readiness aggregator from the NLB only"
+    from_port       = var.readiness_port
+    to_port         = var.readiness_port
+    protocol        = "tcp"
+    security_groups = [var.nlb_security_group_id]
+  }
+
   # Allow all traffic between workers (pod-to-pod communication)
   ingress {
     description = "Worker to worker communication"
@@ -330,19 +349,3 @@ resource "aws_instance" "worker" {
   }
 }
 
-
-# Per-node readiness aggregator (Pieza 0 / INCIDENTS #20). Standalone and NEVER
-# inline: mixing inline and standalone rules on the same security group makes
-# tofu fight itself on every apply (INCIDENTS #6).
-#
-# Same shape as the Gateway NodePort rule: only the NLB's security group may
-# reach it. The endpoint answers whether this node can serve Gateway traffic --
-# it is for the balancer, not for the world.
-resource "aws_vpc_security_group_ingress_rule" "readiness_from_nlb" {
-  security_group_id            = aws_security_group.worker.id
-  description                  = "Node readiness aggregator from the NLB only"
-  from_port                    = var.readiness_port
-  to_port                      = var.readiness_port
-  ip_protocol                  = "tcp"
-  referenced_security_group_id = var.nlb_security_group_id
-}
