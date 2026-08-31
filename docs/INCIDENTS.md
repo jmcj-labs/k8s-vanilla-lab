@@ -1600,3 +1600,176 @@ juntos.** Mover un dato de sitio no es un cambio de un lado: es un permiso de
 escritura, un permiso de lectura, un orden de creación y un borrado. Revisar
 uno y dar por supuestos los otros tres deja tres formas de fallar en el
 hierro, que es donde salen más caras.
+
+---
+
+## 27. Un 400 de raw.githubusercontent.com para UN fichero del tag
+
+**Cuándo**: 2026-08-31, primer Apply tras la coronación de Fase 1
+(run `33370141698`, `main` en `ee01c736`).
+**Severidad**: el fundador murió en Step 5/9; el Apply agotó sus 1209s sin
+kubeconfig y el smoke quedó `skipped`, así que **el contador de checks no llegó
+a ejecutarse**. Sin pérdida de datos. Cluster dejado vivo para el forense.
+
+### La causa no está en el repo
+
+Primero lo que descarta a este lado, porque es lo que uno mira antes:
+
+```
+git diff --stat c641d01 ee01c736 -- bootstrap/ tofu/   →   vacío
+```
+
+**Byte a byte idéntico** al que produjo los dos verdes del 27-ago. Los tres
+commits del intervalo tocan `platform/access/README.md`,
+`scripts/smoke-test.sh` y `scripts/sample-h3.sh`: ninguno está en el camino del
+fundador.
+
+### Cronología UTC
+
+```
+07:53:44  arranca CP-0
+07:54:56  stub: fetching s3://.../02-control-plane-init.sh
+07:54:57  OK fetched and verified ... after 1s
+07:55:03  Step 3/9: kubeadm init
+07:55:22  OK kubeadm init completed successfully
+07:55:22  Step 5/9: Installing Cilium CNI
+07:55:35  OK API target healthy -- el NLB enruta
+07:55:35  Installing Gateway API CRDs v1.6.1
+07:55:35  curl: (22) The requested URL returned error: 400
+07:55:35  ERROR: /opt/k8s-bootstrap/02-control-plane-init.sh exited 22
+08:14:38  CI: kubeconfig ausente tras 1209s
+```
+
+### La causa
+
+`bootstrap/control-plane.yaml:405` descarga los seis CRDs standard del canal
+individual. El **primero del bucle** devolvió 400:
+
+```
+https://raw.githubusercontent.com/kubernetes-sigs/gateway-api/v1.6.1/config/crd/standard/gateway.networking.k8s.io_gatewayclasses.yaml
+```
+
+`curl -fsSL` con `--retry 3` agotó los reintentos y salió con **22** («HTTP page
+not retrieved»). El `set -e` del script propagó ese 22 hasta cloud-init, que lo
+registró como `Runparts: 1 failures (02-control-plane-init.sh)`.
+
+### Las cinco pruebas
+
+Cinco intentos consecutivos desde el host del operador, mismo resultado:
+
+```
+intento 1: 400   intento 2: 400   intento 3: 400   intento 4: 400   intento 5: 400
+```
+
+Respuesta completa:
+
+```
+HTTP/2 400
+content-type: text/plain; charset=utf-8
+x-github-request-id: 2BD2:354ED0:460A51E:4C0847F:6A9538EC
+x-github-edge-region: fra
+x-served-by: cache-osl6532-OSL
+via: 1.1 varnish
+x-cache: MISS
+
+400: Bad Request
+```
+
+Es **400, no 404**, y lleva cabeceras de GitHub: la petición llega y el
+servidor la rechaza.
+
+### El contraste que lo aísla
+
+| recurso | HTTP |
+|---|---|
+| `gatewayclasses` — raw, tag `v1.6.1` | **400** |
+| `gateways` — raw, tag `v1.6.1` | 200 |
+| `httproutes` — raw, tag `v1.6.1` | 200 |
+| `grpcroutes` — raw, tag `v1.6.1` | 200 |
+| `referencegrants` — raw, tag `v1.6.1` | 200 |
+| `backendtlspolicies` — raw, tag `v1.6.1` | 200 |
+| `tlsroutes` experimental — raw, tag `v1.6.1` | 200 |
+| `gatewayclasses` — raw, rama `main` | 200 |
+| `gatewayclasses` — `github.com/.../raw/`, tag `v1.6.1` | 400 |
+| `gatewayclasses` — **contents API**, ref `v1.6.1` | **200** |
+
+La API de contenidos devuelve el fichero: `name`
+`gateway.networking.k8s.io_gatewayclasses.yaml`, **23.255 bytes**, sha
+`ea55d0dad02d`. **El fichero existe en el tag.** Lo que falla es el servicio
+raw para esa combinación concreta de tag y ruta: las otras seis rutas del mismo
+tag se sirven, y la misma ruta en otra referencia se sirve.
+
+### Estado del cluster al hacer el forense
+
+- **El stub de #25 funcionó**: descarga y verificación de SHA-256 en 1s, script
+  real de 33.312 B en `/opt/k8s-bootstrap/`, stub de 3.812 B en
+  `/var/lib/cloud/instance/scripts/`.
+- **`kubeadm init` completó**: `Your Kubernetes control-plane has initialized
+  successfully!`, los cuatro manifiestos estáticos presentes, `admin.conf`
+  escrito.
+- **El fundador está muerto, no colgado**: sin procesos vivos de
+  `cloud-init|kubeadm|helm|kubectl`, cloud-init en `error - done`.
+- **No publicó nada**: bajo `/k8s/*` solo los **2** parámetros preexistentes de
+  `/k8s/persistent/`. Murió en el Step 5 y la publicación es del 7 al 9, así
+  que no es «llegó y falló al escribir».
+- **`kubelet` activo** repitiendo `cni plugin not initialized` cada 5s, que es
+  lo esperado sin CNI instalado. `containerd` activo.
+- **CP-1 y CP-2 no intentaron el join**: esperaron el gate con
+  `joined-count=absent` y abortaron cerrados al agotar sus 1800s. Ninguno tiene
+  `kube-apiserver.yaml`.
+
+### Lo que este arranque vuelve a dejar probado
+
+El transporte por S3 de #25, el gate `healthy` del NLB de #77 y el gate de join
+fail-closed se comportaron los tres. El fallo entró por una dependencia
+externa en mitad del Step 5, no por ninguno de ellos.
+
+### Fix
+
+Los siete CRDs se **vendorizan en el repo** bajo
+`bootstrap/gateway-api/v1.6.1/`, descargados por la **Contents API** — que es
+la que sirvió el fichero cuando el endpoint raw lo rechazaba— y viajan por el
+**mismo transporte S3** que los renders (`aws_s3_object` con `source` al
+fichero local, bajo `bootstrap/<cluster>/gateway-api/`). El Step 5 los descarga
+de S3 y **verifica el SHA-256 antes de aplicar**, con el mismo patrón de
+`fetch-exec.sh` adaptado a YAML: verificar y aplicar, no ejecutar.
+
+`aws_instance.control_plane` depende explícitamente de esos objetos, así que
+ningún CP nace sin ellos.
+
+`bootstrap/gateway-api/v1.6.1/MANIFEST` guarda la procedencia de cada fichero:
+`kind`, canal, **sha de blob de git** y **SHA-256**. Y
+`scripts/test-gateway-bootstrap-manifests.sh` valida contra los ficheros
+vendorizados, sin red: comprueba que los digests siguen siendo los del MANIFEST
+—si alguien edita un CRD sin actualizarlo, el test se pone rojo— además de que
+TLSRoute solo aparece en el overlay y de que el `bundle-version` es exacto.
+GitHub queda fuera también de la validación en CI.
+
+### La razón, que no es «no depender de la red»
+
+Podría parecer que basta con reintentar mejor, o con un mirror. No es eso.
+
+**El digest tiene que preexistir a la descarga.** Aquí lo calcula tofu con
+`filesha256()` **del fichero en disco**, en el momento del plan, y lo hornea en
+el script del fundador antes de que nada se descargue. Un digest derivado de la
+propia descarga probaría solo que los bytes llegaron íntegros — nunca que son
+los bytes que este repo revisó.
+
+Esa distinción es lo que protege de una **republicación upstream**: si el
+proyecto de Gateway API moviera el tag, o si el contenido servido bajo la misma
+ruta cambiara, la verificación falla y el fundador se niega a aplicar. Con el
+diseño anterior —descargar y aplicar— el cambio habría entrado sin que nadie
+lo notase, y el 400 solo fue la forma ruidosa de un fallo que también tiene
+forma silenciosa.
+
+### Lo que este incidente deja fijado
+
+**El arranque no aplica nada que no haya verificado contra un digest que ya
+existía antes de la descarga.** Y una dependencia de terceros en el camino
+crítico del fundador es una decisión, no un detalle de implementación: aquí
+costó un Apply entero con el cluster ya inicializado, `kubeadm init` hecho y el
+NLB enrutando.
+
+Queda **fuera de este fix**, anotado: `scripts/run-4b-rung.sh:38` sigue
+apuntando a `raw.githubusercontent.com`. Es la ceremonia de la escalera 4b, no
+está ni en el bootstrap ni en la validación de CI.
