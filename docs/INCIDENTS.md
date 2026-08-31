@@ -868,6 +868,15 @@ three distinct outcomes and a decision table in
 
 ## 20. `externalTrafficPolicy: Cluster` had nothing to fall back to — CERRADO (2026-08-31)
 
+> **REMEDIADO Y PROBADO (2026-08-31, misma tarde)**: la pieza 0 sustituyó el
+> health check TCP por `HTTP :8910/healthz` contra el agregador
+> `node-readiness`. Contraprueba con la MISMA intervención que produjo las 22
+> muestras `healthy` de más abajo: el TG marcó el nodo intervenido `unhealthy`
+> entre 19 s y 24 s, con los otros dos `healthy` en las 34 muestras.
+> Evidencia en [`docs/evidence/pieza0-2026-08-31/`](evidence/pieza0-2026-08-31/).
+> El límite que sigue abierto —un agente sano con su datapath roto— está en
+> [CLUSTER.md](CLUSTER.md) §5.
+
 > **CERRADO con H3 confirmada en vivo.** Lo que este incidente afirmaba desde
 > la configuración del target group quedó **medido** el 31-ago-2026. Evidencia
 > completa en [`evidence/h3-2026-08-31/`](evidence/h3-2026-08-31/); el
