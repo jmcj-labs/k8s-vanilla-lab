@@ -124,7 +124,7 @@ locals {
   gateway_api_manifest = join("\n", [
     for f in local.gateway_api_crds : "${filesha256("${local.gateway_api_dir}/${f}")}  ${f}"
   ])
-  bootstrap_prefix     = "bootstrap/${var.cluster_name}"
+  bootstrap_prefix = "bootstrap/${var.cluster_name}"
   bootstrap_cp_founder = templatefile("${path.module}/../../../bootstrap/control-plane.yaml", {
     cluster_name         = var.cluster_name
     aws_region           = var.aws_region
