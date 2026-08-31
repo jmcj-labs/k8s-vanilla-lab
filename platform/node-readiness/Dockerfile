@@ -14,5 +14,5 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /node-readiness .
 FROM scratch
 COPY --from=build /node-readiness /node-readiness
 USER 65534:65534
-EXPOSE 9890
+EXPOSE 8910
 ENTRYPOINT ["/node-readiness"]

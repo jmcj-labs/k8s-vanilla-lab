@@ -101,7 +101,7 @@ variable "nlb_security_group_id" {
 variable "readiness_port" {
   description = "Port of the per-node readiness aggregator the NLB health-checks (Pieza 0 / INCIDENTS #20)"
   type        = number
-  default     = 9890
+  default     = 8910
 }
 
 variable "platform_ecr_repository_arns" {

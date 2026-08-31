@@ -31,6 +31,32 @@ spec:
         app.kubernetes.io/name: node-readiness
         app.kubernetes.io/component: platform
     spec:
+      # PORT 8910. WHY, and what was actually checked -- written down so the
+      # next person does not repeat the cycle.
+      #
+      # The component was written for :9890 while it was a prototype that was
+      # never deployed, and cilium-agent holds 127.0.0.1:9890. Binding
+      # 0.0.0.0:9890 includes it, so the DaemonSet crashed on every worker with
+      # "listen tcp :9890: bind: address already in use". A constant in a
+      # never-deployed prototype has been validated by nothing.
+      #
+      # WHAT WAS MEASURED, on a live worker (ss -tlnH):
+      #   22 53 4240 4244 9234 9878 9879 9890 9891 9963 9964 10248 10250
+      #   plus the ephemeral range from 32768 (net.ipv4.ip_local_port_range)
+      # Cilium owns nine of those, so 9891 or 9892 would be a bet on Cilium not
+      # growing into its own neighbourhood.
+      #
+      # WHAT THAT MEASUREMENT DID NOT COVER, and it matters: the platform layer
+      # had failed at step 6, so the monitoring stack was NOT installed and
+      # node-exporter's 9100 never appeared in the list. The inventory was a
+      # partial view of a half-built cluster, which is why the choice avoids
+      # whole neighbourhoods instead of taking the next free number: Cilium's
+      # 42xx/92xx/98xx/99xx, the kubelet's 102xx, the exporters' 90xx/91xx, the
+      # NodePort range 30000-32767, and the ephemeral range.
+      #
+      # The smoke test asserts that whatever answers on this port is THIS
+      # aggregator and not something that took it -- a check, not a note.
+      #
       # hostNetwork: the aggregator asks the agent and Envoy over LOOPBACK,
       # because both bind 127.0.0.1 only -- that is the whole reason it has to
       # exist instead of repointing the health check at an existing port.
@@ -58,12 +84,12 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: readiness
-              containerPort: 9890
-              hostPort: 9890
+              containerPort: 8910
+              hostPort: 8910
               protocol: TCP
           env:
             - name: LISTEN_ADDR
-              value: ":9890"
+              value: ":8910"
             - name: AGENT_HEALTH_URL
               value: "http://127.0.0.1:9879/healthz"
             - name: ENVOY_HEALTH_URL
@@ -86,17 +112,17 @@ spec:
           # matters most.
           startupProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             failureThreshold: 15
             periodSeconds: 2
           livenessProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             periodSeconds: 20
             failureThreshold: 3
           readinessProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             periodSeconds: 10
             failureThreshold: 3
       terminationGracePeriodSeconds: 5

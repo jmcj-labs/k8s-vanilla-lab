@@ -96,7 +96,7 @@ restore: [RUNBOOK-restore-etcd.md](RUNBOOK-restore-etcd.md) y
 | Workers spot + CP on-demand | 60% de ahorro asumiendo reclaims; el CP nunca se pierde | [ADR-002](decisions/ADR-002-spot-workers-ondemand-cp.md) |
 | `skipPhases: addon/kube-proxy` + Cilium KPR=true | kube-proxy nunca existe; eBPF hace su trabajo — requiere `k8sServiceHost/Port` cableados para evitar el deadlock de bootstrap | [ADR-003](decisions/ADR-003-cilium-ebpf.md) |
 | Kubeconfig y join data en SSM | CI opera el cluster sin abrir SSH al runner | [ADR-004](decisions/ADR-004-kubeconfig-ssm.md) |
-| Health check del TG del gateway: **HTTP `:9890/healthz`**, no TCP al NodePort | El TCP mide un puerto que el agente de Cilium programa con independencia de Envoy: se midió 22 muestras con el TG en `healthy` y Envoy parado. Umbrales explícitos (`interval 10`, `2`/`2`), no heredados. **Coste aceptado y declarado**: al marcar un target `unhealthy` el NLB **termina las conexiones existentes** hacia él por defecto, así que un falso negativo del agregador corta tráfico en curso — y `deregistration_delay` **no** protege de eso: solo cubre la baja deliberada de un target, no su paso a `unhealthy` | [INCIDENTS #20](INCIDENTS.md) · [evidencia](evidence/h3-2026-08-31/) |
+| Health check del TG del gateway: **HTTP `:8910/healthz`**, no TCP al NodePort | El TCP mide un puerto que el agente de Cilium programa con independencia de Envoy: se midió 22 muestras con el TG en `healthy` y Envoy parado. Umbrales explícitos (`interval 10`, `2`/`2`), no heredados. **Coste aceptado y declarado**: al marcar un target `unhealthy` el NLB **termina las conexiones existentes** hacia él por defecto, así que un falso negativo del agregador corta tráfico en curso — y `deregistration_delay` **no** protege de eso: solo cubre la baja deliberada de un target, no su paso a `unhealthy` | [INCIDENTS #20](INCIDENTS.md) · [evidencia](evidence/h3-2026-08-31/) |
 | Imagen de `node-readiness` en el stack **persistent** | El DaemonSet la fija **por digest**; si el repo muriera con el cluster el digest nombraría algo inexistente | [tofu/envs/persistent](../tofu/envs/persistent/README.md) |
 | IMDS hop limit **3** (no 1, no 2) | El tunnel de Cilium añade un salto al camino de vuelta pod←IMDS; con 2 el EBS CSI muere sin credenciales | [INCIDENTS #4](INCIDENTS.md) |
 | `--provider-id` en el kubelet (los 6 nodos, pre-init/join) | kubeadm vanilla deja `providerID` vacío y el EBS CSI lo exige; un solo mecanismo, sin RBAC ni patches | [INCIDENTS #3](INCIDENTS.md) |
@@ -376,7 +376,7 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   es el criterio de aceptación.
 - **Endpoint de readiness por nodo: RESUELTO PARCIALMENTE** (INCIDENTS #20,
   Pieza 0 de Fase 2). El health check del TG del gateway ya no es TCP contra el
-  NodePort: es `HTTP :9890/healthz` contra el agregador `node-readiness`, que
+  NodePort: es `HTTP .8910/healthz` contra el agregador `node-readiness`, que
   responde 200 solo con el AND del agente y de Envoy. Corre como DaemonSet
   `hostNetwork` en los workers, y su puerto solo lo alcanza el SG del NLB.
 

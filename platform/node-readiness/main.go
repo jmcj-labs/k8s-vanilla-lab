@@ -30,7 +30,8 @@
 //
 // Both components already expose HTTP /healthz — the agent on 9879, Envoy on
 // 9878 — but BOTH BIND TO 127.0.0.1 ONLY, so the load balancer cannot reach
-// them. This binds 0.0.0.0:9890, asks both over loopback, and answers with a
+// them. This binds 0.0.0.0 on LISTEN_ADDR (8910 in this cluster: cilium-agent
+// already holds 9890), asks both over loopback, and answers with a
 // single status the NLB can act on.
 //
 // THE RULE THIS OBEYS (INCIDENTS #17): fail closed, without exception. A
@@ -161,7 +162,7 @@ func envOr(k, def string) string {
 
 func main() {
 	var (
-		listen       = envOr("LISTEN_ADDR", ":9890")
+		listen       = envOr("LISTEN_ADDR", ":8910")
 		agentURL     = envOr("AGENT_HEALTH_URL", "http://127.0.0.1:9879/healthz")
 		envoyURL     = envOr("ENVOY_HEALTH_URL", "http://127.0.0.1:9878/healthz")
 		probeTimeout = 2 * time.Second
