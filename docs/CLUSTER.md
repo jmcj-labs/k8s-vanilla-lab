@@ -23,7 +23,7 @@ este documento no lo duplica, lo referencia.
 **Cómputo**: **3 control planes t3.medium on-demand con etcd stacked (S2-3,
 ADR-007** — HA de nodo: sobrevive a perder un CP; **una sola AZ**, no es HA
 zonal) · 3 workers t3.medium spot (3, no 2: anti-affinity real para la
-topología de datos de fase 2 — CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS ·
+topología de datos — CNPG ×3, Kafka ×3) · Ubuntu 24.04 LTS ·
 IMDSv2 obligatorio con hop limit 3 · EBS cifrado. El EIP del CP **ya no
 existe**: IPs públicas auto-asignadas solo para egress; ningún consumidor
 ancla a IPs de nodo.
@@ -317,7 +317,8 @@ Cada uno con su "cuándo se paga" en [PLAN-FASES.md](PLAN-FASES.md):
   peticiones** (qué pods pueden enviar tráfico por el Gateway); no sustituye
   al control de egress. Riesgo aceptado en el MVP: no hay requisito de aislar
   entre sí a los clientes *dentro* de `logistics`. Control futuro: L7/auth en
-  el Gateway + policies por servicio, Fase 1.5.
+  el Gateway + policies por servicio, Trayecto 1.5 (itinerario formativo, no
+  una Fase — ver la Nomenclatura de [PLAN-FASES.md](PLAN-FASES.md)).
 - **Egress S3 de los pods PG = `world:443`** (fix de INCIDENTS #15): abre
   todo el 443 saliente desde la capa de DATOS — un canal de exfiltración
   que contradice la postura zero-trust de la casa. Refinamiento **ratificado

@@ -15,7 +15,7 @@ numeraciones incompatibles describiendo el mismo trabajo:
 
 | Sistema | Qué era | Estado |
 |---|---|---|
-| **Fases 1-2-3** | Producto, del HANDOFF | **Único vigente** |
+| **Fases 1-2-3-4** | Producto, del HANDOFF | **Único vigente** |
 | Sprints 1-2 | Producto, del plan viejo | Historial fechado, al final |
 | "Fase 1.5" / "Fase 2" del path | Itinerario formativo de Cilium/observabilidad | Renombrado a **Trayecto** |
 
@@ -115,24 +115,30 @@ pregunta al agente si está bien, así que **un agente que se reporta sano con s
 propio datapath roto sigue sin detectarse**. Queda abierto, y no es lo mismo
 que lo que se ha cerrado.
 
-### Piezas restantes (orden por decidir tras la pieza 0)
+### Piezas restantes, en orden
 
-- **Multi-AZ** — cierra la deuda de resiliencia zonal (hoy: una AZ, cross-zone
-  off, HA de nodo pero no zonal).
-- **GitOps / ArgoCD** — retira el `helm --set imageTag=<SHA>` y el refresh
-  manual de `K8S_SERVER`/`K8S_CA_DATA`.
-- **DNS y certificados reales** — hoy `selfsigned` y sin Route53.
-- **Backup de Kafka** — deuda declarada en S2-1; entra si algún topic carga
-  estado que importe.
-- **Rotación de secretos / External Secrets** — cierra la rotación manual de
-  las access keys de barman y la reproyección por `make platform`.
-- **DR cross-region**.
+- **Pieza 1 — VPC gateway endpoint de S3** (+ regla por prefix-list en el SG).
+  Cierra el `world:443` de egress de los pods PG (INCIDENTS #15): hoy la capa
+  de DATOS tiene todo el 443 saliente abierto, que es un canal de exfiltración
+  contra la postura de la casa. Coste cero, elimina el tránsito por IGW y
+  abarata el transfer de backups.
+- **Pieza 2 — Multi-AZ.** Cierra la deuda de resiliencia zonal (hoy: una AZ,
+  cross-zone off, HA de nodo pero no zonal). **Se verifica con la app
+  levantada a mano si hace falta** ejercitar la replicación de PG y de Kafka
+  entre zonas: la topología multi-AZ no está probada hasta que el dato cruza
+  de verdad, y para eso tiene que haber dato.
+- **Pieza 3 — DNS y certificados reales.** Hoy `selfsigned` y sin Route53.
+- **Pieza 4 — Rotación de secretos / External Secrets.** Cierra la rotación
+  manual de las access keys de barman y la reproyección por `make platform`.
+
+**Al cerrar la pieza 4: una decisión, no un compromiso.** Sobre **backup de
+Kafka** (deuda declarada en S2-1) y **DR cross-region**, a la luz del **coste
+real acumulado** para entonces — no de la estimación de hoy. Las dos pueden
+salir "no, todavía no" y eso es un resultado válido de la decisión; lo que no
+vale es arrastrarlas sin decidir.
 
 ### Ya asignadas a esta fase por decisiones previas
 
-- **VPC gateway endpoint de S3 + regla por prefix-list**: cierra el
-  `world:443` de egress de los pods PG (INCIDENTS #15). Ratificado como
-  primera tarea de este bloque.
 - **Bucket propio para los objetos de bootstrap**: hoy los renders viven junto
   a `etcd/` y `cnpg/` en el bucket persistente. Descartado a propósito en su
   momento por la superficie de permisos que exigiría; revisar aquí, cuando el
@@ -142,14 +148,68 @@ que lo que se ha cerrado.
 
 ---
 
-## Fase 3 — Mini-proyectos de operación
+## Fase 3 — Plataforma
 
-Ejecutar en vivo lo que hoy solo existe como runbook. Estado real de partida,
-sin redondear:
+Aquí el cluster deja de ser el producto y pasa a ser el sustrato: lo que se
+construye es la **interfaz** por la que alguien que no lo administra consigue
+lo que necesita.
+
+**Cada pieza se monta Y SE USA antes de pasar a la siguiente.** No se montan
+las cuatro para empezar a usarlas al final: una plataforma diseñada sin nadie
+usándola es diseño a ciegas, y los huecos aparecen al primer uso real, no en
+la revisión del diseño. El orden de abajo es también el orden en que cada
+pieza empieza a llevar carga.
+
+### Piezas, en orden
+
+- **Pieza 1 — GitOps con ArgoCD**, y **logistics-lab desplegándose por él de
+  inmediato**. No es "instalar ArgoCD y ya veremos": la pieza no está hecha
+  hasta que el despliegue real pasa por ahí. Con eso mueren dos cosas
+  concretas que hoy son manuales: el `helm --set imageTag=<SHA>` y el refresh
+  a mano de `K8S_SERVER` / `K8S_CA_DATA` tras cada recreate (el handoff
+  descrito en [CLUSTER.md](CLUSTER.md) §4).
+- **Pieza 2 — Observabilidad: SLOs, alertas, OTel.** Validada **sobre los
+  cuatro servicios reales**, no sobre un ejemplo. Un SLO sin un servicio que
+  lo incumpla alguna vez no está probado.
+- **Pieza 3 — Crossplane**, con **un servicio nuevo que pide su base de datos
+  por claim**. La composición se diseña **contra esa petición concreta**, no
+  en abstracto: es la diferencia entre una abstracción que resuelve un caso y
+  una que adivina diez.
+- **Pieza 4 — Backstage, al final**, y al final por una razón: su catálogo y
+  sus plantillas **describen lo que ya existe**. Puesto primero, describiría
+  intenciones.
+
+### Regla de método de la fase
+
+**En el papel de desarrollador no se toca nada fuera del Repo 2.** Si hace
+falta infraestructura, **la da la plataforma por su interfaz o no la hay**.
+
+Cada vez que haya que salirse —abrir el repo de infra, correr un `make`,
+tocar AWS a mano— **eso es un hueco de la plataforma y se registra**. No es
+una molestia del ejercicio: es el hallazgo. Una excepción sin registrar es una
+carencia que se vuelve invisible en cuanto se resuelve a mano.
+
+### Criterio de coronación
+
+**Añadir un servicio nuevo de cero a producción sin salir del Repo 2 ni del
+portal, cronometrado.**
+
+Cronometrado porque el número es el resultado: "se puede" es compatible con
+tardar dos días, y una plataforma que tarda dos días en dar de alta un
+servicio no ha sustituido a nadie. La cifra que salga es la línea base, no un
+aprobado o un suspenso.
+
+---
+
+## Fase 4 — Hands-on de infraestructura
+
+La antigua Fase 3. Ejecutar en vivo lo que hoy solo existe como runbook.
+Estado real de partida, sin redondear:
 
 - **Upgrade de Cilium en vivo con drenaje coordinado (4a-v3)**: revisado y
   listo como runbook, **NUNCA ejecutado**. Su primera ejecución es un
-  mini-proyecto, no una re-ejecución. Bloqueado por la pieza 0 de Fase 2.
+  mini-proyecto, no una re-ejecución. **Su bloqueo se levantó el 31-ago-2026**:
+  dependía de la pieza 0 de Fase 2, ya coronada.
 - **Escalera de Gateway API (4b)**: **ejecutada y coronada en vivo**. No se
   repite.
 - **Upgrade de Kubernetes (4c)**: runbook en estado `ESQUELETO`
@@ -283,7 +343,7 @@ en [HANDOFF.md](HANDOFF.md). Smoke de entonces: 38/38, run `31880994078`.
 | 1. Backups con restore probado | 👑 CORONADA — drill etcd 58 s, drill CNPG 121 s, bucket superviviente a 2 destroys |
 | 2. LB de entrada real (NLB) | 👑 CORONADA — smoke §13 5/5 ×2, e2e por el DNS del NLB, negativa en las 3 IPs |
 | 3. HA del control plane | 👑 CORONADA — 7/7 criterios, restore HA 193 s, acceso OOB restaurado |
-| 4. Upgrade del cluster en vivo | **NUNCA EJECUTADA** → migrada a Fase 3 |
+| 4. Upgrade del cluster en vivo | **NUNCA EJECUTADA** → migrada a Fase 4 |
 
 **El criterio de coronación del Sprint 2 no se cumplió íntegro**: exigía
 "upgrade minor completado con la app sirviendo tráfico" y esa pieza no se
