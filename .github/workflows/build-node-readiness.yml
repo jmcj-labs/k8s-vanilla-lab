@@ -1,0 +1,109 @@
+name: Build node-readiness
+
+# Builds, scans and pushes the per-node readiness aggregator (INCIDENTS #20)
+# and prints the DIGEST to pin in the DaemonSet.
+#
+# Manual on purpose. This image has its OWN lifecycle: it is rebuilt when the
+# binary changes, never on every apply. Its repository lives in the persistent
+# stack precisely so the pinned digest keeps naming something that exists after
+# a cluster destroy.
+on:
+  workflow_dispatch:
+    inputs:
+      canary:
+        description: 'Set to "canary" to exercise push+delete and verify the IAM grant without publishing a real image'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-west-1
+  REPOSITORY: k8s-vanilla-lab-node-readiness
+
+jobs:
+  build:
+    name: Build and push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: login
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          REGISTRY="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${REGISTRY}"
+          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
+
+      # THE VERIFICATION OF THE GRANT, exercised rather than simulated. The role
+      # is assumable here and only here, so this is where the real cycle can be
+      # run: push a throwaway image and delete it again. simulate-principal-policy
+      # would only confirm the list we wrote (INCIDENTS #26).
+      - name: Canary — exercise push and delete
+        if: ${{ inputs.canary == 'canary' }}
+        run: |
+          set -euo pipefail
+          REG="${{ steps.login.outputs.registry }}"
+          TAG="canary-${GITHUB_RUN_ID}"
+          printf 'FROM scratch\nCOPY canary.txt /canary.txt\n' > Dockerfile.canary
+          echo "${GITHUB_RUN_ID}" > canary.txt
+          docker build -f Dockerfile.canary -t "${REG}/${REPOSITORY}:${TAG}" .
+          docker push "${REG}/${REPOSITORY}:${TAG}"
+          echo "✓ push works"
+          DIG=$(aws ecr describe-images --repository-name "${REPOSITORY}" \
+            --image-ids imageTag="${TAG}" --query 'imageDetails[0].imageDigest' --output text)
+          echo "✓ describe-images works: ${DIG}"
+          aws ecr batch-delete-image --repository-name "${REPOSITORY}" \
+            --image-ids imageDigest="${DIG}" --query 'imageIds[0].imageDigest' --output text
+          echo "✓ delete works — the grant covers the whole cycle, exercised not simulated"
+
+      - name: Build image
+        if: ${{ inputs.canary != 'canary' }}
+        run: |
+          set -euo pipefail
+          REG="${{ steps.login.outputs.registry }}"
+          # The tag is the commit that built it; the DIGEST is what gets pinned.
+          docker build -t "${REG}/${REPOSITORY}:${GITHUB_SHA}" platform/node-readiness
+
+      - name: Scan with Trivy (fails on HIGH/CRITICAL)
+        if: ${{ inputs.canary != 'canary' }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.login.outputs.registry }}/k8s-vanilla-lab-node-readiness:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+      - name: Push and print the digest to pin
+        if: ${{ inputs.canary != 'canary' }}
+        run: |
+          set -euo pipefail
+          REG="${{ steps.login.outputs.registry }}"
+          docker push "${REG}/${REPOSITORY}:${GITHUB_SHA}"
+          DIGEST=$(aws ecr describe-images --repository-name "${REPOSITORY}" \
+            --image-ids imageTag="${GITHUB_SHA}" \
+            --query 'imageDetails[0].imageDigest' --output text)
+          echo ""
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  PIN THIS in platform/manifests/node-readiness.yaml:"
+          echo ""
+          echo "  ${REG}/${REPOSITORY}@${DIGEST}"
+          echo "════════════════════════════════════════════════════════════════"
+          {
+            echo "### node-readiness image"
+            echo ""
+            echo '```'
+            echo "${REG}/${REPOSITORY}@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

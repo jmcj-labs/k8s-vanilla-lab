@@ -158,3 +158,61 @@ resource "aws_iam_user_policy" "cnpg_backup" {
     ]
   })
 }
+
+# ── Platform artefacts ────────────────────────────────────────────────────────
+#
+# This stack now custodies TWO classes of thing, and they are not the same kind
+# of persistent:
+#
+#   - conservation data (the backups bucket): survives so a total destroy of
+#     the cluster loses nothing;
+#   - platform artefacts (this image): survives because the DaemonSet that
+#     consumes it is PINNED BY DIGEST in the repo. If the repository died with
+#     the cluster, that digest would name something that no longer exists and
+#     the next apply would come up with a broken component.
+#
+# Its lifecycle is its own: rebuilt when the binary changes, never on every
+# apply. That is why there is no force_delete here — unlike the application
+# repositories in the lab stack, which are ephemeral by design.
+resource "aws_ecr_repository" "node_readiness" {
+  name = "${var.cluster_name}-node-readiness"
+
+  # IMMUTABLE, like the app repositories: a digest is a promise.
+  image_tag_mutability = "IMMUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "AES256"
+  }
+
+  # NO force_delete: destroying this repository is a deliberate act, not a
+  # side effect of tearing down a cluster.
+
+  tags = {
+    Name      = "${var.cluster_name}-node-readiness"
+    Component = "platform"
+    ManagedBy = "opentofu"
+  }
+}
+
+resource "aws_ecr_lifecycle_policy" "node_readiness" {
+  repository = aws_ecr_repository.node_readiness.name
+
+  policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Keep the last 10 images; the pinned digest is always among the newest."
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 10
+        }
+        action = { type = "expire" }
+      }
+    ]
+  })
+}
