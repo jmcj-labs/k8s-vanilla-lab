@@ -48,3 +48,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "readiness_port" {
+  description = "Port of the per-node readiness aggregator the gateway target group health-checks (Pieza 0 / INCIDENTS #20)"
+  type        = number
+  default     = 9890
+}

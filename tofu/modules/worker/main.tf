@@ -46,6 +46,28 @@ resource "aws_security_group" "worker" {
     security_groups = [var.nlb_security_group_id]
   }
 
+  # Per-node readiness aggregator (Pieza 0 / INCIDENTS #20). INLINE, like every
+  # other rule on THIS security group. #6 is often quoted as "never inline",
+  # but what it actually says is never MIX: inline rules are enforced as the
+  # complete set, so a standalone rule attached to an inline-managed SG gets
+  # deleted on the next apply. The control-plane SG is all-standalone; this one
+  # is all-inline. A standalone rule here would have been the very bug #6
+  # records, pointing the other way.
+  #
+  # WHAT THIS RULE DOES, and not more: it admits the NLB's security group. It
+  # does NOT make 9890 reachable *only* from there -- security group rules are
+  # additive, and the two rules below (self = true, and all-from-control-plane)
+  # already cover every port on this SG, 9890 included. What this buys is that
+  # the port is closed to the world and to anything outside the VPC, which is
+  # what matters for an endpoint that reports whether a node can serve.
+  ingress {
+    description     = "Node readiness aggregator: NLB health checks (also reachable from workers and CPs via the broader rules)"
+    from_port       = var.readiness_port
+    to_port         = var.readiness_port
+    protocol        = "tcp"
+    security_groups = [var.nlb_security_group_id]
+  }
+
   # Allow all traffic between workers (pod-to-pod communication)
   ingress {
     description = "Worker to worker communication"

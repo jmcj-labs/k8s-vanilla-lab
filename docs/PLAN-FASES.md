@@ -70,18 +70,28 @@ nunca dejó de aceptar, así que el check no falló ni pudo fallar por cola llen
 Evidencia en [`evidence/h3-2026-08-31/`](evidence/h3-2026-08-31/); cierre del
 incidente en [INCIDENTS.md](INCIDENTS.md) #20.
 
-#### Lo que la pieza tiene que resolver
+#### Lo que resuelve, y cómo
 
-Que el balanceador reciba la señal que Kubernetes ya tiene. Un endpoint
-agregador por nodo que responda 200 solo con el **AND** del agente y de Envoy
-—ambos sirven `/healthz`, pero **solo en loopback**, así que el NLB no los
-alcanza y hay que construir el agregador, no repuntar el check a un puerto
-existente.
+Que el balanceador reciba la señal que Kubernetes ya tiene. `node-readiness`
+—`platform/node-readiness/`, ya **no** un prototipo— corre como DaemonSet
+`hostNetwork` **solo en los workers**, escucha en `0.0.0.0:9890` y responde 200
+únicamente con el **AND** de `127.0.0.1:9879` (agente) y `127.0.0.1:9878`
+(Envoy). Ambos sirven `/healthz` pero **solo en loopback**, y por eso había que
+construir el agregador en vez de repuntar el check a un puerto existente.
 
-Hay un prototipo en `platform/node-readiness/` que **NO está desplegado**, con
-sus decisiones de diseño y su tabla de tiempos ya razonadas. Si es la forma
-correcta se decide al abordar la pieza; lo que ya no está en discusión es el
-problema.
+| pieza | dónde |
+|---|---|
+| imagen, fijada por digest | repo ECR en el stack `persistent`; se reconstruye con `.github/workflows/build-node-readiness.yml` |
+| DaemonSet | `platform/manifests/node-readiness.yaml`, paso 6/13 de `platform/install.sh` |
+| regla de SG | 9890/tcp en el SG de workers, **solo desde el SG del NLB**, standalone (INCIDENTS #6) |
+| health check | TG del gateway: `HTTP` `:9890` `/healthz`, `matcher 200`, `interval 10`, umbrales `2`/`2` — **explícitos**, no heredados |
+
+#### El límite que NO cierra
+
+El experimento mató a **Envoy**, no al datapath del agente. Este endpoint le
+pregunta al agente si está bien, así que **un agente que se reporta sano con su
+propio datapath roto sigue sin detectarse**. Queda abierto, y no es lo mismo
+que lo que se ha cerrado.
 
 ### Piezas restantes (orden por decidir tras la pieza 0)
 
@@ -149,9 +159,11 @@ Fases.
 
 Aprobado y pendiente, fuera del camino crítico:
 
-- **Higiene de repo**: archivar runbooks a `docs/operations/`, borrar
-  prototipos muertos, podar ramas mergeadas y divergentes. El número de ramas
-  a podar está **sin verificar**.
+- **Higiene de repo**: archivar runbooks a `docs/operations/`, podar ramas
+  mergeadas y divergentes. El número de ramas a podar está **sin verificar**.
+  *(«Borrar prototipos muertos» sale de esta entrada: el único que había,
+  `platform/node-readiness/`, dejó de ser prototipo — es el componente de la
+  Pieza 0.)*
 - **Guía para dummies** de crear-cuenta-AWS hasta el borde final, con sección
   de última milla a PROD real.
 - **Rol OIDC partido en dos** (read-only para PR/validate, completo para
