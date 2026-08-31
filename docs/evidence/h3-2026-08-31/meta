@@ -1,0 +1,12 @@
+cluster=k8s-vanilla-lab region=eu-west-1 nodeport=30443
+tg=arn:aws:elasticloadbalancing:eu-west-1:487985088962:targetgroup/k8s-vanilla-lab-gw-tg/910ca99b615f80af
+nlb=k8s-vanilla-lab-gw-nlb-95d13b04ce80db37.elb.eu-west-1.amazonaws.com
+probe_host=i-09615d24428d8c0de
+interval_target=5s
+worker_count=3
+--- identity map: instance-id  private-ip  nodeName ---
+i-04c78fcdcb32eb068  10.0.1.234  ip-10-0-1-234
+i-09e3a3c07eccd589c  10.0.1.55  ip-10-0-1-55
+i-0fb42ebdb173ce03f  10.0.1.218  ip-10-0-1-218
+started=2026-08-31T09:40:52Z
+stopped=2026-08-31T09:45:57Z

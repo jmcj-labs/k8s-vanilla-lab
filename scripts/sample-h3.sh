@@ -137,7 +137,11 @@ REMOTE_CMD=${REMOTE_CMD//__PORT__/${GATEWAY_NODEPORT}}
 
 probe_workers() {
   local cid st out rc i payload
-  payload=$(printf '%s' "${REMOTE_CMD}" | python3 -c 'import json,sys; print(json.dumps({"commands":[sys.stdin.read()]}))')
+  # --cli-input-json takes the API shape, not just the parameter map: the
+  # commands list lives under Parameters. Getting this wrong is rc 252 and the
+  # series showed ERROR:send-command-rc252 rather than a plausible value, which
+  # is the fail-closed behaviour doing its job.
+  payload=$(printf '%s' "${REMOTE_CMD}" | python3 -c 'import json,sys; print(json.dumps({"Parameters":{"commands":[sys.stdin.read()]}}))')
   set +e
   cid=$(aws ssm send-command --region "${AWS_REGION}" --instance-ids "${PROBE_HOST}" \
     --document-name AWS-RunShellScript --cli-input-json "${payload}" \
