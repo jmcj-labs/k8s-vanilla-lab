@@ -6,7 +6,7 @@
 # point is that `tofu destroy` of the cluster can be total (PVC volumes
 # included) without losing anything: S3 is the conservation path.
 #
-# PLAN-SPRINTS S2 piece 1: "sin restore probado no es backup".
+# PLAN-FASES S2 piece 1: "sin restore probado no es backup".
 
 data "aws_caller_identity" "current" {}
 

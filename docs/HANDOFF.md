@@ -5,7 +5,7 @@ evidencia del Sprint 1 (15-ago) se conserva íntegra al final, como sección
 histórica: no se borra, se fecha.
 
 **Fuente de verdad: el repo.** Este documento resume; los detalles viven en
-[PLAN-SPRINTS.md](PLAN-SPRINTS.md), [INCIDENTS.md](INCIDENTS.md) y
+[PLAN-FASES.md](PLAN-FASES.md), [INCIDENTS.md](INCIDENTS.md) y
 [CLUSTER.md](CLUSTER.md).
 
 ---
@@ -175,7 +175,7 @@ EBS, IPv4 pública, NLCU ni transferencia, así que la factura real será mayor.
 
 ## Deuda y pendientes
 
-Backlog ejecutable en [PLAN-SPRINTS.md](PLAN-SPRINTS.md). Además:
+Backlog ejecutable en [PLAN-FASES.md](PLAN-FASES.md). Además:
 
 - **Higiene de repo**, aprobada y pendiente: archivar runbooks a
   `docs/operations/`, borrar prototipos muertos, podar ramas mergeadas y
@@ -228,7 +228,7 @@ punto y observado en real, no solo por checks internos.
 
 ### Lo que quedaba entonces — Road to go-live
 
-Por orden ([PLAN-SPRINTS.md](PLAN-SPRINTS.md)): backups con restore probado
+Por orden ([PLAN-FASES.md](PLAN-FASES.md)): backups con restore probado
 (primero, nunca tocar etcd sin backup) → NLB de entrada → HA del control
 plane → upgrade en vivo. Más la automatización de los dos residuos del
 destroy (EBS huérfanos, variable stale de Repo 2).

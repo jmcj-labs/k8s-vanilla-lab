@@ -1537,7 +1537,7 @@ al rol de CI el **ciclo de vida completo de buckets** (`CreateBucket`,
 `DeleteBucket`, políticas, versionado), bastante más superficie que tres
 acciones sobre un prefijo. El fix es tres acciones sobre
 `bootstrap/k8s-vanilla-lab/*`, y nada sobre `etcd/` ni `cnpg/`. El diseño del
-bucket propio queda anotado en `docs/PLAN-SPRINTS.md` como nota de fase 2.
+bucket propio queda anotado en `docs/PLAN-FASES.md` como nota de fase 2.
 
 ### Fix y regla
 
