@@ -27,16 +27,8 @@ render() {
   bash -n "$destination"
 }
 
-# The founder now embeds a digest manifest for the vendored Gateway API CRDs.
-# Real digests, so the rendered script is the shape that actually ships.
-GWMAN='"'
-for f in "$ROOT"/bootstrap/gateway-api/v1.6.1/*.yaml; do
-  GWMAN="${GWMAN}$(shasum -a 256 "$f" | awk '{print $1}')  $(basename "$f")\n"
-done
-GWMAN="${GWMAN}'"
-
 COMMON='cluster_name="k8s-vanilla-lab",aws_region="eu-west-1",api_endpoint_dns="example.invalid",ssm_parameter_path="/k8s/k8s-vanilla-lab"'
-render "templatefile(\"$ROOT/bootstrap/control-plane.yaml\",{$COMMON,pod_cidr=\"10.244.0.0/16\",service_cidr=\"10.96.0.0/12\",api_target_group_arn=\"arn:aws:elasticloadbalancing:eu-west-1:111122223333:targetgroup/api/123\",kpr_gate_library=file(\"$ROOT/bootstrap/kpr-gate.sh\"),gateway_api_version=\"v1.6.1\",gateway_api_manifest=$GWMAN,bootstrap_bucket=\"bucket\",bootstrap_prefix=\"bootstrap/k8s-vanilla-lab\"})" "$TMP/founder.sh"
+render "templatefile(\"$ROOT/bootstrap/control-plane.yaml\",{$COMMON,pod_cidr=\"10.244.0.0/16\",service_cidr=\"10.96.0.0/12\",api_target_group_arn=\"arn:aws:elasticloadbalancing:eu-west-1:111122223333:targetgroup/api/123\",kpr_gate_library=file(\"$ROOT/bootstrap/kpr-gate.sh\"),gateway_api_version=\"v1.6.1\",gateway_api_manifest=\"0000000000000000000000000000000000000000000000000000000000000000  gateway.networking.k8s.io_gatewayclasses.yaml\",bootstrap_bucket=\"bucket\",bootstrap_prefix=\"bootstrap/k8s-vanilla-lab\"})" "$TMP/founder.sh"
 render "templatefile(\"$ROOT/bootstrap/control-plane-join.yaml\",{$COMMON,cp_index=1,cp_count=3,joined_count_library=file(\"$ROOT/bootstrap/joined-count.sh\")})" "$TMP/join.sh"
 render "templatefile(\"$ROOT/bootstrap/worker.yaml\",{cluster_name=\"k8s-vanilla-lab\",aws_region=\"eu-west-1\",ssm_join_token_path=\"/k8s/k8s-vanilla-lab/join-command\",ssm_ca_cert_hash_path=\"/k8s/k8s-vanilla-lab/ca-cert-hash\"})" "$TMP/worker.sh"
 
