@@ -180,15 +180,36 @@ EBS, IPv4 pública, NLCU ni transferencia, así que la factura real será mayor.
 
 ## Plan
 
+Cuatro Fases. Detalle y estado en [PLAN-FASES.md](PLAN-FASES.md), que es la
+fuente; esto es el resumen.
+
 - **Fase 1 — bootstrap directo al estado final: CORONADA (27-ago).**
-- **Fase 2 — SIGUIENTE**: multi-AZ, GitOps/ArgoCD, DNS y certificados reales,
-  backup de Kafka, rotación de secretos, DR cross-region. El riesgo principal
-  es de alcance, no técnico: timeboxing estricto por frente.
-- **Fase 3**: mini-proyectos de operación. Estado real de partida: la escalera
-  de Gateway API (4b) fue **ejecutada y coronada en vivo**; el upgrade de
-  Cilium en vivo con drenaje coordinado (4a-v3) está **revisado y listo como
-  runbook pero NUNCA ejecutado** — su primera ejecución es un mini-proyecto,
-  no una re-ejecución.
+- **Fase 2 — profesionalizar el cluster · EN CURSO.** Pieza 0 (readiness por
+  nodo) **CORONADA el 31-ago**. Siguen, en orden: (1) VPC gateway endpoint de
+  S3, (2) multi-AZ —verificada con la app levantada a mano si hace falta
+  ejercitar la replicación de PG y Kafka entre zonas—, (3) DNS y certificados
+  reales, (4) rotación de secretos / External Secrets. Al cerrar la 4,
+  **decisión —no compromiso—** sobre backup de Kafka y DR cross-region, a la
+  luz del coste real acumulado. El riesgo principal es de alcance, no técnico:
+  timeboxing estricto por frente.
+- **Fase 3 — plataforma.** GitOps con ArgoCD (con logistics-lab desplegándose
+  por él de inmediato), observabilidad con SLOs/alertas/OTel sobre los cuatro
+  servicios reales, Crossplane con un servicio nuevo que pide su BD por claim,
+  y Backstage al final —porque describe lo que ya existe—. **Cada pieza se
+  monta y se usa antes de pasar a la siguiente.** Regla de método: en el papel
+  de desarrollador no se toca nada fuera del Repo 2; si hace falta
+  infraestructura, la da la plataforma por su interfaz o no la hay, y **cada
+  excepción es un hueco de la plataforma y se registra**. Corona cuando se
+  añade un servicio nuevo de cero a producción sin salir del Repo 2 ni del
+  portal, **cronometrado**.
+- **Fase 4 — hands-on de infraestructura** (la antigua Fase 3). Estado real de
+  partida: la escalera de Gateway API (4b) fue **ejecutada y coronada en
+  vivo**; el upgrade de Cilium en vivo con drenaje coordinado (4a-v3) está
+  **revisado y listo como runbook pero NUNCA ejecutado** — su primera
+  ejecución es un mini-proyecto, no una re-ejecución, y su bloqueo (la pieza 0
+  de Fase 2) se levantó el 31-ago. Además: upgrade de Kubernetes (4c, runbook
+  en esqueleto), upgrade del operador Strimzi y la pieza 4 heredada del
+  Sprint 2.
 
 ## Deuda y pendientes
 
