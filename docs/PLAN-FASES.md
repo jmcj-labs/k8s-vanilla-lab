@@ -74,7 +74,7 @@ incidente en [INCIDENTS.md](INCIDENTS.md) #20.
 
 Que el balanceador reciba la señal que Kubernetes ya tiene. `node-readiness`
 —`platform/node-readiness/`, ya **no** un prototipo— corre como DaemonSet
-`hostNetwork` **solo en los workers**, escucha en `0.0.0.0:9890` y responde 200
+`hostNetwork` **solo en los workers**, escucha en `0.0.0.0:8910` y responde 200
 únicamente con el **AND** de `127.0.0.1:9879` (agente) y `127.0.0.1:9878`
 (Envoy). Ambos sirven `/healthz` pero **solo en loopback**, y por eso había que
 construir el agregador en vez de repuntar el check a un puerto existente.
@@ -83,8 +83,8 @@ construir el agregador en vez de repuntar el check a un puerto existente.
 |---|---|
 | imagen, fijada por digest | repo ECR en el stack `persistent`; se reconstruye con `.github/workflows/build-node-readiness.yml` |
 | DaemonSet | `platform/manifests/node-readiness.yaml`, paso 6/13 de `platform/install.sh` |
-| regla de SG | 9890/tcp en el SG de workers, **solo desde el SG del NLB**, standalone (INCIDENTS #6) |
-| health check | TG del gateway: `HTTP` `:9890` `/healthz`, `matcher 200`, `interval 10`, umbrales `2`/`2` — **explícitos**, no heredados |
+| regla de SG | 8910/tcp en el SG de workers, **solo desde el SG del NLB**, standalone (INCIDENTS #6) |
+| health check | TG del gateway: `HTTP` `:8910` `/healthz`, `matcher 200`, `interval 10`, umbrales `2`/`2` — **explícitos**, no heredados |
 
 #### El límite que NO cierra
 

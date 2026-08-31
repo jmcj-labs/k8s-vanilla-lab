@@ -31,6 +31,14 @@ spec:
         app.kubernetes.io/name: node-readiness
         app.kubernetes.io/component: platform
     spec:
+      # PORT 8910, and the reason is measured: cilium-agent already listens on
+      # 127.0.0.1:9890 -- the port this component was originally written for --
+      # so binding 0.0.0.0:9890 fails with "address already in use". Cilium
+      # holds 4240, 4244, 9234, 9878, 9879, 9890, 9891, 9963 and 9964 on a
+      # worker, so a neighbouring port is a bet on Cilium not growing. 8910 sits
+      # clear of that block, of the kubelet's 102xx, of the exporters' 90xx/91xx,
+      # of the NodePort range and of the ephemeral range (32768+).
+      #
       # hostNetwork: the aggregator asks the agent and Envoy over LOOPBACK,
       # because both bind 127.0.0.1 only -- that is the whole reason it has to
       # exist instead of repointing the health check at an existing port.
@@ -58,12 +66,12 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: readiness
-              containerPort: 9890
-              hostPort: 9890
+              containerPort: 8910
+              hostPort: 8910
               protocol: TCP
           env:
             - name: LISTEN_ADDR
-              value: ":9890"
+              value: ":8910"
             - name: AGENT_HEALTH_URL
               value: "http://127.0.0.1:9879/healthz"
             - name: ENVOY_HEALTH_URL
@@ -86,17 +94,17 @@ spec:
           # matters most.
           startupProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             failureThreshold: 15
             periodSeconds: 2
           livenessProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             periodSeconds: 20
             failureThreshold: 3
           readinessProbe:
             tcpSocket:
-              port: 9890
+              port: 8910
             periodSeconds: 10
             failureThreshold: 3
       terminationGracePeriodSeconds: 5

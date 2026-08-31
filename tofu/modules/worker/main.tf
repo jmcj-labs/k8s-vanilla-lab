@@ -55,9 +55,9 @@ resource "aws_security_group" "worker" {
   # records, pointing the other way.
   #
   # WHAT THIS RULE DOES, and not more: it admits the NLB's security group. It
-  # does NOT make 9890 reachable *only* from there -- security group rules are
+  # does NOT make 8910 reachable *only* from there -- security group rules are
   # additive, and the two rules below (self = true, and all-from-control-plane)
-  # already cover every port on this SG, 9890 included. What this buys is that
+  # already cover every port on this SG, 8910 included. What this buys is that
   # the port is closed to the world and to anything outside the VPC, which is
   # what matters for an endpoint that reports whether a node can serve.
   ingress {

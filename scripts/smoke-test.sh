@@ -228,7 +228,7 @@ OK "node-readiness absent from every control plane (the Gateway does not serve t
 
 # The endpoint itself, on each worker's own address and port -- the same ones
 # the NLB probes.
-NR_PORT="${READINESS_PORT:-9890}"
+NR_PORT="${READINESS_PORT:-8910}"
 NR_BAD=""
 for NR_IP in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
     -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}'); do

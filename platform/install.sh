@@ -283,7 +283,7 @@ NR_ON_CP=$(kubectl -n infra get pods -l app.kubernetes.io/name=node-readiness \
       -o jsonpath='{.metadata.labels}' | grep -q 'node-role.kubernetes.io/control-plane' && echo "$n"; done | wc -l | tr -d ' ')
 [ "${NR_ON_CP}" -eq 0 ] \
   || { echo "✗ node-readiness scheduled on ${NR_ON_CP} control plane(s)" >&2; exit 1; }
-log "✓ node-readiness ${NR_READY}/${NR_DESIRED} Ready on workers only, listening on :9890"
+log "✓ node-readiness ${NR_READY}/${NR_DESIRED} Ready on workers only, listening on :${READINESS_PORT:-8910}"
 
 log "Step 7/13: CloudNativePG operator (chart ${CNPG_CHART_VERSION})"
 ensure_clean_release data cnpg
