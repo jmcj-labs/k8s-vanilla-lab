@@ -1916,3 +1916,81 @@ distintas, a declarar que un nodo servía mientras el agregador no respondía.
 Con el health check TCP anterior los tres nodos habrían estado `healthy` desde
 el primer minuto — que es exactamente el falso positivo de #20. Es la mejor
 evidencia que tenemos de que la pieza hace su trabajo, y llegó gratis.
+
+---
+
+## 29. La comprobación que mataba la instalación justo cuando pasaba
+
+**Fecha**: 2026-08-31
+**Pieza**: Fase 2, pieza 0
+**Detectado por**: el hierro — `make platform` salía `Error 1` sin imprimir nada
+**Estado**: CERRADO (PR #101)
+
+### El síntoma
+
+`make platform` moría al final del paso 6, **después** de que el DaemonSet
+hiciera rollout correctamente y **sin ningún mensaje de error**:
+
+```
+[15:04:57] Step 6/13: Per-node readiness aggregator (INCIDENTS #20)
+daemonset.apps/node-readiness unchanged
+daemon set "node-readiness" successfully rolled out
+make: *** [platform] Error 1
+```
+
+Ninguna de las dos guardas del paso 6 imprimió su `echo ... >&2`. El script se
+iba entre la última línea de `kubectl` y la primera de la guarda.
+
+### La causa
+
+La comprobación de que ningún pod está en un control plane:
+
+```sh
+NR_ON_CP=$(kubectl ... | while read -r n; do
+    [ -n "$n" ] && kubectl get node "$n" -o jsonpath='{.metadata.labels}' \
+      | grep -q 'node-role.kubernetes.io/control-plane' && echo "$n"; done | wc -l)
+```
+
+Con `set -euo pipefail`, y **el cuerpo del bucle terminando en una cadena `&&`**:
+cuando `grep -q` NO encuentra nada — el camino BUENO, ningún pod en un control
+plane — el cuerpo sale con estado 1. Ese 1 es el estado de la última iteración,
+o sea del `while`; `pipefail` lo propaga fuera de la tubería; la sustitución de
+comando hereda el 1; la asignación devuelve 1; y `set -e` mata el script.
+
+**La guarda mataba la instalación exactamente cuando la condición que vigilaba
+se cumplía.** Reproducible en cuatro líneas:
+
+```
+$ bash -c 'set -euo pipefail; X=$(printf "a\n" | while read -r n; do
+    [ -n "$n" ] && echo "$n" | grep -q ZZZ && echo "$n"; done | wc -l); echo "vivo"'
+$ echo $?
+1        # "vivo" nunca se imprime
+```
+
+### La segunda mitad, que era peor
+
+`kubectl ... | grep -q PATRON` manda **SIGPIPE a `kubectl` cuando grep SÍ
+encuentra**, porque `grep -q` cierra en el primer match. Con `pipefail` la
+tubería puede devolver 141 en el caso positivo, así que un pod realmente
+alojado en un control plane se habría contado como si no lo estuviera. La
+guarda tenía un falso negativo en su único cometido.
+
+### El fix
+
+Sin tubería en la prueba y sin cadena `&&` cerrando el cuerpo del bucle: `for`
+sobre nombres únicos, `kubectl` capturado a variable, y `case` para la
+coincidencia. `case` sin rama que encaje devuelve 0, así que el camino bueno ya
+no es un error. Ambos caminos probados aislados antes de tocar el cluster:
+`C=0 rc=0` sin match, `C=2 rc=0` con match.
+
+Estaba **duplicado** en `platform/install.sh` y en `scripts/smoke-test.sh` —
+copiado de uno a otro. Los dos corregidos.
+
+### Relación con #24
+
+Misma familia, mecanismo distinto. En #24 el silencio lo causaba `2>/dev/null`
+tragándose el diagnóstico; aquí lo causa `&&` como última sentencia de un
+cuerpo de bucle bajo `pipefail`. La regla común: **en un script con `set -euo
+pipefail`, ninguna condición debe expresarse como el estado de salida de la
+última sentencia de un bloque.** Si es una condición, va en un `if` o en un
+`case`, donde no coincidir es 0.
